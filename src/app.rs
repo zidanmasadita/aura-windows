@@ -3,10 +3,15 @@
 //! Zen (idle) -> hover -> Compact -> click/hover (with session) ->
 //! Expanded (music card) -> bubble -> Lyrics (700x180) -> bubble back
 //! to Expanded; click outside controls / leave -> Compact (with
-//! session) or Zen (silent). Timers: 0.25s tick (clock + GSMTC poll +
-//! MediaTracker wall-clock estimate + synchronous repaint for realtime
+//! session) or Zen (silent). Timers: 0.25s tick (clock + read of the
+//! GSMTC cache written by the background poller thread + MediaTracker
+//! wall-clock estimate + synchronous repaint for realtime
 //! lyrics/progress), 0.25s alert placeholder (Phase 4), 16ms
-//! (animation, only while animating).
+//! (animation, only while animating). The UI thread NEVER calls
+//! media::poll() or a control directly (Not Responding fix 2026-10-27:
+//! blocking WinRT `.get()` on the UI thread froze the message loop).
+
+use std::sync::{Arc, Mutex};
 
 use windows::core::{w, Result, PCWSTR};
 use windows::Win32::Foundation::*;
@@ -47,6 +52,7 @@ pub struct App {
     clock_text: String, // HH:MM, updated on 1s tick
     media: Option<media::MediaInfo>, // Current GSMTC session (Phase 1), None = silent.
     media_tracker: media::MediaTracker, // Wall-clock position estimate (realtime fix).
+    media_cache: Arc<Mutex<Option<media::MediaInfo>>>, // Written by the poller thread, read by the tick (never polled on UI thread).
     lyrics: Option<lyrics::LyricsCache>, // Fetched lyrics for current song (Phase 1b), None = not fetched yet.
     pomodoro: pomodoro::Pomodoro, // In-memory pomodoro timer (Phase 2).
     todo: todo::TodoList, // Tasks from todo.txt (Phase 2).
@@ -61,7 +67,7 @@ fn current_time_text() -> String {
 }
 
 impl App {
-    fn new(hwnd: HWND) -> Result<Box<Self>> {
+    fn new(hwnd: HWND, media_cache: Arc<Mutex<Option<media::MediaInfo>>>) -> Result<Box<Self>> {
         let renderer = renderer::Renderer::new()?;
         let mut app = Box::new(Self {
             hwnd,
@@ -72,6 +78,7 @@ impl App {
             clock_text: current_time_text(),
             media: None,
             media_tracker: media::MediaTracker::new(),
+            media_cache,
             lyrics: None,
             pomodoro: pomodoro::Pomodoro::new(),
             todo: todo::TodoList::load(),
@@ -162,11 +169,19 @@ impl App {
     fn on_timer(&mut self, id: usize) {
         match id {
             TIMER_TICK => {
-                // 0.25s tick: poll GSMTC + update clock + repaint NOW.
+                // 0.25s tick: read the poller-thread cache + update
+                // clock + repaint NOW. NEVER media::poll() here: a
+                // blocking WinRT call on this thread is what froze the
+                // window into "Not Responding" when music was playing.
                 // (Was 1s + async InvalidateRect; user report 2026-10-27:
                 // open lyrics panel did not advance until pill reopened,
                 // so paint synchronously here instead of queuing WM_PAINT.)
-                self.media = self.media_tracker.update(media::poll());
+                let cached = self
+                    .media_cache
+                    .lock()
+                    .ok()
+                    .and_then(|guard| guard.clone());
+                self.media = self.media_tracker.update(cached);
                 // Lyrics cache follows song: new song (or session end) clears
                 // cached lyrics; if the lyrics card is open for the old song,
                 // fall back to the music card for the new song (fetching new
@@ -266,19 +281,20 @@ impl App {
                 let in_rect =
                     |r: (f32, f32, f32, f32)| x >= r.0 && x <= r.2 && y >= r.1 && y <= r.3;
                 let playing = self.media.as_ref().map(|m| m.playing).unwrap_or(false);
+                // Controls run on a throwaway thread (never wait
+                // here): the next poller tick (<=250ms) refreshes the
+                // icon/progress. Waiting here used to freeze the window
+                // into "Not Responding" when the media app was slow.
                 if in_rect(renderer::MUSIC_PREV_RECT) {
-                    let _ = media::skip_previous();
-                    self.media = self.media_tracker.update(media::poll());
+                    media::skip_previous_async();
                 } else if in_rect(renderer::MUSIC_PLAY_RECT) {
                     if playing {
-                        let _ = media::pause();
+                        media::pause_async();
                     } else {
-                        let _ = media::play();
+                        media::play_async();
                     }
-                    self.media = self.media_tracker.update(media::poll());
                 } else if in_rect(renderer::MUSIC_NEXT_RECT) {
-                    let _ = media::skip_next();
-                    self.media = self.media_tracker.update(media::poll());
+                    media::skip_next_async();
                 } else if in_rect(renderer::MUSIC_LYRICS_BUBBLE_RECT) {
                     // Fetch lyrics lazily on first entry (blocking; may
                     // freeze briefly on slow networks — async is a follow-up).
@@ -686,8 +702,12 @@ pub fn run() -> Result<()> {
             hinstance,
             None,
         )?;
+        // Background GSMTC poller (started before App so the cache
+        // exists from the first tick; it writes the cache, UI only reads).
+        let media_cache = Arc::new(Mutex::new(None));
+        media::spawn_poller(media_cache.clone());
         // App (owns renderer + state). Store in USERDATA for WndProc.
-        let app = App::new(hwnd)?;
+        let app = App::new(hwnd, media_cache)?;
         let app_ptr = Box::into_raw(app);
         SetWindowLongPtrW(hwnd, GWLP_USERDATA, app_ptr as isize);
         // Tray icon (must be after window creation; uses hwnd).

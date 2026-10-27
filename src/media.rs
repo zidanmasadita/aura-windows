@@ -4,11 +4,22 @@
 //! Mac (which needed JXA because macOS 15.4+ blocks third-party
 //! MediaRemote reads). Covers Spotify, Chrome/Edge YouTube Music, etc.
 //!
-//! Polling every 0.25s (tick from app.rs): RequestAsync +
-//! GetCurrentSession + TryGetMediaPropertiesAsync + GetPlaybackInfo +
-//! GetTimelineProperties, all via blocking `.get()` on the WinRT async
-//! operations. GSMTC change events (CurrentSessionChanged, etc.) for
-//! instant updates are a follow-up if polling feels laggy.
+//! Polling every 0.25s: RequestAsync + GetCurrentSession +
+//! TryGetMediaPropertiesAsync + GetPlaybackInfo + GetTimelineProperties,
+//! all via blocking `.get()` on the WinRT async operations.
+//!
+//! BUG 2026-10-27 (dugaan dari kode, bukan dari log Windows): poll dan
+//! kontrol itu TADINYA jalan di UI thread (tick 250ms + klik tombol).
+//! Kalau satu panggilan WinRT `.get()` itu nunggu lama (mis. app media
+//! sibuk saat play), message loop ikut berhenti dan Windows menandai
+//! window "Not Responding". Karena itu sejak fix ini poll + kontrol
+//! TIDAK PERNAH jalan di UI thread lagi: poll jalan di satu thread
+//! latar yang menulis cache, kontrol jalan di thread sekali-pakai.
+//! UI thread (tick) hanya membaca cache — jadi kalaupun satu poll
+//! nyangkut, pill tetap responsif (progress/judul boleh beku, tapi
+//! window tidak Not Responding; itu sekaligus pemisah diagnostik:
+//! kalau setelah fix ini UI responsif tapi judul/progress beku,
+//! berarti poll GSMTC-nya yang nyangkut di app media itu).
 //!
 //! Position: GSMTC Position alone is NOT realtime for some apps (they
 //! set it on track change/seek only, not during playback), so App feeds
@@ -24,11 +35,67 @@
 //! it — Eve cannot compile Rust in this VM, so the first build on the
 //! user's Windows PC is where WinRT signatures get corrected.
 
+use std::sync::{Arc, Mutex};
+
 use windows::core::Result;
 use windows::Media::Control::{
     GlobalSystemMediaTransportControlsSession, GlobalSystemMediaTransportControlsSessionManager,
     GlobalSystemMediaTransportControlsSessionPlaybackStatus,
 };
+use windows::Win32::System::Com::{CoInitializeEx, COINIT_MULTITHREADED};
+
+/// Init COM (MTA) untuk thread pemanggil. Best-effort: kalau sudah
+/// di-init thread itu, hasilnya diabaikan (bukan error).
+fn init_com() {
+    unsafe {
+        let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
+    }
+}
+
+/// Start the background poller: one thread, every 250ms, poll GSMTC
+/// (blocking `.get()` is fine HERE, off the UI thread) and write the
+/// result into `cache`. The UI thread only ever reads `cache`, never
+/// calls poll() itself. A stuck poll only freezes the cache, never
+/// the window. Runs until the process exits (no shutdown handshake:
+/// the thread holds only the cache Arc, never the HWND).
+pub fn spawn_poller(cache: Arc<Mutex<Option<MediaInfo>>>) {
+    std::thread::spawn(move || {
+        init_com();
+        loop {
+            let info = poll();
+            if let Ok(mut guard) = cache.lock() {
+                *guard = info;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(250));
+        }
+    });
+}
+
+/// Run a control action on a throwaway thread (never the UI thread).
+/// The caller does not wait: the next poller cycle (<=250ms) refreshes
+/// the card icon/progress, so the play/pause icon flips within a tick.
+fn spawn_control(action: fn() -> bool) {
+    std::thread::spawn(move || {
+        init_com();
+        let _ = action();
+    });
+}
+
+pub fn play_async() {
+    spawn_control(play);
+}
+
+pub fn pause_async() {
+    spawn_control(pause);
+}
+
+pub fn skip_next_async() {
+    spawn_control(skip_next);
+}
+
+pub fn skip_previous_async() {
+    spawn_control(skip_previous);
+}
 
 /// Current media state for the music card + compact/zen decisions.
 #[derive(Clone, Debug)]
