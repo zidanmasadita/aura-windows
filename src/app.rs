@@ -4,8 +4,9 @@
 //! Expanded (music card) -> bubble -> Lyrics (700x180) -> bubble back
 //! to Expanded; click outside controls / leave -> Compact (with
 //! session) or Zen (silent). Timers: 0.25s tick (clock + GSMTC poll +
-//! synchronous repaint for realtime lyrics/progress), 0.25s alert
-//! placeholder (Phase 4), 16ms (animation, only while animating).
+//! MediaTracker wall-clock estimate + synchronous repaint for realtime
+//! lyrics/progress), 0.25s alert placeholder (Phase 4), 16ms
+//! (animation, only while animating).
 
 use windows::core::{w, Result, PCWSTR};
 use windows::Win32::Foundation::*;
@@ -43,6 +44,7 @@ pub struct App {
     tracking_mouse: bool,
     clock_text: String, // HH:MM, updated on 1s tick
     media: Option<media::MediaInfo>, // Current GSMTC session (Phase 1), None = silent.
+    media_tracker: media::MediaTracker, // Wall-clock position estimate (realtime fix).
     lyrics: Option<lyrics::LyricsCache>, // Fetched lyrics for current song (Phase 1b), None = not fetched yet.
     pomodoro: pomodoro::Pomodoro, // In-memory pomodoro timer (Phase 2).
     last_section: state::IslandState, // Last section card (music/pomodoro); reopen shows this, not always music.
@@ -65,6 +67,7 @@ impl App {
             tracking_mouse: false,
             clock_text: current_time_text(),
             media: None,
+            media_tracker: media::MediaTracker::new(),
             lyrics: None,
             pomodoro: pomodoro::Pomodoro::new(),
             last_section: state::IslandState::Expanded,
@@ -150,7 +153,7 @@ impl App {
                 // (Was 1s + async InvalidateRect; user report 2026-10-27:
                 // open lyrics panel did not advance until pill reopened,
                 // so paint synchronously here instead of queuing WM_PAINT.)
-                self.media = media::poll();
+                self.media = self.media_tracker.update(media::poll());
                 // Lyrics cache follows song: new song (or session end) clears
                 // cached lyrics; if the lyrics card is open for the old song,
                 // fall back to the music card for the new song (fetching new
@@ -252,17 +255,17 @@ impl App {
                 let playing = self.media.as_ref().map(|m| m.playing).unwrap_or(false);
                 if in_rect(renderer::MUSIC_PREV_RECT) {
                     let _ = media::skip_previous();
-                    self.media = media::poll();
+                    self.media = self.media_tracker.update(media::poll());
                 } else if in_rect(renderer::MUSIC_PLAY_RECT) {
                     if playing {
                         let _ = media::pause();
                     } else {
                         let _ = media::play();
                     }
-                    self.media = media::poll();
+                    self.media = self.media_tracker.update(media::poll());
                 } else if in_rect(renderer::MUSIC_NEXT_RECT) {
                     let _ = media::skip_next();
-                    self.media = media::poll();
+                    self.media = self.media_tracker.update(media::poll());
                 } else if in_rect(renderer::MUSIC_LYRICS_BUBBLE_RECT) {
                     // Fetch lyrics lazily on first entry (blocking; may
                     // freeze briefly on slow networks — async is a follow-up).

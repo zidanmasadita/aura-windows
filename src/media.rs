@@ -4,11 +4,16 @@
 //! Mac (which needed JXA because macOS 15.4+ blocks third-party
 //! MediaRemote reads). Covers Spotify, Chrome/Edge YouTube Music, etc.
 //!
-//! Polling only in this increment (1s tick from app.rs): RequestAsync +
+//! Polling every 0.25s (tick from app.rs): RequestAsync +
 //! GetCurrentSession + TryGetMediaPropertiesAsync + GetPlaybackInfo +
 //! GetTimelineProperties, all via blocking `.get()` on the WinRT async
 //! operations. GSMTC change events (CurrentSessionChanged, etc.) for
-//! instant updates are a follow-up if 1s polling feels laggy.
+//! instant updates are a follow-up if polling feels laggy.
+//!
+//! Position: GSMTC Position alone is NOT realtime for some apps (they
+//! set it on track change/seek only, not during playback), so App feeds
+//! every poll through MediaTracker (below), which advances the position
+//! by wall-clock elapsed time while Playing.
 //!
 //! Artwork thumbnail decoding (WIC) is NOT in this increment: the music
 //! card draws a placeholder cover box until basic title/artist/progress/
@@ -93,4 +98,93 @@ pub fn skip_next() -> bool {
 
 pub fn skip_previous() -> bool {
     with_session(|s| Ok(s.TrySkipPreviousAsync()?.get()?))
+}
+
+/// Wall-clock position estimate (realtime fix, attempt 2).
+///
+/// Some GSMTC apps do not update TimelineProperties.Position during
+/// normal playback (they set it on track change/seek only), so polling
+/// Position alone looks frozen even with a fast tick + synchronous
+/// paint (both already in place since 89fbe58, and still not realtime
+/// per user report 2026-10-27). This tracker advances the position by
+/// real elapsed time while Playing, and re-syncs to GSMTC only when
+/// GSMTC itself jumps (seek, or an app catch-up after lag).
+///
+/// Rules (per poll, same song):
+/// - Playing: estimated += elapsed (Instant, monotonic, no drift).
+/// - Paused: estimated frozen.
+/// - If GSMTC position jumped by >2s since last poll (seek, or app
+///   finally reporting a new position after lag), adopt GSMTC (seek
+///   target wins; catch-up lands on the estimate anyway, so no jump).
+/// - New song (title|artist changed) or session gap: re-anchor to GSMTC.
+/// - Clamp to [0, duration] (when duration is known).
+///
+/// PlaybackStatus (playing/paused) and title/artist are updated
+/// promptly by apps even when Position is not, so the estimate stays
+/// correct. If an app DOES update Position every poll, the estimate
+/// tracks it within timer jitter (<0.5s) and only re-syncs on seeks.
+pub struct MediaTracker {
+    initialized: bool,
+    last_key: String,
+    last_raw_secs: f64,
+    estimated_secs: f64,
+    last_update: std::time::Instant,
+    playing: bool,
+}
+
+impl MediaTracker {
+    pub fn new() -> Self {
+        Self {
+            initialized: false,
+            last_key: String::new(),
+            last_raw_secs: 0.0,
+            estimated_secs: 0.0,
+            last_update: std::time::Instant::now(),
+            playing: false,
+        }
+    }
+
+    /// Feed a raw poll result, get back the same info with an estimated
+    /// (realtime) position. None passes through (and resets, so the
+    /// next session re-anchors instead of guessing across the gap).
+    pub fn update(&mut self, raw: Option<MediaInfo>) -> Option<MediaInfo> {
+        let mut raw = match raw {
+            Some(m) => m,
+            None => {
+                self.initialized = false;
+                return None;
+            }
+        };
+        let key = format!("{}|{}", raw.title, raw.artist);
+        let now = std::time::Instant::now();
+        if !self.initialized || key != self.last_key {
+            // New song (or first poll): anchor to GSMTC.
+            self.estimated_secs = raw.position_secs;
+            self.last_raw_secs = raw.position_secs;
+            self.last_key = key;
+            self.initialized = true;
+        } else {
+            // Same song: advance by elapsed while previously playing.
+            if self.playing {
+                let elapsed = now.duration_since(self.last_update).as_secs_f64();
+                self.estimated_secs += elapsed;
+            }
+            // Re-sync if GSMTC jumped (seek, or app catch-up after lag).
+            if (raw.position_secs - self.last_raw_secs).abs() > 2.0 {
+                self.estimated_secs = raw.position_secs;
+            }
+            self.last_raw_secs = raw.position_secs;
+            // Clamp to [0, duration] when duration is known.
+            if raw.duration_secs > 0.0 && self.estimated_secs > raw.duration_secs {
+                self.estimated_secs = raw.duration_secs;
+            }
+            if self.estimated_secs < 0.0 {
+                self.estimated_secs = 0.0;
+            }
+        }
+        self.last_update = now;
+        self.playing = raw.playing;
+        raw.position_secs = self.estimated_secs;
+        Some(raw)
+    }
 }
