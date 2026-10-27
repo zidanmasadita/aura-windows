@@ -23,6 +23,7 @@ use crate::window;
 
 pub struct Renderer {
     factory: ID2D1Factory,
+    hwnd_target: Option<ID2D1HwndRenderTarget>,
     target: Option<ID2D1RenderTarget>,
     dwrite: IDWriteFactory,
     text_format: Option<IDWriteTextFormat>,
@@ -42,6 +43,7 @@ impl Renderer {
             let dwrite: IDWriteFactory = DWriteCreateFactory(DWRITE_FACTORY_TYPE_SHARED)?;
             Ok(Self {
                 factory,
+                hwnd_target: None,
                 target: None,
                 dwrite,
                 text_format: None,
@@ -57,9 +59,10 @@ impl Renderer {
     /// Resize the render target to a new PHYSICAL size (DIPs stay logical;
     /// D2D scales via the target DPI set at creation).
     pub fn resize(&mut self, width_px: i32, height_px: i32) {
-        if let Some(target) = &self.target {
+        // Resize is HWND-target-specific (not on the base render target).
+        if let Some(hwnd_target) = &self.hwnd_target {
             unsafe {
-                let _ = target.Resize(&D2D1_SIZE_U {
+                let _ = hwnd_target.Resize(&D2D_SIZE_U {
                     width: width_px.max(1) as u32,
                     height: height_px.max(1) as u32,
                 });
@@ -87,7 +90,7 @@ impl Renderer {
             };
             let hwnd_props = D2D1_HWND_RENDER_TARGET_PROPERTIES {
                 hwnd,
-                pixelSize: D2D1_SIZE_U {
+                pixelSize: D2D_SIZE_U {
                     width: width_px.max(1) as u32,
                     height: height_px.max(1) as u32,
                 },
@@ -103,7 +106,7 @@ impl Renderer {
                 return false;
             };
             // Brushes (None = default brush properties: opacity 1.0, identity).
-            if let Ok(b) = target.CreateSolidColorBrush(
+            if let Ok(b) = hwnd_target.CreateSolidColorBrush(
                 &D2D1_COLOR_F {
                     r: 0.0,
                     g: 0.0,
@@ -114,7 +117,7 @@ impl Renderer {
             ) {
                 self.black_brush = Some(b);
             }
-            if let Ok(b) = target.CreateSolidColorBrush(
+            if let Ok(b) = hwnd_target.CreateSolidColorBrush(
                 &D2D1_COLOR_F {
                     r: 1.0,
                     g: 1.0,
@@ -125,7 +128,7 @@ impl Renderer {
             ) {
                 self.white_brush = Some(b);
             }
-            if let Ok(b) = target.CreateSolidColorBrush(
+            if let Ok(b) = hwnd_target.CreateSolidColorBrush(
                 &D2D1_COLOR_F {
                     r: 1.0,
                     g: 1.0,
@@ -174,6 +177,7 @@ impl Renderer {
                 let _ = f.SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
                 self.text_format_center = Some(f);
             }
+            self.hwnd_target = Some(hwnd_target);
             self.target = Some(target);
             true
         }
@@ -199,7 +203,7 @@ impl Renderer {
             // Clear to transparent (outside the pill is clipped by the window region anyway).
             target.Clear(None);
             // Pill/card background: rounded rect, black 0.98, white 0.15 stroke 0.5.
-            let rect = D2D1_RECT_F {
+            let rect = D2D_RECT_F {
                 left: 0.0,
                 top: 0.0,
                 right: lw,
@@ -234,7 +238,7 @@ impl Renderer {
                     // Phase 0 has no battery yet (Phase 4), so: clock left, waveform right.
                     if let (Some(fmt), Some(brush)) = (&self.text_format, &self.white_brush)
                     {
-                        let clock_rect = D2D1_RECT_F {
+                        let clock_rect = D2D_RECT_F {
                             left: 12.0,
                             top: 0.0,
                             right: 70.0,
@@ -250,7 +254,7 @@ impl Renderer {
                         ];
                         let mut x = lw - 12.0 - 48.0;
                         for h in pattern {
-                            let bar = D2D1_RECT_F {
+                            let bar = D2D_RECT_F {
                                 left: x,
                                 top: (lh - h) / 2.0,
                                 right: x + 2.0,
@@ -265,7 +269,7 @@ impl Renderer {
                     // Placeholder card: "Aura" header + Fase 0 note.
                     if let (Some(fmt), Some(brush)) = (&self.text_format, &self.white_brush)
                     {
-                        let header = D2D1_RECT_F {
+                        let header = D2D_RECT_F {
                             left: 24.0,
                             top: 20.0,
                             right: lw - 24.0,
@@ -276,7 +280,7 @@ impl Renderer {
                     if let (Some(fmt), Some(brush)) =
                         (&self.text_format_small, &self.white_brush)
                     {
-                        let sub = D2D1_RECT_F {
+                        let sub = D2D_RECT_F {
                             left: 24.0,
                             top: 60.0,
                             right: lw - 24.0,
@@ -303,7 +307,7 @@ impl Renderer {
         target: &ID2D1RenderTarget,
         text: &str,
         format: &IDWriteTextFormat,
-        rect: &D2D1_RECT_F,
+        rect: &D2D_RECT_F,
         brush: &ID2D1SolidColorBrush,
     ) {
         let wide: Vec<u16> = text.encode_utf16().collect();
@@ -311,10 +315,10 @@ impl Renderer {
             return;
         }
         unsafe {
-            let text_ptr = windows::core::PCWSTR::from_raw(wide.as_ptr());
+            // windows-rs 0.58 DrawText takes &[u16] (length from slice), not
+            // PCWSTR + length: 6 args (string, format, rect, brush, options, mode).
             target.DrawText(
-                text_ptr,
-                wide.len() as u32,
+                &wide,
                 format,
                 rect,
                 brush,
