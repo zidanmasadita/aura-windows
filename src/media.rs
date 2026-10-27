@@ -38,6 +38,10 @@
 use std::sync::{Arc, Mutex};
 
 use windows::core::Result;
+use windows::Win32::UI::WindowsAndMessaging::{
+    DispatchMessageW, GetMessageW, PeekMessageW, SetTimer, TranslateMessage, MSG, PM_NOREMOVE,
+    WM_TIMER,
+};
 use windows::Media::Control::{
     GlobalSystemMediaTransportControlsSession, GlobalSystemMediaTransportControlsSessionManager,
     GlobalSystemMediaTransportControlsSessionPlaybackStatus,
@@ -60,27 +64,53 @@ fn init_com() {
     }
 }
 
-/// Start the background poller: one thread, every 250ms, poll GSMTC
-/// (NOT USED since 2026-10-27: kept for reference only. It failed in
-/// both MTA and STA — a thread with no message loop never returns from
-/// RequestAsync().get(), so the cache stayed None and the card always
-/// said "No music playing". Polling is back on the UI thread, 1s, from
-/// the tick in app.rs, which is the combination that worked in Phase 1.)
-#[allow(dead_code)]
-/// (blocking `.get()` is fine HERE, off the UI thread) and write the
-/// result into `cache`. The UI thread only ever reads `cache`, never
-/// calls poll() itself. A stuck poll only freezes the cache, never
-/// the window. Runs until the process exits (no shutdown handshake:
-/// the thread holds only the cache Arc, never the HWND).
+/// Start the background poller: one STA thread with its OWN
+/// message loop, polling GSMTC every 250ms on a thread timer and
+/// writing the result into `cache`. The UI thread only ever reads
+/// the cache, never calls poll() itself.
+///
+/// Why a message loop, and why this is the third attempt:
+/// - b19b92a poller (MTA, sleep loop): cache stayed None.
+/// - 9f1f911 poller (STA, sleep loop): cache stayed None.
+/// - ca373ed poll on the UI thread (1s): app went "Not Responding"
+///   immediately after run.
+/// The common thread of the two poller failures: a thread with NO
+/// message queue/loop never returns from RequestAsync().get() — the
+/// WinRT async completion cannot be delivered to it, so .get()
+/// waits forever and the cache never updates. The UI thread has a
+/// message loop (which is why Phase 1 polling worked there), but
+/// blocking it with .get() now freezes the window outright. So the
+/// poller thread gets its own loop: PeekMessage creates the queue,
+/// SetTimer(None, ...) posts WM_TIMER to that thread every 250ms,
+/// and GetMessage dispatches it; poll() runs inside that loop, where
+/// .get() can pump the completion messages. A stuck poll only
+/// freezes this thread's cache, never the main window.
 pub fn spawn_poller(cache: Arc<Mutex<Option<MediaInfo>>>) {
     std::thread::spawn(move || {
         init_com();
-        loop {
-            let info = poll();
-            if let Ok(mut guard) = cache.lock() {
-                *guard = info;
+        unsafe {
+            // Create this thread's message queue (required before
+            // any COM async completion can be delivered to it).
+            let mut msg = MSG::default();
+            let _ = PeekMessageW(&mut msg, None, 0, 0, PM_NOREMOVE);
+            // Thread timer (no HWND): WM_TIMER arrives in this
+            // thread's queue every 250ms.
+            let _ = SetTimer(None, 1, 250, None);
+            loop {
+                let ret = GetMessageW(&mut msg, None, 0, 0);
+                if ret.0 <= 0 {
+                    break;
+                }
+                if msg.message == WM_TIMER {
+                    let info = poll();
+                    if let Ok(mut guard) = cache.lock() {
+                        *guard = info;
+                    }
+                } else {
+                    let _ = TranslateMessage(&msg);
+                    let _ = DispatchMessageW(&msg);
+                }
             }
-            std::thread::sleep(std::time::Duration::from_millis(250));
         }
     });
 }

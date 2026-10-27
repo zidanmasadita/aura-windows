@@ -12,6 +12,8 @@
 //! blocking WinRT `.get()` on the UI thread froze the message loop).
 
 
+use std::sync::{Arc, Mutex};
+
 use windows::core::{w, Result, PCWSTR};
 use windows::Win32::UI::Shell::{DragAcceptFiles, DragFinish, DragQueryFileW, HDROP};
 use windows::Win32::Foundation::*;
@@ -57,8 +59,7 @@ pub struct App {
     clock_text: String, // HH:MM, updated on 1s tick
     media: Option<media::MediaInfo>, // Current GSMTC session (Phase 1), None = silent.
     media_tracker: media::MediaTracker, // Wall-clock position estimate (realtime fix).
-    last_raw: Option<media::MediaInfo>, // Last UI-thread GSMTC poll (1s), fed to MediaTracker every tick.
-    poll_counter: u32, // Tick counter: poll on UI thread every 4th tick (1s), not every 250ms tick.
+    media_cache: Arc<Mutex<Option<media::MediaInfo>>>, // Written by the poller thread (with its own message loop), read by the tick.
     suppress_leave: bool, // True after a shrink: cursor may end up outside the smaller window without moving; that leave is not real (see set_state).
     media_none_streak: u32, // Consecutive ticks with no GSMTC session (transient-None hysteresis, hover-flicker fix).
     lyrics: Option<lyrics::LyricsCache>, // Fetched lyrics for current song (Phase 1b), None = not fetched yet.
@@ -79,7 +80,7 @@ fn current_time_text() -> String {
 }
 
 impl App {
-    fn new(hwnd: HWND) -> Result<Box<Self>> {
+    fn new(hwnd: HWND, media_cache: Arc<Mutex<Option<media::MediaInfo>>>) -> Result<Box<Self>> {
         let renderer = renderer::Renderer::new()?;
         let mut app = Box::new(Self {
             hwnd,
@@ -90,8 +91,7 @@ impl App {
             clock_text: current_time_text(),
             media: None,
             media_tracker: media::MediaTracker::new(),
-            last_raw: None,
-            poll_counter: 0,
+            media_cache,
             suppress_leave: false,
             media_none_streak: 0,
             lyrics: None,
@@ -292,22 +292,20 @@ impl App {
     fn on_timer(&mut self, id: usize) {
         match id {
             TIMER_TICK => {
-                // 0.25s tick: poll GSMTC on the UI thread every 4th tick
-                // (1s) + update clock + repaint NOW. The background
-                // poller thread is REMOVED (see media.rs): it failed in
-                // both MTA (b19b92a) and STA (9f1f911) — a thread with
-                // no message loop never returns from RequestAsync, so
-                // the cache stayed None forever ("No music playing").
-                // The UI thread + message loop is the combination that
-                // worked in Phase 1a/1b. Polling only every 1s (not
-                // every 250ms tick) + async controls + MediaTracker
-                // wall-clock progress between polls keeps the
-                // Not Responding risk at the original 1s-poll level.
-                self.poll_counter += 1;
-                if self.poll_counter % 4 == 1 {
-                    self.last_raw = media::poll();
-                }
-                let cached = self.last_raw.clone();
+                // 0.25s tick: read the poller-thread cache + update
+                // clock + repaint NOW. NEVER media::poll() here:
+                // ca373ed put poll on the UI thread (every 1s) and the
+                // app went "Not Responding" immediately after run —
+                // RequestAsync().get() blocks the message loop in this
+                // environment. Poll lives on its own STA thread with
+                // its own message loop (media.rs spawn_poller); the
+                // tick only reads the cache, so a stuck poll freezes
+                // the cache, never the window.
+                let cached = self
+                    .media_cache
+                    .lock()
+                    .ok()
+                    .and_then(|guard| guard.clone());
                 // Transient-None hysteresis: a single failed/empty GSMTC
                 // poll must not close the card (that close + hover-reopen
                 // is one open-close flicker source). Only after 4
@@ -1175,11 +1173,15 @@ pub fn run() -> Result<()> {
         )?;
         // Accept file drops from Explorer (Phase 3a, WM_DROPFILES).
         let _ = DragAcceptFiles(hwnd, BOOL(1));
-        // No background poller: GSMTC is polled on the UI thread
-        // every 1s from the tick (see media.rs — a thread with no
-        // message loop never returns from RequestAsync).
+        // Background GSMTC poller (STA thread with its own message
+        // loop — see media.rs; a thread with no message loop never
+        // returns from RequestAsync, and polling on the UI thread
+        // freezes the window immediately). Started before App so the
+        // cache exists from the first tick; UI only reads it.
+        let media_cache = Arc::new(Mutex::new(None));
+        media::spawn_poller(media_cache.clone());
         // App (owns renderer + state). Store in USERDATA for WndProc.
-        let app = App::new(hwnd)?;
+        let app = App::new(hwnd, media_cache)?;
         let app_ptr = Box::into_raw(app);
         SetWindowLongPtrW(hwnd, GWLP_USERDATA, app_ptr as isize);
         // Tray icon (must be after window creation; uses hwnd).
