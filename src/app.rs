@@ -973,6 +973,8 @@ impl App {
             &self.todo_input,
             &self.shelf,
             self.tray_page,
+            self.pill.width,
+            self.pill.height,
         );
     }
 

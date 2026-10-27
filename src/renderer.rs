@@ -303,9 +303,19 @@ impl Renderer {
         todo_input: &str,
         shelf: &crate::shelf::Shelf,
         tray_page: usize,
+        cur_w: f32,
+        cur_h: f32,
     ) {
+        // Current animated size, NOT the target size (double-pill fix
+        // 2026-10-27): during a Tray (640x280) -> Music (520x180)
+        // morph the window is intermediate-sized, but the old code
+        // drew the target-size card (with its own stroke outline) on
+        // top of the intermediate window's black clear, so it looked
+        // like two overlapping pills. Drawing background + layout at
+        // the current size makes the morph a single pill that shrinks.
+        // At rest cur == target, so nothing changes then.
         let scale = window::dpi_scale(hwnd);
-        let (lw, lh) = state.logical_size();
+        let (lw, lh) = (cur_w, cur_h);
         let w_px = (lw * scale).round() as i32;
         let h_px = (lh * scale).round() as i32;
         if !self.ensure_target(hwnd, w_px, h_px, scale * 96.0) {

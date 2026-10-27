@@ -42,13 +42,21 @@ use windows::Media::Control::{
     GlobalSystemMediaTransportControlsSession, GlobalSystemMediaTransportControlsSessionManager,
     GlobalSystemMediaTransportControlsSessionPlaybackStatus,
 };
-use windows::Win32::System::Com::{CoInitializeEx, COINIT_MULTITHREADED};
+use windows::Win32::System::Com::{CoInitializeEx, COINIT_APARTMENTTHREADED};
 
-/// Init COM (MTA) untuk thread pemanggil. Best-effort: kalau sudah
+/// Init COM (STA) untuk thread pemanggil. Best-effort: kalau sudah
 /// di-init thread itu, hasilnya diabaikan (bukan error).
+///
+/// STA, bukan MTA, dengan sengaja (dugaan dari timeline 2026-10-27:
+/// musik terdeteksi saat poll jalan di UI thread, lalu TIDAK
+/// terdeteksi lagi setelah poll pindah ke thread latar MTA di
+/// b19b92a — RequestAsync GSMTC tampaknya gagal / nyangkut di
+/// apartment MTA, sementara UI thread STA + message loop adalah
+/// kombinasi yang terbukti jalan. .get() di thread STA memompa
+/// pesan COM selagi menunggu, sama seperti di UI thread dulu).
 fn init_com() {
     unsafe {
-        let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
+        let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
     }
 }
 
