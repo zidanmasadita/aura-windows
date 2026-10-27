@@ -69,23 +69,25 @@ pub fn place_top_center(hwnd: HWND, width: i32, height: i32) {
     }
 }
 
-/// Set a Nusa-shaped window region (boxy, filleted top merging into
-/// the top edge/bezel, rounded bottom): top corners have small concave
-/// fillets (8pt, softening the 90deg junctions into smooth flares that
-/// merge with the bezel, not sharp perpendicular drops), bottom corners
-/// convex (radius param: height/2 for short pills, 28pt*scale for tall
-/// cards). Built as a polygon (arcs, 8 segments each). Matches the D2D
-/// path geometry in renderer.rs (same outline, physical pixels here).
+/// Set a Nusa-shaped window region (Aura notchPath: wide top merging
+/// into the top edge/bezel, tucked sides, boxy body, rounded bottom):
+/// top edge full width (flush with y=0), sides tuck inward 12pt below
+/// the top via tangent sweeps (top wider than body, like an inverted
+/// trapezoid, but the body sides stay vertical, not slanted), bottom
+/// corners convex (radius param: height/2 for short pills, 28pt*scale
+/// for tall cards). Built as a polygon (arcs, 8 segments each).
+/// Matches the D2D path geometry in renderer.rs (same outline,
+/// physical pixels here).
 /// The system owns the region after a successful SetWindowRgn (do not delete).
 /// width/height/radius are PHYSICAL pixels.
 pub fn set_pill_region(hwnd: HWND, width: i32, height: i32, radius: i32) {
     let scale = dpi_scale(hwnd);
-    let fillet = (8.0 * scale).round() as i32;
+    let tuck = (12.0 * scale).round() as i32;
     let w = width.max(1);
     let h = height.max(1);
     let r = radius.clamp(0, h / 2);
-    let f = fillet.clamp(0, w / 2);
-    // Polygon points (clockwise from top edge). Arc helper appends
+    let t = std::cmp::min(tuck.clamp(0, w / 2), h / 2);
+    // Polygon points (clockwise from top-left). Arc helper appends
     // intermediate points only (endpoints are pushed explicitly).
     let mut pts: Vec<POINT> = Vec::new();
     let seg = 8i32;
@@ -98,27 +100,27 @@ pub fn set_pill_region(hwnd: HWND, width: i32, height: i32, radius: i32) {
             });
         }
     };
-    // Top edge (between fillets).
-    pts.push(POINT { x: f, y: 0 });
-    pts.push(POINT { x: w - f, y: 0 });
-    // Top-right fillet (concave, center at outer corner (w, 0)): 180deg -> 90deg.
-    push_arc(&mut pts, w, 0, f, std::f32::consts::PI, std::f32::consts::FRAC_PI_2);
-    pts.push(POINT { x: w, y: f });
-    // Right side.
-    pts.push(POINT { x: w, y: h - r });
-    // Bottom-right (convex, center (w-r, h-r)): 0deg -> 90deg.
-    push_arc(&mut pts, w - r, h - r, r, 0.0, std::f32::consts::FRAC_PI_2);
-    pts.push(POINT { x: w - r, y: h });
+    // Top edge (full width, flush with top edge/bezel).
+    pts.push(POINT { x: 0, y: 0 });
+    pts.push(POINT { x: w, y: 0 });
+    // Top-right sweep (center (w, t)): north -> west via northwest.
+    push_arc(&mut pts, w, t, t, -std::f32::consts::FRAC_PI_2, -std::f32::consts::PI);
+    pts.push(POINT { x: w - t, y: t });
+    // Right side (tucked, vertical).
+    pts.push(POINT { x: w - t, y: h - r });
+    // Bottom-right (convex, center (w-t-r, h-r)): east -> south.
+    push_arc(&mut pts, w - t - r, h - r, r, 0.0, std::f32::consts::FRAC_PI_2);
+    pts.push(POINT { x: w - t - r, y: h });
     // Bottom edge.
-    pts.push(POINT { x: r, y: h });
-    // Bottom-left (convex, center (r, h-r)): 90deg -> 180deg.
-    push_arc(&mut pts, r, h - r, r, std::f32::consts::FRAC_PI_2, std::f32::consts::PI);
-    pts.push(POINT { x: 0, y: h - r });
-    // Left side.
-    pts.push(POINT { x: 0, y: f });
-    // Top-left fillet (concave, center (0, 0)): 90deg -> 0deg.
-    // (Region auto-closes back to (f, 0).)
-    push_arc(&mut pts, 0, 0, f, std::f32::consts::FRAC_PI_2, 0.0);
+    pts.push(POINT { x: t + r, y: h });
+    // Bottom-left (convex, center (t+r, h-r)): south -> west.
+    push_arc(&mut pts, t + r, h - r, r, std::f32::consts::FRAC_PI_2, std::f32::consts::PI);
+    pts.push(POINT { x: t, y: h - r });
+    // Left side (tucked, vertical).
+    pts.push(POINT { x: t, y: t });
+    // Top-left sweep (center (0, t)): east -> north via northeast.
+    // (Region auto-closes back to (0, 0).)
+    push_arc(&mut pts, 0, t, t, 0.0, -std::f32::consts::FRAC_PI_2);
     unsafe {
         let rgn: HRGN = CreatePolygonRgn(&pts, ALTERNATE);
         if rgn.0 == std::ptr::null_mut() {
