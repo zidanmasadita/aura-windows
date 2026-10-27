@@ -25,6 +25,7 @@ windows = { version = "0.58", features = [
     "Win32_Security",
     "Media_Control",
     "Foundation",
+    "Foundation_Collections",
     "Web_Http",
 ] }
 chrono = "0.4"
