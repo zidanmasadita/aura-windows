@@ -11,6 +11,7 @@ mod lyrics;
 mod media;
 mod pomodoro;
 mod renderer;
+mod shelf;
 mod state;
 mod todo;
 mod tray;

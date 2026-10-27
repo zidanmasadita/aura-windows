@@ -66,6 +66,24 @@ pub const TODO_MAX_ROWS: usize = 6;
 /// Water card buttons: +250 ml + Reset (centered pair, y 120-144).
 pub const WATER_ADD_RECT: (f32, f32, f32, f32) = (230.0, 120.0, 310.0, 144.0);
 pub const WATER_RESET_RECT: (f32, f32, f32, f32) = (330.0, 120.0, 410.0, 144.0);
+/// Tray shelf card (640x280, Phase 3a): 4x2 grid, page size 8.
+/// Tile 132x96, x pitch 148 (gap 16), y pitch 104 (gap 8), origin (24, 48).
+/// Clear button top-right; page arrows bottom (only when >1 page).
+/// 5th section dot on every card (tray), below the water dot.
+pub const TRAY_PAGE_SIZE: usize = 8;
+pub const TRAY_TILE_GEOM: (f32, f32, f32, f32, f32, f32) = (24.0, 48.0, 132.0, 96.0, 148.0, 104.0);
+pub const TRAY_CLEAR_RECT: (f32, f32, f32, f32) = (560.0, 16.0, 616.0, 36.0);
+pub const TRAY_PREV_RECT: (f32, f32, f32, f32) = (280.0, 252.0, 320.0, 272.0);
+pub const TRAY_NEXT_RECT: (f32, f32, f32, f32) = (324.0, 252.0, 364.0, 272.0);
+pub const MUSIC_DOT_TRAY_RECT: (f32, f32, f32, f32) = (492.0, 142.0, 508.0, 158.0);
+pub const POMODORO_DOT_TRAY_RECT: (f32, f32, f32, f32) = (612.0, 142.0, 628.0, 158.0);
+pub const TODO_DOT_TRAY_RECT: (f32, f32, f32, f32) = (612.0, 162.0, 628.0, 178.0);
+pub const WATER_DOT_TRAY_RECT: (f32, f32, f32, f32) = (612.0, 142.0, 628.0, 158.0);
+pub const TRAY_DOT_MUSIC_RECT: (f32, f32, f32, f32) = (612.0, 66.0, 628.0, 82.0);
+pub const TRAY_DOT_POMODORO_RECT: (f32, f32, f32, f32) = (612.0, 90.0, 628.0, 106.0);
+pub const TRAY_DOT_TODO_RECT: (f32, f32, f32, f32) = (612.0, 114.0, 628.0, 130.0);
+pub const TRAY_DOT_WATER_RECT: (f32, f32, f32, f32) = (612.0, 138.0, 628.0, 154.0);
+pub const TRAY_DOT_TRAY_RECT: (f32, f32, f32, f32) = (612.0, 162.0, 628.0, 178.0);
 
 /// Format seconds as m:ss (e.g. 83.0 -> "1:23").
 fn format_time(secs: f64) -> String {
@@ -283,6 +301,8 @@ impl Renderer {
         water: &crate::water::Water,
         todo_editing: bool,
         todo_input: &str,
+        shelf: &crate::shelf::Shelf,
+        tray_page: usize,
     ) {
         let scale = window::dpi_scale(hwnd);
         let (lw, lh) = state.logical_size();
@@ -602,6 +622,17 @@ impl Renderer {
                             bottom: MUSIC_DOT_WATER_RECT.3,
                         };
                         self.draw_text(target, "•", fmt, &dot_water, brush);
+                    }
+                    if let (Some(fmt), Some(brush)) =
+                        (&self.text_format_center, &self.gray_brush)
+                    {
+                        let dot_tray = D2D_RECT_F {
+                            left: MUSIC_DOT_TRAY_RECT.0,
+                            top: MUSIC_DOT_TRAY_RECT.1,
+                            right: MUSIC_DOT_TRAY_RECT.2,
+                            bottom: MUSIC_DOT_TRAY_RECT.3,
+                        };
+                        self.draw_text(target, "•", fmt, &dot_tray, brush);
                     }
                 }
                 IslandState::Lyrics => {
@@ -979,6 +1010,17 @@ impl Renderer {
                         };
                         self.draw_text(target, "•", fmt, &dot_water, brush);
                     }
+                    if let (Some(fmt), Some(brush)) =
+                        (&self.text_format_center, &self.gray_brush)
+                    {
+                        let dot_tray = D2D_RECT_F {
+                            left: POMODORO_DOT_TRAY_RECT.0,
+                            top: POMODORO_DOT_TRAY_RECT.1,
+                            right: POMODORO_DOT_TRAY_RECT.2,
+                            bottom: POMODORO_DOT_TRAY_RECT.3,
+                        };
+                        self.draw_text(target, "•", fmt, &dot_tray, brush);
+                    }
                 }
                 IslandState::Todo => {
                     // Todo card (640x220). Title + input field + up to 6 rows.
@@ -1129,6 +1171,17 @@ impl Renderer {
                         };
                         self.draw_text(target, "•", fmt, &dot_water, brush);
                     }
+                    if let (Some(fmt), Some(brush)) =
+                        (&self.text_format_center, &self.gray_brush)
+                    {
+                        let dot_tray = D2D_RECT_F {
+                            left: TODO_DOT_TRAY_RECT.0,
+                            top: TODO_DOT_TRAY_RECT.1,
+                            right: TODO_DOT_TRAY_RECT.2,
+                            bottom: TODO_DOT_TRAY_RECT.3,
+                        };
+                        self.draw_text(target, "•", fmt, &dot_tray, brush);
+                    }
                 }
                 IslandState::Water => {
                     // Water card (640x180). Total / goal + progress + buttons.
@@ -1260,6 +1313,246 @@ impl Renderer {
                             bottom: WATER_DOT_WATER_RECT.3,
                         };
                         self.draw_text(target, "•", fmt, &dot_water, brush);
+                    }
+                    if let (Some(fmt), Some(brush)) =
+                        (&self.text_format_center, &self.gray_brush)
+                    {
+                        let dot_tray = D2D_RECT_F {
+                            left: WATER_DOT_TRAY_RECT.0,
+                            top: WATER_DOT_TRAY_RECT.1,
+                            right: WATER_DOT_TRAY_RECT.2,
+                            bottom: WATER_DOT_TRAY_RECT.3,
+                        };
+                        self.draw_text(target, "•", fmt, &dot_tray, brush);
+                    }
+                }
+                IslandState::Tray => {
+                    // Tray shelf card (640x280, Phase 3a). Title + count,
+                    // Clear button, 4x2 grid of references (or an empty
+                    // drop-zone box), page arrows when >1 page, 5 dots.
+                    // Click a tile opens it (app), right-click removes
+                    // the reference (app); Clear removes all references.
+                    // Nothing here deletes a real file. Drag-out + LAN
+                    // share arrive in Phase 3b.
+                    let title = format!("Tray ({})", shelf.files.len());
+                    if let (Some(fmt), Some(brush)) =
+                        (&self.text_format, &self.white_brush)
+                    {
+                        let r = D2D_RECT_F {
+                            left: 24.0,
+                            top: 16.0,
+                            right: 400.0,
+                            bottom: 36.0,
+                        };
+                        self.draw_text(target, &title, fmt, &r, brush);
+                    }
+                    if let Some(brush) = &self.dim_brush {
+                        let r = D2D_RECT_F {
+                            left: TRAY_CLEAR_RECT.0,
+                            top: TRAY_CLEAR_RECT.1,
+                            right: TRAY_CLEAR_RECT.2,
+                            bottom: TRAY_CLEAR_RECT.3,
+                        };
+                        target.FillRectangle(&r, brush);
+                    }
+                    if let (Some(fmt), Some(brush)) =
+                        (&self.text_format_center, &self.white_brush)
+                    {
+                        let r = D2D_RECT_F {
+                            left: TRAY_CLEAR_RECT.0,
+                            top: TRAY_CLEAR_RECT.1,
+                            right: TRAY_CLEAR_RECT.2,
+                            bottom: TRAY_CLEAR_RECT.3,
+                        };
+                        self.draw_text(target, "Clear", fmt, &r, brush);
+                    }
+                    let page_count = shelf.page_count(TRAY_PAGE_SIZE);
+                    let page = tray_page.min(page_count.saturating_sub(1));
+                    if shelf.files.is_empty() {
+                        if let Some(brush) = &self.dim_brush {
+                            let r = D2D_RECT_F {
+                                left: 24.0,
+                                top: 48.0,
+                                right: 600.0,
+                                bottom: 248.0,
+                            };
+                            target.FillRectangle(&r, brush);
+                        }
+                        if let (Some(fmt), Some(brush)) =
+                            (&self.text_format_center, &self.white_brush)
+                        {
+                            let r = D2D_RECT_F {
+                                left: 24.0,
+                                top: 120.0,
+                                right: 600.0,
+                                bottom: 150.0,
+                            };
+                            self.draw_text(target, "Drag files here", fmt, &r, brush);
+                        }
+                        if let (Some(fmt), Some(brush)) =
+                            (&self.text_format_center, &self.gray_brush)
+                        {
+                            let r = D2D_RECT_F {
+                                left: 24.0,
+                                top: 150.0,
+                                right: 600.0,
+                                bottom: 175.0,
+                            };
+                            self.draw_text(
+                                target,
+                                "Drop a file from Explorer onto the pill",
+                                fmt,
+                                &r,
+                                brush,
+                            );
+                        }
+                    } else {
+                        let (gx, gy, tw, th, px, py) = (
+                            TRAY_TILE_GEOM.0,
+                            TRAY_TILE_GEOM.1,
+                            TRAY_TILE_GEOM.2,
+                            TRAY_TILE_GEOM.3,
+                            TRAY_TILE_GEOM.4,
+                            TRAY_TILE_GEOM.5,
+                        );
+                        let start = page * TRAY_PAGE_SIZE;
+                        for (i, path) in shelf
+                            .files
+                            .iter()
+                            .skip(start)
+                            .take(TRAY_PAGE_SIZE)
+                            .enumerate()
+                        {
+                            let col = (i % 4) as f32;
+                            let row = (i / 4) as f32;
+                            let left = gx + col * px;
+                            let top = gy + row * py;
+                            if let Some(brush) = &self.dim_brush {
+                                let r = D2D_RECT_F {
+                                    left,
+                                    top,
+                                    right: left + tw,
+                                    bottom: top + th,
+                                };
+                                target.FillRectangle(&r, brush);
+                            }
+                            let name = path
+                                .rsplit(['\\', '/'])
+                                .next()
+                                .unwrap_or(path.as_str());
+                            let name_chars: Vec<char> = name.chars().collect();
+                            let shown = if name_chars.len() > 20 {
+                                format!(
+                                    "{}...",
+                                    name_chars.iter().take(17).collect::<String>()
+                                )
+                            } else {
+                                name.to_string()
+                            };
+                            let exists =
+                                std::path::Path::new(path.as_str()).exists();
+                            let brush = if exists {
+                                &self.white_brush
+                            } else {
+                                &self.gray_brush
+                            };
+                            if let (Some(fmt), Some(brush)) =
+                                (&self.text_format, brush)
+                            {
+                                let r = D2D_RECT_F {
+                                    left: left + 8.0,
+                                    top: top + 8.0,
+                                    right: left + tw - 8.0,
+                                    bottom: top + th - 8.0,
+                                };
+                                self.draw_text(target, &shown, fmt, &r, brush);
+                            }
+                            if !exists {
+                                if let (Some(fmt), Some(brush)) =
+                                    (&self.text_format_small, &self.gray_brush)
+                                {
+                                    let r = D2D_RECT_F {
+                                        left: left + 8.0,
+                                        top: top + th - 28.0,
+                                        right: left + tw - 8.0,
+                                        bottom: top + th - 8.0,
+                                    };
+                                    self.draw_text(target, "(missing)", fmt, &r, brush);
+                                }
+                            }
+                        }
+                        if page_count > 1 {
+                            if let Some(brush) = &self.dim_brush {
+                                let prev = D2D_RECT_F {
+                                    left: TRAY_PREV_RECT.0,
+                                    top: TRAY_PREV_RECT.1,
+                                    right: TRAY_PREV_RECT.2,
+                                    bottom: TRAY_PREV_RECT.3,
+                                };
+                                target.FillRectangle(&prev, brush);
+                                let next = D2D_RECT_F {
+                                    left: TRAY_NEXT_RECT.0,
+                                    top: TRAY_NEXT_RECT.1,
+                                    right: TRAY_NEXT_RECT.2,
+                                    bottom: TRAY_NEXT_RECT.3,
+                                };
+                                target.FillRectangle(&next, brush);
+                            }
+                            if let (Some(fmt), Some(brush)) =
+                                (&self.text_format_center, &self.white_brush)
+                            {
+                                let prev = D2D_RECT_F {
+                                    left: TRAY_PREV_RECT.0,
+                                    top: TRAY_PREV_RECT.1,
+                                    right: TRAY_PREV_RECT.2,
+                                    bottom: TRAY_PREV_RECT.3,
+                                };
+                                self.draw_text(target, "<", fmt, &prev, brush);
+                                let next = D2D_RECT_F {
+                                    left: TRAY_NEXT_RECT.0,
+                                    top: TRAY_NEXT_RECT.1,
+                                    right: TRAY_NEXT_RECT.2,
+                                    bottom: TRAY_NEXT_RECT.3,
+                                };
+                                self.draw_text(target, ">", fmt, &next, brush);
+                                let page_r = D2D_RECT_F {
+                                    left: 200.0,
+                                    top: 252.0,
+                                    right: 276.0,
+                                    bottom: 272.0,
+                                };
+                                let page_text =
+                                    format!("{} / {}", page + 1, page_count);
+                                self.draw_text(target, &page_text, fmt, &page_r, brush);
+                            }
+                        }
+                    }
+                    // Section dots (5, x 612-628, y 66/90/114/138/162):
+                    // music, pomodoro, todo, water gray; tray white.
+                    let dot_rects = [
+                        TRAY_DOT_MUSIC_RECT,
+                        TRAY_DOT_POMODORO_RECT,
+                        TRAY_DOT_TODO_RECT,
+                        TRAY_DOT_WATER_RECT,
+                        TRAY_DOT_TRAY_RECT,
+                    ];
+                    for (i, dr) in dot_rects.iter().enumerate() {
+                        let brush = if i == 4 {
+                            &self.white_brush
+                        } else {
+                            &self.gray_brush
+                        };
+                        if let (Some(fmt), Some(brush)) =
+                            (&self.text_format_center, brush)
+                        {
+                            let r = D2D_RECT_F {
+                                left: dr.0,
+                                top: dr.1,
+                                right: dr.2,
+                                bottom: dr.3,
+                            };
+                            self.draw_text(target, "•", fmt, &r, brush);
+                        }
                     }
                 }
             }

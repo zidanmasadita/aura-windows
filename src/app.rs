@@ -13,7 +13,8 @@
 
 use std::sync::{Arc, Mutex};
 
-use windows::core::{w, Result, PCWSTR};
+use windows::core::{w, PWSTR, Result, PCWSTR};
+use windows::Win32::UI::Shell::{DragAcceptFiles, DragFinish, DragQueryFileW, HDROP};
 use windows::Win32::Foundation::*;
 use windows::Win32::Graphics::Gdi::{HBRUSH, InvalidateRect};
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
@@ -63,6 +64,8 @@ pub struct App {
     todo: todo::TodoList, // Tasks from todo.txt (Phase 2).
     todo_editing: bool, // True while the user types a task in the pill.
     todo_input: String, // Text being typed (committed on Enter / click-outside).
+    shelf: crate::shelf::Shelf, // Tray file references (Phase 3a).
+    tray_page: usize, // Current tray grid page (0-based).
     water: water::Water, // Daily intake (Phase 2).
     last_section: state::IslandState, // Last section card (music/pomodoro/todo/water); reopen shows this, not always music.
 }
@@ -92,6 +95,8 @@ impl App {
             todo: todo::TodoList::load(),
             todo_editing: false,
             todo_input: String::new(),
+            shelf: crate::shelf::Shelf::load(),
+            tray_page: 0,
             water: water::Water::load(),
             last_section: state::IslandState::Expanded,
         });
@@ -219,6 +224,7 @@ impl App {
             || new_state == state::IslandState::Pomodoro
             || new_state == state::IslandState::Todo
             || new_state == state::IslandState::Water
+            || new_state == state::IslandState::Tray
         {
             self.last_section = new_state;
         }
@@ -474,6 +480,9 @@ impl App {
                 } else if in_rect(renderer::MUSIC_DOT_WATER_RECT) {
                     self.set_state(state::IslandState::Water);
                     return;
+                } else if in_rect(renderer::MUSIC_DOT_TRAY_RECT) {
+                    self.set_state(state::IslandState::Tray);
+                    return;
                 } else if in_rect(renderer::MUSIC_DOT_MUSIC_RECT) {
                     // Current section dot: no-op (stay open, do not close).
                     return;
@@ -504,6 +513,10 @@ impl App {
                 }
                 if in_rect(renderer::MUSIC_DOT_WATER_RECT) {
                     self.set_state(state::IslandState::Water);
+                    return;
+                }
+                if in_rect(renderer::MUSIC_DOT_TRAY_RECT) {
+                    self.set_state(state::IslandState::Tray);
                     return;
                 }
                 if in_rect(renderer::MUSIC_DOT_MUSIC_RECT) {
@@ -603,6 +616,10 @@ impl App {
                 self.set_state(state::IslandState::Water);
                 return;
             }
+            if in_rect(renderer::POMODORO_DOT_TRAY_RECT) {
+                self.set_state(state::IslandState::Tray);
+                return;
+            }
             if in_rect(renderer::POMODORO_DOT_POMODORO_RECT) {
                 // Current section dot: no-op (stay open, do not close).
                 return;
@@ -637,6 +654,10 @@ impl App {
                 self.set_state(state::IslandState::Pomodoro);
                 return;
             }
+            if in_rect(renderer::TODO_DOT_TRAY_RECT) {
+                self.set_state(state::IslandState::Tray);
+                return;
+            }
             if in_rect(renderer::TODO_DOT_TODO_RECT) {
                 return;
             }
@@ -662,6 +683,97 @@ impl App {
                     self.todo.toggle(idx);
                     unsafe {
                         let _ = InvalidateRect(self.hwnd, None, BOOL(0));
+                    }
+                    return;
+                }
+            }
+            self.set_state(state::IslandState::Compact);
+            return;
+        }
+        // Tray shelf card (Phase 3a): Clear clears references only
+        // (never the real files), arrows page, dots switch, a tile
+        // click opens the file/folder (existing only; stale tiles do
+        // nothing on left-click, right-click removes the reference),
+        // any other click closes to Compact.
+        if self.pill.state == state::IslandState::Tray {
+            let scale = window::dpi_scale(self.hwnd);
+            let x = x_px as f32 / scale;
+            let y = y_px as f32 / scale;
+            let in_rect =
+                |r: (f32, f32, f32, f32)| x >= r.0 && x <= r.2 && y >= r.1 && y <= r.3;
+            if in_rect(renderer::TRAY_CLEAR_RECT) {
+                self.shelf.clear();
+                self.tray_page = 0;
+                unsafe {
+                    let _ = InvalidateRect(self.hwnd, None, BOOL(0));
+                }
+                return;
+            }
+            let page_count = self.shelf.page_count(renderer::TRAY_PAGE_SIZE);
+            if self.tray_page >= page_count {
+                self.tray_page = page_count.saturating_sub(1);
+            }
+            if page_count > 1 {
+                if in_rect(renderer::TRAY_PREV_RECT) && self.tray_page > 0 {
+                    self.tray_page -= 1;
+                    unsafe {
+                        let _ = InvalidateRect(self.hwnd, None, BOOL(0));
+                    }
+                    return;
+                }
+                if in_rect(renderer::TRAY_NEXT_RECT)
+                    && self.tray_page + 1 < page_count
+                {
+                    self.tray_page += 1;
+                    unsafe {
+                        let _ = InvalidateRect(self.hwnd, None, BOOL(0));
+                    }
+                    return;
+                }
+            }
+            if in_rect(renderer::TRAY_DOT_MUSIC_RECT) {
+                self.set_state(state::IslandState::Expanded);
+                return;
+            }
+            if in_rect(renderer::TRAY_DOT_POMODORO_RECT) {
+                self.set_state(state::IslandState::Pomodoro);
+                return;
+            }
+            if in_rect(renderer::TRAY_DOT_TODO_RECT) {
+                self.set_state(state::IslandState::Todo);
+                return;
+            }
+            if in_rect(renderer::TRAY_DOT_WATER_RECT) {
+                self.set_state(state::IslandState::Water);
+                return;
+            }
+            if in_rect(renderer::TRAY_DOT_TRAY_RECT) {
+                return;
+            }
+            // Tiles: 4x2 grid from TRAY_TILE_GEOM (x0, y0, w, h, px, py).
+            let (gx, gy, tw, th, px, py) = (
+                renderer::TRAY_TILE_GEOM.0,
+                renderer::TRAY_TILE_GEOM.1,
+                renderer::TRAY_TILE_GEOM.2,
+                renderer::TRAY_TILE_GEOM.3,
+                renderer::TRAY_TILE_GEOM.4,
+                renderer::TRAY_TILE_GEOM.5,
+            );
+            let start = self.tray_page * renderer::TRAY_PAGE_SIZE;
+            let shown = self.shelf.files.len().saturating_sub(start).min(renderer::TRAY_PAGE_SIZE);
+            for i in 0..shown {
+                let col = (i % 4) as f32;
+                let row = (i / 4) as f32;
+                let left = gx + col * px;
+                let top = gy + row * py;
+                if x >= left && x <= left + tw && y >= top && y <= top + th {
+                    let path = self.shelf.files[start + i].clone();
+                    if std::path::Path::new(&path).exists() {
+                        // Open with the associated app (explorer) — std
+                        // only, to avoid ShellExecuteW signature risk.
+                        let _ = std::process::Command::new("explorer.exe")
+                            .arg(&path)
+                            .spawn();
                     }
                     return;
                 }
@@ -703,6 +815,10 @@ impl App {
                 self.set_state(state::IslandState::Todo);
                 return;
             }
+            if in_rect(renderer::WATER_DOT_TRAY_RECT) {
+                self.set_state(state::IslandState::Tray);
+                return;
+            }
             if in_rect(renderer::WATER_DOT_WATER_RECT) {
                 return;
             }
@@ -713,6 +829,85 @@ impl App {
         {
             let target = self.last_section;
             self.set_state(target);
+        }
+    }
+
+    /// Right-click on a tray tile removes that reference only
+    /// (the real file is untouched). Elsewhere, right-click does nothing.
+    fn on_right_click(&mut self, x_px: i32, y_px: i32) {
+        if self.pill.state != state::IslandState::Tray {
+            return;
+        }
+        let scale = window::dpi_scale(self.hwnd);
+        let x = x_px as f32 / scale;
+        let y = y_px as f32 / scale;
+        let (gx, gy, tw, th, px, py) = (
+            renderer::TRAY_TILE_GEOM.0,
+            renderer::TRAY_TILE_GEOM.1,
+            renderer::TRAY_TILE_GEOM.2,
+            renderer::TRAY_TILE_GEOM.3,
+            renderer::TRAY_TILE_GEOM.4,
+            renderer::TRAY_TILE_GEOM.5,
+        );
+        let page_count = self.shelf.page_count(renderer::TRAY_PAGE_SIZE);
+        if self.tray_page >= page_count {
+            self.tray_page = page_count.saturating_sub(1);
+        }
+        let start = self.tray_page * renderer::TRAY_PAGE_SIZE;
+        let shown = self.shelf.files.len().saturating_sub(start).min(renderer::TRAY_PAGE_SIZE);
+        for i in 0..shown {
+            let col = (i % 4) as f32;
+            let row = (i / 4) as f32;
+            let left = gx + col * px;
+            let top = gy + row * py;
+            if x >= left && x <= left + tw && y >= top && y <= top + th {
+                self.shelf.remove(start + i);
+                let new_count = self.shelf.page_count(renderer::TRAY_PAGE_SIZE);
+                if self.tray_page >= new_count {
+                    self.tray_page = new_count.saturating_sub(1);
+                }
+                unsafe {
+                    let _ = InvalidateRect(self.hwnd, None, BOOL(0));
+                }
+                return;
+            }
+        }
+    }
+
+    /// WM_DROPFILES handler (Phase 3a drag-in). The window accepts
+    /// drops via DragAcceptFiles (classic, not full OLE IDropTarget:
+    /// no hover highlight, but the drop itself works from Explorer).
+    /// Every dropped path is added as a reference (dedupe, must
+    /// exist), then the Tray card opens on the last page.
+    fn on_drop_files(&mut self, hdrop_raw: isize) {
+        unsafe {
+            let hdrop = HDROP(hdrop_raw);
+            let count = DragQueryFileW(hdrop, u32::MAX, PWSTR::null(), 0);
+            let mut added = false;
+            for i in 0..count {
+                let len = DragQueryFileW(hdrop, i, PWSTR::null(), 0);
+                if len == 0 {
+                    continue;
+                }
+                let mut buf = vec![0u16; (len + 1) as usize];
+                let got = DragQueryFileW(hdrop, i, PWSTR(buf.as_mut_ptr()), len + 1);
+                if got == 0 {
+                    continue;
+                }
+                let path = String::from_utf16_lossy(&buf[..got as usize]);
+                if self.shelf.add(&path) {
+                    added = true;
+                }
+            }
+            DragFinish(hdrop);
+            if added {
+                self.tray_page = self
+                    .shelf
+                    .page_count(renderer::TRAY_PAGE_SIZE)
+                    .saturating_sub(1);
+                self.set_state(state::IslandState::Tray);
+                let _ = InvalidateRect(self.hwnd, None, BOOL(0));
+            }
         }
     }
 
@@ -732,6 +927,8 @@ impl App {
             &self.water,
             self.todo_editing,
             &self.todo_input,
+            &self.shelf,
+            self.tray_page,
         );
     }
 
@@ -787,6 +984,18 @@ unsafe extern "system" fn wnd_proc(
             let x = ((lparam.0 as u32) & 0xFFFF) as u16 as i16 as i32;
             let y = (((lparam.0 as u32) >> 16) & 0xFFFF) as u16 as i16 as i32;
             app.on_click(x, y);
+            LRESULT(0)
+        }
+        WM_RBUTTONUP => {
+            // Right-click: tray tile remove (Phase 3a); elsewhere no-op.
+            let x = ((lparam.0 as u32) & 0xFFFF) as u16 as i16 as i32;
+            let y = (((lparam.0 as u32) >> 16) & 0xFFFF) as u16 as i16 as i32;
+            app.on_right_click(x, y);
+            LRESULT(0)
+        }
+        0x0233 => {
+            // WM_DROPFILES: file(s) dropped from Explorer onto the pill.
+            app.on_drop_files(lparam.0);
             LRESULT(0)
         }
         WM_TIMER => {
@@ -885,6 +1094,8 @@ pub fn run() -> Result<()> {
             hinstance,
             None,
         )?;
+        // Accept file drops from Explorer (Phase 3a, WM_DROPFILES).
+        let _ = DragAcceptFiles(hwnd, BOOL(1));
         // Background GSMTC poller (started before App so the cache
         // exists from the first tick; it writes the cache, UI only reads).
         let media_cache = Arc::new(Mutex::new(None));
