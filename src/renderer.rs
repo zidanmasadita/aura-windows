@@ -593,9 +593,9 @@ impl Renderer {
                         (&self.text_format_center, &self.white_brush)
                     {
                         let dot_music = D2D_RECT_F {
-                            left: MUSIC_DOT_MUSIC_RECT.0,
+                            left: lw - 28.0,
                             top: MUSIC_DOT_MUSIC_RECT.1,
-                            right: MUSIC_DOT_MUSIC_RECT.2,
+                            right: lw - 12.0,
                             bottom: MUSIC_DOT_MUSIC_RECT.3,
                         };
                         self.draw_text(target, "•", fmt, &dot_music, brush);
@@ -604,9 +604,9 @@ impl Renderer {
                         (&self.text_format_center, &self.gray_brush)
                     {
                         let dot_pomodoro = D2D_RECT_F {
-                            left: MUSIC_DOT_POMODORO_RECT.0,
+                            left: lw - 28.0,
                             top: MUSIC_DOT_POMODORO_RECT.1,
-                            right: MUSIC_DOT_POMODORO_RECT.2,
+                            right: lw - 12.0,
                             bottom: MUSIC_DOT_POMODORO_RECT.3,
                         };
                         self.draw_text(target, "•", fmt, &dot_pomodoro, brush);
@@ -615,9 +615,9 @@ impl Renderer {
                         (&self.text_format_center, &self.gray_brush)
                     {
                         let dot_todo = D2D_RECT_F {
-                            left: MUSIC_DOT_TODO_RECT.0,
+                            left: lw - 28.0,
                             top: MUSIC_DOT_TODO_RECT.1,
-                            right: MUSIC_DOT_TODO_RECT.2,
+                            right: lw - 12.0,
                             bottom: MUSIC_DOT_TODO_RECT.3,
                         };
                         self.draw_text(target, "•", fmt, &dot_todo, brush);
@@ -626,9 +626,9 @@ impl Renderer {
                         (&self.text_format_center, &self.gray_brush)
                     {
                         let dot_water = D2D_RECT_F {
-                            left: MUSIC_DOT_WATER_RECT.0,
+                            left: lw - 28.0,
                             top: MUSIC_DOT_WATER_RECT.1,
-                            right: MUSIC_DOT_WATER_RECT.2,
+                            right: lw - 12.0,
                             bottom: MUSIC_DOT_WATER_RECT.3,
                         };
                         self.draw_text(target, "•", fmt, &dot_water, brush);
@@ -637,9 +637,9 @@ impl Renderer {
                         (&self.text_format_center, &self.gray_brush)
                     {
                         let dot_tray = D2D_RECT_F {
-                            left: MUSIC_DOT_TRAY_RECT.0,
+                            left: lw - 28.0,
                             top: MUSIC_DOT_TRAY_RECT.1,
-                            right: MUSIC_DOT_TRAY_RECT.2,
+                            right: lw - 12.0,
                             bottom: MUSIC_DOT_TRAY_RECT.3,
                         };
                         self.draw_text(target, "•", fmt, &dot_tray, brush);
@@ -980,9 +980,9 @@ impl Renderer {
                         (&self.text_format_center, &self.gray_brush)
                     {
                         let dot_music = D2D_RECT_F {
-                            left: POMODORO_DOT_MUSIC_RECT.0,
+                            left: lw - 28.0,
                             top: POMODORO_DOT_MUSIC_RECT.1,
-                            right: POMODORO_DOT_MUSIC_RECT.2,
+                            right: lw - 12.0,
                             bottom: POMODORO_DOT_MUSIC_RECT.3,
                         };
                         self.draw_text(target, "•", fmt, &dot_music, brush);
@@ -991,9 +991,9 @@ impl Renderer {
                         (&self.text_format_center, &self.white_brush)
                     {
                         let dot_pomodoro = D2D_RECT_F {
-                            left: POMODORO_DOT_POMODORO_RECT.0,
+                            left: lw - 28.0,
                             top: POMODORO_DOT_POMODORO_RECT.1,
-                            right: POMODORO_DOT_POMODORO_RECT.2,
+                            right: lw - 12.0,
                             bottom: POMODORO_DOT_POMODORO_RECT.3,
                         };
                         self.draw_text(target, "•", fmt, &dot_pomodoro, brush);
@@ -1002,9 +1002,9 @@ impl Renderer {
                         (&self.text_format_center, &self.gray_brush)
                     {
                         let dot_todo = D2D_RECT_F {
-                            left: POMODORO_DOT_TODO_RECT.0,
+                            left: lw - 28.0,
                             top: POMODORO_DOT_TODO_RECT.1,
-                            right: POMODORO_DOT_TODO_RECT.2,
+                            right: lw - 12.0,
                             bottom: POMODORO_DOT_TODO_RECT.3,
                         };
                         self.draw_text(target, "•", fmt, &dot_todo, brush);
@@ -1013,9 +1013,9 @@ impl Renderer {
                         (&self.text_format_center, &self.gray_brush)
                     {
                         let dot_water = D2D_RECT_F {
-                            left: POMODORO_DOT_WATER_RECT.0,
+                            left: lw - 28.0,
                             top: POMODORO_DOT_WATER_RECT.1,
-                            right: POMODORO_DOT_WATER_RECT.2,
+                            right: lw - 12.0,
                             bottom: POMODORO_DOT_WATER_RECT.3,
                         };
                         self.draw_text(target, "•", fmt, &dot_water, brush);
@@ -1024,9 +1024,9 @@ impl Renderer {
                         (&self.text_format_center, &self.gray_brush)
                     {
                         let dot_tray = D2D_RECT_F {
-                            left: POMODORO_DOT_TRAY_RECT.0,
+                            left: lw - 28.0,
                             top: POMODORO_DOT_TRAY_RECT.1,
-                            right: POMODORO_DOT_TRAY_RECT.2,
+                            right: lw - 12.0,
                             bottom: POMODORO_DOT_TRAY_RECT.3,
                         };
                         self.draw_text(target, "•", fmt, &dot_tray, brush);
@@ -1141,9 +1141,9 @@ impl Renderer {
                         (&self.text_format_center, &self.gray_brush)
                     {
                         let dot_music = D2D_RECT_F {
-                            left: TODO_DOT_MUSIC_RECT.0,
+                            left: lw - 28.0,
                             top: TODO_DOT_MUSIC_RECT.1,
-                            right: TODO_DOT_MUSIC_RECT.2,
+                            right: lw - 12.0,
                             bottom: TODO_DOT_MUSIC_RECT.3,
                         };
                         self.draw_text(target, "•", fmt, &dot_music, brush);
@@ -1152,9 +1152,9 @@ impl Renderer {
                         (&self.text_format_center, &self.gray_brush)
                     {
                         let dot_pomodoro = D2D_RECT_F {
-                            left: TODO_DOT_POMODORO_RECT.0,
+                            left: lw - 28.0,
                             top: TODO_DOT_POMODORO_RECT.1,
-                            right: TODO_DOT_POMODORO_RECT.2,
+                            right: lw - 12.0,
                             bottom: TODO_DOT_POMODORO_RECT.3,
                         };
                         self.draw_text(target, "•", fmt, &dot_pomodoro, brush);
@@ -1163,9 +1163,9 @@ impl Renderer {
                         (&self.text_format_center, &self.white_brush)
                     {
                         let dot_todo = D2D_RECT_F {
-                            left: TODO_DOT_TODO_RECT.0,
+                            left: lw - 28.0,
                             top: TODO_DOT_TODO_RECT.1,
-                            right: TODO_DOT_TODO_RECT.2,
+                            right: lw - 12.0,
                             bottom: TODO_DOT_TODO_RECT.3,
                         };
                         self.draw_text(target, "•", fmt, &dot_todo, brush);
@@ -1174,9 +1174,9 @@ impl Renderer {
                         (&self.text_format_center, &self.gray_brush)
                     {
                         let dot_water = D2D_RECT_F {
-                            left: TODO_DOT_WATER_RECT.0,
+                            left: lw - 28.0,
                             top: TODO_DOT_WATER_RECT.1,
-                            right: TODO_DOT_WATER_RECT.2,
+                            right: lw - 12.0,
                             bottom: TODO_DOT_WATER_RECT.3,
                         };
                         self.draw_text(target, "•", fmt, &dot_water, brush);
@@ -1185,9 +1185,9 @@ impl Renderer {
                         (&self.text_format_center, &self.gray_brush)
                     {
                         let dot_tray = D2D_RECT_F {
-                            left: TODO_DOT_TRAY_RECT.0,
+                            left: lw - 28.0,
                             top: TODO_DOT_TRAY_RECT.1,
-                            right: TODO_DOT_TRAY_RECT.2,
+                            right: lw - 12.0,
                             bottom: TODO_DOT_TRAY_RECT.3,
                         };
                         self.draw_text(target, "•", fmt, &dot_tray, brush);
@@ -1284,9 +1284,9 @@ impl Renderer {
                         (&self.text_format_center, &self.gray_brush)
                     {
                         let dot_music = D2D_RECT_F {
-                            left: WATER_DOT_MUSIC_RECT.0,
+                            left: lw - 28.0,
                             top: WATER_DOT_MUSIC_RECT.1,
-                            right: WATER_DOT_MUSIC_RECT.2,
+                            right: lw - 12.0,
                             bottom: WATER_DOT_MUSIC_RECT.3,
                         };
                         self.draw_text(target, "•", fmt, &dot_music, brush);
@@ -1295,9 +1295,9 @@ impl Renderer {
                         (&self.text_format_center, &self.gray_brush)
                     {
                         let dot_pomodoro = D2D_RECT_F {
-                            left: WATER_DOT_POMODORO_RECT.0,
+                            left: lw - 28.0,
                             top: WATER_DOT_POMODORO_RECT.1,
-                            right: WATER_DOT_POMODORO_RECT.2,
+                            right: lw - 12.0,
                             bottom: WATER_DOT_POMODORO_RECT.3,
                         };
                         self.draw_text(target, "•", fmt, &dot_pomodoro, brush);
@@ -1306,9 +1306,9 @@ impl Renderer {
                         (&self.text_format_center, &self.gray_brush)
                     {
                         let dot_todo = D2D_RECT_F {
-                            left: WATER_DOT_TODO_RECT.0,
+                            left: lw - 28.0,
                             top: WATER_DOT_TODO_RECT.1,
-                            right: WATER_DOT_TODO_RECT.2,
+                            right: lw - 12.0,
                             bottom: WATER_DOT_TODO_RECT.3,
                         };
                         self.draw_text(target, "•", fmt, &dot_todo, brush);
@@ -1317,9 +1317,9 @@ impl Renderer {
                         (&self.text_format_center, &self.white_brush)
                     {
                         let dot_water = D2D_RECT_F {
-                            left: WATER_DOT_WATER_RECT.0,
+                            left: lw - 28.0,
                             top: WATER_DOT_WATER_RECT.1,
-                            right: WATER_DOT_WATER_RECT.2,
+                            right: lw - 12.0,
                             bottom: WATER_DOT_WATER_RECT.3,
                         };
                         self.draw_text(target, "•", fmt, &dot_water, brush);
@@ -1328,9 +1328,9 @@ impl Renderer {
                         (&self.text_format_center, &self.gray_brush)
                     {
                         let dot_tray = D2D_RECT_F {
-                            left: WATER_DOT_TRAY_RECT.0,
+                            left: lw - 28.0,
                             top: WATER_DOT_TRAY_RECT.1,
-                            right: WATER_DOT_TRAY_RECT.2,
+                            right: lw - 12.0,
                             bottom: WATER_DOT_TRAY_RECT.3,
                         };
                         self.draw_text(target, "•", fmt, &dot_tray, brush);
@@ -1555,10 +1555,12 @@ impl Renderer {
                         if let (Some(fmt), Some(brush)) =
                             (&self.text_format_center, brush)
                         {
+                            // Dots follow current width (see music/pomodoro/
+                            // todo/water dots above): right edge -28..-12.
                             let r = D2D_RECT_F {
-                                left: dr.0,
+                                left: lw - 28.0,
                                 top: dr.1,
-                                right: dr.2,
+                                right: lw - 12.0,
                                 bottom: dr.3,
                             };
                             self.draw_text(target, "•", fmt, &r, brush);

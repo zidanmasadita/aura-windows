@@ -61,6 +61,12 @@ fn init_com() {
 }
 
 /// Start the background poller: one thread, every 250ms, poll GSMTC
+/// (NOT USED since 2026-10-27: kept for reference only. It failed in
+/// both MTA and STA — a thread with no message loop never returns from
+/// RequestAsync().get(), so the cache stayed None and the card always
+/// said "No music playing". Polling is back on the UI thread, 1s, from
+/// the tick in app.rs, which is the combination that worked in Phase 1.)
+#[allow(dead_code)]
 /// (blocking `.get()` is fine HERE, off the UI thread) and write the
 /// result into `cache`. The UI thread only ever reads `cache`, never
 /// calls poll() itself. A stuck poll only freezes the cache, never

@@ -11,7 +11,6 @@
 //! media::poll() or a control directly (Not Responding fix 2026-10-27:
 //! blocking WinRT `.get()` on the UI thread froze the message loop).
 
-use std::sync::{Arc, Mutex};
 
 use windows::core::{w, Result, PCWSTR};
 use windows::Win32::UI::Shell::{DragAcceptFiles, DragFinish, DragQueryFileW, HDROP};
@@ -58,7 +57,9 @@ pub struct App {
     clock_text: String, // HH:MM, updated on 1s tick
     media: Option<media::MediaInfo>, // Current GSMTC session (Phase 1), None = silent.
     media_tracker: media::MediaTracker, // Wall-clock position estimate (realtime fix).
-    media_cache: Arc<Mutex<Option<media::MediaInfo>>>, // Written by the poller thread, read by the tick (never polled on UI thread).
+    last_raw: Option<media::MediaInfo>, // Last UI-thread GSMTC poll (1s), fed to MediaTracker every tick.
+    poll_counter: u32, // Tick counter: poll on UI thread every 4th tick (1s), not every 250ms tick.
+    suppress_leave: bool, // True after a shrink: cursor may end up outside the smaller window without moving; that leave is not real (see set_state).
     media_none_streak: u32, // Consecutive ticks with no GSMTC session (transient-None hysteresis, hover-flicker fix).
     lyrics: Option<lyrics::LyricsCache>, // Fetched lyrics for current song (Phase 1b), None = not fetched yet.
     pomodoro: pomodoro::Pomodoro, // In-memory pomodoro timer (Phase 2).
@@ -78,7 +79,7 @@ fn current_time_text() -> String {
 }
 
 impl App {
-    fn new(hwnd: HWND, media_cache: Arc<Mutex<Option<media::MediaInfo>>>) -> Result<Box<Self>> {
+    fn new(hwnd: HWND) -> Result<Box<Self>> {
         let renderer = renderer::Renderer::new()?;
         let mut app = Box::new(Self {
             hwnd,
@@ -89,7 +90,9 @@ impl App {
             clock_text: current_time_text(),
             media: None,
             media_tracker: media::MediaTracker::new(),
-            media_cache,
+            last_raw: None,
+            poll_counter: 0,
+            suppress_leave: false,
             media_none_streak: 0,
             lyrics: None,
             pomodoro: pomodoro::Pomodoro::new(),
@@ -239,6 +242,19 @@ impl App {
             self.todo = todo::TodoList::load();
         }
         let (to_w, to_h) = new_state.logical_size();
+        // Shrink-leave suppression (freeze/dot bug 2026-10-27): returning
+        // to Music shrinks 640/700 wide to 520, top-center anchored, so
+        // the right edge moves left by 60-90px and a cursor sitting on
+        // the old right-edge dot (x 612) ends up OUTSIDE the new window
+        // without the user moving the mouse at all. The WM_MOUSELEAVE
+        // + tick close that follow are artefacts of the shrink, not a
+        // real leave: they interrupt the morph and leave the card
+        // frozen at the previous size. Suppress the first leave after
+        // any shrink; the next mouse move (a real re-enter) clears it,
+        // so a later genuine leave still closes normally.
+        if to_w < from_w - 0.01 || to_h < from_h - 0.01 {
+            self.suppress_leave = true;
+        }
         // If size is already the target, no animation needed.
         if (from_w - to_w).abs() < 0.01 && (from_h - to_h).abs() < 0.01 {
             self.pill.width = to_w;
@@ -276,18 +292,22 @@ impl App {
     fn on_timer(&mut self, id: usize) {
         match id {
             TIMER_TICK => {
-                // 0.25s tick: read the poller-thread cache + update
-                // clock + repaint NOW. NEVER media::poll() here: a
-                // blocking WinRT call on this thread is what froze the
-                // window into "Not Responding" when music was playing.
-                // (Was 1s + async InvalidateRect; user report 2026-10-27:
-                // open lyrics panel did not advance until pill reopened,
-                // so paint synchronously here instead of queuing WM_PAINT.)
-                let cached = self
-                    .media_cache
-                    .lock()
-                    .ok()
-                    .and_then(|guard| guard.clone());
+                // 0.25s tick: poll GSMTC on the UI thread every 4th tick
+                // (1s) + update clock + repaint NOW. The background
+                // poller thread is REMOVED (see media.rs): it failed in
+                // both MTA (b19b92a) and STA (9f1f911) — a thread with
+                // no message loop never returns from RequestAsync, so
+                // the cache stayed None forever ("No music playing").
+                // The UI thread + message loop is the combination that
+                // worked in Phase 1a/1b. Polling only every 1s (not
+                // every 250ms tick) + async controls + MediaTracker
+                // wall-clock progress between polls keeps the
+                // Not Responding risk at the original 1s-poll level.
+                self.poll_counter += 1;
+                if self.poll_counter % 4 == 1 {
+                    self.last_raw = media::poll();
+                }
+                let cached = self.last_raw.clone();
                 // Transient-None hysteresis: a single failed/empty GSMTC
                 // poll must not close the card (that close + hover-reopen
                 // is one open-close flicker source). Only after 4
@@ -341,7 +361,10 @@ impl App {
                     // from the tick: the card stays until a real leave
                     // (debounced below) closes it. Without this guard,
                     // tick-close + hover-reopen alternate every 250ms.
-                    if !self.cursor_inside_window() {
+                    // Also suppressed after a shrink (see set_state):
+                    // the cursor may be outside only because the window
+                    // shrank away from it, not because the user left.
+                    if !self.suppress_leave && !self.cursor_inside_window() {
                         self.set_state(state::IslandState::Zen);
                     }
                 }
@@ -425,6 +448,9 @@ impl App {
     }
 
     fn on_mouse_move(&mut self) {
+        // A real re-enter: any shrink-suppression is over, future
+        // leaves are genuine again.
+        self.suppress_leave = false;
         // A re-enter cancels a pending debounced close.
         unsafe {
             let _ = KillTimer(self.hwnd, TIMER_CLOSE);
@@ -448,6 +474,13 @@ impl App {
         // (the user may move the mouse away mid-typing; Esc or a click
         // outside the input field ends editing, not mouse-leave).
         if self.todo_editing {
+            return;
+        }
+        // Shrink-suppressed leave (see set_state): ignore it outright
+        // (no close timer, no close); the flag is consumed here, and a
+        // later leave after a mouse-move re-enter will be real.
+        if self.suppress_leave {
+            self.suppress_leave = false;
             return;
         }
         // Debounced close (hover-glitch fix 2026-10-27, round 2):
@@ -1142,12 +1175,11 @@ pub fn run() -> Result<()> {
         )?;
         // Accept file drops from Explorer (Phase 3a, WM_DROPFILES).
         let _ = DragAcceptFiles(hwnd, BOOL(1));
-        // Background GSMTC poller (started before App so the cache
-        // exists from the first tick; it writes the cache, UI only reads).
-        let media_cache = Arc::new(Mutex::new(None));
-        media::spawn_poller(media_cache.clone());
+        // No background poller: GSMTC is polled on the UI thread
+        // every 1s from the tick (see media.rs — a thread with no
+        // message loop never returns from RequestAsync).
         // App (owns renderer + state). Store in USERDATA for WndProc.
-        let app = App::new(hwnd, media_cache)?;
+        let app = App::new(hwnd)?;
         let app_ptr = Box::into_raw(app);
         SetWindowLongPtrW(hwnd, GWLP_USERDATA, app_ptr as isize);
         // Tray icon (must be after window creation; uses hwnd).
