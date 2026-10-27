@@ -7,9 +7,9 @@
 //! migration is Phase 5 polish if visual quality demands it (Nusa itself used
 //! SetWindowRgn for shape; timer-driven animation, not DComp keyframes).
 
-use windows::Win32::Foundation::{BOOL, HWND, RECT};
+use windows::Win32::Foundation::{BOOL, HWND, POINT, RECT};
 use windows::Win32::Graphics::Gdi::{
-    CreateRoundRectRgn, DeleteObject, HGDIOBJ, HRGN, SetWindowRgn,
+    ALTERNATE, CreatePolygonRgn, DeleteObject, HGDIOBJ, HRGN, SetWindowRgn,
 };
 use windows::Win32::UI::HiDpi::GetDpiForWindow;
 use windows::Win32::UI::WindowsAndMessaging::{
@@ -69,15 +69,59 @@ pub fn place_top_center(hwnd: HWND, width: i32, height: i32) {
     }
 }
 
-/// Set a rounded-rect window region (pill shape). radius = height/2 for short
-/// pills (fully rounded), 28pt*scale for tall cards (Aura's 28pt bottom
-/// rounding; top corners use the same radius as an approximation — the
-/// concave tuck is drawn by D2D, the region only clips hit-testing).
+/// Set a tuck-shaped window region (Aura Mac shape): concave 12pt tuck
+/// at the top corners (flowing into the top edge, like a notch) +
+/// convex bottom corners (radius param: height/2 for short pills,
+/// 28pt*scale for tall cards). Built as a polygon (circular arcs, 8
+/// segments per corner). D2D still draws a rounded rect, which this
+/// region clips to the tuck silhouette (correct shape; the 0.5px stroke
+/// at the tuck curves is clipped — a PathGeometry stroke following the
+/// tuck exactly is a later polish step).
 /// The system owns the region after a successful SetWindowRgn (do not delete).
 /// width/height/radius are PHYSICAL pixels.
 pub fn set_pill_region(hwnd: HWND, width: i32, height: i32, radius: i32) {
+    let scale = dpi_scale(hwnd);
+    let tuck = (12.0 * scale).round() as i32;
+    let w = width.max(1);
+    let h = height.max(1);
+    let r = radius.clamp(0, h / 2);
+    let t = tuck.clamp(0, w / 2);
+    // Polygon points (clockwise from top edge). Arc helper appends
+    // intermediate points only (endpoints are pushed explicitly).
+    let mut pts: Vec<POINT> = Vec::new();
+    let seg = 8i32;
+    let mut push_arc = |pts: &mut Vec<POINT>, cx: i32, cy: i32, rad: i32, a0: f32, a1: f32| {
+        for i in 1..seg {
+            let a = a0 + (a1 - a0) * (i as f32 / seg as f32);
+            pts.push(POINT {
+                x: cx + (rad as f32 * a.cos()).round() as i32,
+                y: cy + (rad as f32 * a.sin()).round() as i32,
+            });
+        }
+    };
+    // Top edge.
+    pts.push(POINT { x: t, y: 0 });
+    pts.push(POINT { x: w - t, y: 0 });
+    // Top-right tuck (concave, center at outer corner (w, 0)): 180deg -> 90deg.
+    push_arc(&mut pts, w, 0, t, std::f32::consts::PI, std::f32::consts::FRAC_PI_2);
+    pts.push(POINT { x: w, y: t });
+    // Right side.
+    pts.push(POINT { x: w, y: h - r });
+    // Bottom-right (convex, center (w-r, h-r)): 0deg -> 90deg.
+    push_arc(&mut pts, w - r, h - r, r, 0.0, std::f32::consts::FRAC_PI_2);
+    pts.push(POINT { x: w - r, y: h });
+    // Bottom edge.
+    pts.push(POINT { x: r, y: h });
+    // Bottom-left (convex, center (r, h-r)): 90deg -> 180deg.
+    push_arc(&mut pts, r, h - r, r, std::f32::consts::FRAC_PI_2, std::f32::consts::PI);
+    pts.push(POINT { x: 0, y: h - r });
+    // Left side.
+    pts.push(POINT { x: 0, y: t });
+    // Top-left tuck (concave, center (0, 0)): 90deg -> 0deg.
+    // (Region auto-closes back to (t, 0).)
+    push_arc(&mut pts, 0, 0, t, std::f32::consts::FRAC_PI_2, 0.0);
     unsafe {
-        let rgn: HRGN = CreateRoundRectRgn(0, 0, width, height, radius * 2, radius * 2);
+        let rgn: HRGN = CreatePolygonRgn(&pts, ALTERNATE);
         if rgn.0 == std::ptr::null_mut() {
             return;
         }
