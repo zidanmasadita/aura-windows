@@ -1,0 +1,26 @@
+[package]
+name = "aura"
+version = "0.1.0"
+edition = "2021"
+description = "Aura for Windows — floating pill (Dynamic Island) port of Aura (Mac), native Rust + Win32 + Direct2D"
+license = "MIT"
+
+[dependencies]
+windows = { version = "0.58", features = [
+    "Win32_Foundation",
+    "Win32_UI_WindowsAndMessaging",
+    "Win32_UI_HiDpi",
+    "Win32_UI_Shell",
+    "Win32_Graphics_Direct2D",
+    "Win32_Graphics_DirectWrite",
+    "Win32_Graphics_Gdi",
+    "Win32_System_LibraryLoader",
+    "Win32_System_Threading",
+    "Win32_System_Time",
+] }
+
+[profile.release]
+# Keep debug info in release builds during Phase 0-4 so crash stacks
+# name source lines (helps pinpoint issues from user-pasted stacks).
+# Strip in Phase 5 packaging if size matters.
+debug = true
