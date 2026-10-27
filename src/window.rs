@@ -8,11 +8,13 @@
 //! SetWindowRgn for shape; timer-driven animation, not DComp keyframes).
 
 use windows::Win32::Foundation::{BOOL, HWND, RECT};
-use windows::Win32::Graphics::Gdi::{CreateRoundRectRgn, DeleteObject, HGDIOBJ, HRGN};
+use windows::Win32::Graphics::Gdi::{
+    CreateRoundRectRgn, DeleteObject, HGDIOBJ, HRGN, SetWindowRgn,
+};
 use windows::Win32::UI::HiDpi::GetDpiForWindow;
 use windows::Win32::UI::WindowsAndMessaging::{
-    SetWindowPos, SetWindowRgn, SystemParametersInfoW, HWND_TOPMOST, SPI_GETWORKAREA,
-    SWP_NOACTIVATE, SWP_SHOWWINDOW, SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS,
+    SetWindowPos, SystemParametersInfoW, HWND_TOPMOST, SPI_GETWORKAREA, SWP_NOACTIVATE,
+    SWP_SHOWWINDOW, SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS,
 };
 
 /// DPI scale for a window (1.0 at 96 DPI = 100%).
@@ -30,13 +32,13 @@ pub fn dpi_scale(hwnd: HWND) -> f32 {
 pub fn work_area() -> RECT {
     unsafe {
         let mut rect = RECT::default();
-        let ok = SystemParametersInfoW(
+        let result = SystemParametersInfoW(
             SPI_GETWORKAREA,
             0,
-            &mut rect as *mut RECT as *mut core::ffi::c_void,
+            Some(&mut rect as *mut RECT as *mut core::ffi::c_void),
             SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS(0),
         );
-        if ok.0 != 0 && rect.right > rect.left && rect.bottom > rect.top {
+        if result.is_ok() && rect.right > rect.left && rect.bottom > rect.top {
             return rect;
         }
     }
@@ -76,7 +78,7 @@ pub fn place_top_center(hwnd: HWND, width: i32, height: i32) {
 pub fn set_pill_region(hwnd: HWND, width: i32, height: i32, radius: i32) {
     unsafe {
         let rgn: HRGN = CreateRoundRectRgn(0, 0, width, height, radius * 2, radius * 2);
-        if rgn.0 == 0 {
+        if rgn.0 == std::ptr::null_mut() {
             return;
         }
         let ok = SetWindowRgn(hwnd, rgn, BOOL(1));

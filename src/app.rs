@@ -6,10 +6,13 @@
 
 use windows::core::{w, Result, PCWSTR};
 use windows::Win32::Foundation::*;
+use windows::Win32::Graphics::Gdi::{HBRUSH, InvalidateRect};
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::System::Threading::{CreateMutexW, ReleaseMutex};
-use windows::Win32::System::Time::GetLocalTime;
-use windows::Win32::UI::HiDpi::SetProcessDpiAwarenessContext;
+use windows::Win32::UI::HiDpi::{
+    SetProcessDpiAwarenessContext, DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2,
+};
+use windows::Win32::UI::Input::Mouse::{TRACKMOUSEEVENT, TME_LEAVE, TrackMouseEvent, WM_MOUSELEAVE};
 use windows::Win32::UI::WindowsAndMessaging::*;
 
 use crate::animator;
@@ -32,11 +35,9 @@ pub struct App {
 }
 
 fn current_time_text() -> String {
-    unsafe {
-        let mut st = SYSTEMTIME::default();
-        GetLocalTime(&mut st);
-        format!("{:02}:{:02}", st.wHour, st.wMinute)
-    }
+    // Local clock via chrono (avoids Win32 GetLocalTime module uncertainty
+    // in windows-rs 0.58; chrono handles Windows local time internally).
+    chrono::Local::now().format("%H:%M").to_string()
 }
 
 impl App {
@@ -263,7 +264,8 @@ pub fn run() -> Result<()> {
         }
         // DPI awareness (PerMonitorV2) before window creation.
         let _ = SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
-        let hinstance = GetModuleHandleW(None)?;
+        let hmodule = GetModuleHandleW(None)?;
+        let hinstance: HINSTANCE = hmodule.into();
         // Window class.
         let class_name = w!("AuraIslandWindow");
         let wc = WNDCLASSEXW {
@@ -275,10 +277,10 @@ pub fn run() -> Result<()> {
             hInstance: hinstance,
             hIcon: LoadIconW(None, IDI_APPLICATION).unwrap_or_default(),
             hCursor: LoadCursorW(None, IDC_ARROW).unwrap_or_default(),
-            hbrBackground: HBRUSH(0), // No background brush (D2D paints everything).
+            hbrBackground: HBRUSH(std::ptr::null_mut()), // No background brush (D2D paints everything).
             lpszMenuName: PCWSTR::null(),
             lpszClassName: class_name,
-            hIconSm: HICON(0),
+            hIconSm: HICON(std::ptr::null_mut()),
         };
         let atom = RegisterClassExW(&wc);
         if atom == 0 {
@@ -300,10 +302,7 @@ pub fn run() -> Result<()> {
             None,
             Some(hinstance),
             None,
-        );
-        if hwnd.0 == 0 {
-            return Err(windows::core::Error::from_win32());
-        }
+        )?;
         // App (owns renderer + state). Store in USERDATA for WndProc.
         let app = App::new(hwnd)?;
         let app_ptr = Box::into_raw(app);

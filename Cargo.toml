@@ -11,13 +11,16 @@ windows = { version = "0.58", features = [
     "Win32_UI_WindowsAndMessaging",
     "Win32_UI_HiDpi",
     "Win32_UI_Shell",
+    "Win32_UI_Input_Mouse",
     "Win32_Graphics_Direct2D",
     "Win32_Graphics_DirectWrite",
+    "Win32_Graphics_Dxgi",
     "Win32_Graphics_Gdi",
     "Win32_System_LibraryLoader",
     "Win32_System_Threading",
-    "Win32_System_Time",
+    "Win32_Security",
 ] }
+chrono = "0.4"
 
 [profile.release]
 # Keep debug info in release builds during Phase 0-4 so crash stacks

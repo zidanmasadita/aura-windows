@@ -10,19 +10,19 @@
 //! mismatch, paste it — Eve cannot compile Rust in this VM, so the first
 //! build on the user's Windows PC is where signatures get corrected.
 
-use windows::core::Result;
+use windows::core::{Interface, Result};
 use windows::Win32::Foundation::HWND;
 use windows::Win32::Graphics::Direct2D::*;
 use windows::Win32::Graphics::DirectWrite::*;
 use windows::Win32::Graphics::Dxgi::Common::DXGI_FORMAT_B8G8R8A8_UNORM;
-use windows::Win32::UI::WindowsAndMessaging::ValidateRect;
+use windows::Win32::Graphics::Gdi::ValidateRect;
 
 use crate::state::IslandState;
 use crate::window;
 
 pub struct Renderer {
     factory: ID2D1Factory,
-    target: Option<ID2D1HwndRenderTarget>,
+    target: Option<ID2D1RenderTarget>,
     dwrite: IDWriteFactory,
     text_format: Option<IDWriteTextFormat>,
     text_format_small: Option<IDWriteTextFormat>,
@@ -38,8 +38,7 @@ impl Renderer {
             // Factory (single-threaded: all drawing happens on the UI thread).
             let factory: ID2D1Factory =
                 D2D1CreateFactory(D2D1_FACTORY_TYPE_SINGLE_THREADED, None)?;
-            let dwrite: IDWriteFactory =
-                DWriteCreateFactory(DWRITE_FACTORY_TYPE_SHARED, None)?;
+            let dwrite: IDWriteFactory = DWriteCreateFactory(DWRITE_FACTORY_TYPE_SHARED)?;
             Ok(Self {
                 factory,
                 target: None,
@@ -93,7 +92,13 @@ impl Renderer {
                 },
                 presentOptions: D2D1_PRESENT_OPTIONS_NONE,
             };
-            let Ok(target) = self.factory.CreateHwndRenderTarget(&props, &hwnd_props) else {
+            let Ok(hwnd_target) = self.factory.CreateHwndRenderTarget(&props, &hwnd_props) else {
+                return false;
+            };
+            // Drawing methods (Clear, Fill, Draw, DrawText, CreateSolidColorBrush,
+            // Resize) live on the base ID2D1RenderTarget, not on ID2D1HwndRenderTarget
+            // (windows-rs 0.58 does not Deref COM bases); cast once, store the base.
+            let Ok(target) = hwnd_target.cast::<ID2D1RenderTarget>() else {
                 return false;
             };
             // Brushes (None = default brush properties: opacity 1.0, identity).
@@ -294,7 +299,7 @@ impl Renderer {
     /// Draw UTF-8 text with a DWrite format into a layout rect.
     fn draw_text(
         &self,
-        target: &ID2D1HwndRenderTarget,
+        target: &ID2D1RenderTarget,
         text: &str,
         format: &IDWriteTextFormat,
         rect: &D2D1_RECT_F,

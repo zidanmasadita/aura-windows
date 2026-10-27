@@ -4,12 +4,12 @@
 //! and "Quit". Callback message = WM_APP + 1.
 
 use windows::core::w;
-use windows::Win32::Foundation::HWND;
+use windows::Win32::Foundation::{HWND, POINT};
 use windows::Win32::UI::Shell::{Shell_NotifyIconW, NIM_ADD, NIM_DELETE, NOTIFYICONDATAW, NIF_ICON, NIF_MESSAGE, NIF_TIP};
 use windows::Win32::UI::WindowsAndMessaging::{
     AppendMenuW, CreatePopupMenu, DestroyMenu, GetCursorPos, LoadIconW, MessageBoxW,
     SetForegroundWindow, TrackPopupMenu, IDI_APPLICATION, MB_ICONINFORMATION, MB_OK,
-    MF_STRING, POINT, TPM_RETURNCMD, TPM_RIGHTBUTTON,
+    MF_STRING, TPM_RETURNCMD, TPM_RIGHTBUTTON,
 };
 
 pub const TRAY_CALLBACK_MSG: u32 = 0x8001; // WM_APP + 1
@@ -69,14 +69,16 @@ pub fn show_menu(hwnd: HWND) -> usize {
         let id = TrackPopupMenu(menu, TPM_RIGHTBUTTON | TPM_RETURNCMD, pt.x, pt.y, 0, hwnd, None);
         // TrackPopupMenu does not destroy the menu; free it to avoid a leak.
         let _ = DestroyMenu(menu);
-        id as usize
+        // TrackPopupMenu returns BOOL in windows-rs 0.58; with TPM_RETURNCMD the
+        // inner i32 IS the selected menu id (0 = dismissed).
+        id.0 as usize
     }
 }
 
 pub fn show_status_placeholder(hwnd: HWND) {
     unsafe {
         let _ = MessageBoxW(
-            Some(hwnd),
+            hwnd,
             w!("Aura Fase 0\n\nStatus Deteksi menyusul di Fase 4.\nGSMTC, Bluetooth, dan diagnostik belum aktif."),
             w!("Aura"),
             MB_OK | MB_ICONINFORMATION,
