@@ -12,7 +12,7 @@ use windows::Win32::System::Threading::{CreateMutexW, ReleaseMutex};
 use windows::Win32::UI::HiDpi::{
     SetProcessDpiAwarenessContext, DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2,
 };
-use windows::Win32::UI::Input::KeyboardAndMouse::{TRACKMOUSEEVENT, TME_LEAVE, TrackMouseEvent, WM_MOUSELEAVE};
+use windows::Win32::UI::Input::KeyboardAndMouse::{TRACKMOUSEEVENT, TME_LEAVE, TrackMouseEvent};
 use windows::Win32::UI::WindowsAndMessaging::*;
 
 use crate::animator;
@@ -24,6 +24,10 @@ use crate::window;
 const TIMER_TICK: usize = 1; // 1s: clock + (Phase 1+) media poll
 const TIMER_ALERT: usize = 2; // 0.25s: alert placeholder (Phase 4)
 const TIMER_ANIM: usize = 3; // 16ms: size animation (only while animating)
+// Win32 WM_MOUSELEAVE (0x02A3), sent by TrackMouseEvent when the cursor
+// leaves the window. Defined locally because windows-rs 0.58 does not export
+// it from KeyboardAndMouse nor WindowsAndMessaging.
+const WM_MOUSELEAVE: u32 = 0x02A3;
 
 pub struct App {
     hwnd: HWND,
@@ -300,7 +304,7 @@ pub fn run() -> Result<()> {
             32,
             None,
             None,
-            Some(hinstance),
+            hinstance,
             None,
         )?;
         // App (owns renderer + state). Store in USERDATA for WndProc.

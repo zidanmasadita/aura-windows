@@ -82,7 +82,7 @@ pub fn set_pill_region(hwnd: HWND, width: i32, height: i32, radius: i32) {
             return;
         }
         let ok = SetWindowRgn(hwnd, rgn, BOOL(1));
-        if ok.0 == 0 {
+        if ok == 0 {
             // System did not take ownership; free it to avoid a GDI leak.
             let _ = DeleteObject(HGDIOBJ(rgn.0));
         }
