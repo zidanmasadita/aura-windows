@@ -12,7 +12,7 @@ use windows::Win32::System::Threading::{CreateMutexW, ReleaseMutex};
 use windows::Win32::UI::HiDpi::{
     SetProcessDpiAwarenessContext, DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2,
 };
-use windows::Win32::UI::Input::Mouse::{TRACKMOUSEEVENT, TME_LEAVE, TrackMouseEvent, WM_MOUSELEAVE};
+use windows::Win32::UI::Input::KeyboardAndMouse::{TRACKMOUSEEVENT, TME_LEAVE, TrackMouseEvent, WM_MOUSELEAVE};
 use windows::Win32::UI::WindowsAndMessaging::*;
 
 use crate::animator;
