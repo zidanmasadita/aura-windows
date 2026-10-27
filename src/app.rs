@@ -1,8 +1,10 @@
 //! App: window + state + animator + renderer + tray + timers.
 //! Owns the HWND (via GWLP_USERDATA) and drives the pill lifecycle:
-//! Zen (idle) -> hover -> Compact -> click -> Expanded (placeholder) ->
-//! click -> Compact -> leave -> Zen. Timers: 1s tick (clock), 0.25s
-//! (alert placeholder, Phase 4), 16ms (animation, only while animating).
+//! Zen (idle) -> hover -> Compact -> click/hover (with session) ->
+//! Expanded (music card) -> click outside controls / leave -> Compact
+//! (with session) or Zen (silent). Timers: 1s tick (clock + GSMTC
+//! poll), 0.25s (alert placeholder, Phase 4), 16ms (animation, only
+//! while animating).
 
 use windows::core::{w, Result, PCWSTR};
 use windows::Win32::Foundation::*;
@@ -16,6 +18,7 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{TRACKMOUSEEVENT, TME_LEAVE, Tr
 use windows::Win32::UI::WindowsAndMessaging::*;
 
 use crate::animator;
+use crate::media;
 use crate::renderer;
 use crate::state;
 use crate::tray;
@@ -36,6 +39,7 @@ pub struct App {
     anim: Option<animator::SizeAnimation>,
     tracking_mouse: bool,
     clock_text: String, // HH:MM, updated on 1s tick
+    media: Option<media::MediaInfo>, // Current GSMTC session (Phase 1), None = silent.
 }
 
 fn current_time_text() -> String {
@@ -54,6 +58,7 @@ impl App {
             anim: None,
             tracking_mouse: false,
             clock_text: current_time_text(),
+            media: None,
         });
         // Initial size + region + placement (Zen, top-center, no animation).
         app.apply_size();
@@ -124,7 +129,21 @@ impl App {
     fn on_timer(&mut self, id: usize) {
         match id {
             TIMER_TICK => {
-                // 1s tick: update clock (visible in Compact) + repaint.
+                // 1s tick: poll GSMTC (Phase 1) + update clock + repaint.
+                self.media = media::poll();
+                // Idle-state follows session: session -> Compact, none -> Zen
+                // (Expanded also closes to Zen when the session ends).
+                // (Bool first, so set_state below holds no borrow of media.)
+                let has_media = self.media.is_some();
+                if has_media {
+                    if self.pill.state == state::IslandState::Zen {
+                        self.set_state(state::IslandState::Compact);
+                    }
+                } else if self.pill.state == state::IslandState::Compact
+                    || self.pill.state == state::IslandState::Expanded
+                {
+                    self.set_state(state::IslandState::Zen);
+                }
                 self.clock_text = current_time_text();
                 unsafe {
                     let _ = InvalidateRect(self.hwnd, None, BOOL(0));
@@ -151,33 +170,78 @@ impl App {
             }
             self.tracking_mouse = true;
         }
-        // Hover: Zen -> Compact (no session in Phase 0, so never auto-Expanded).
-        // If already Expanded (via click), hovering keeps it Expanded.
+        // Hover: Zen -> Compact (idle); Compact + session -> Expanded
+        // (Aura Mac: hover opens the card when a session exists).
+        // If already Expanded, hovering keeps it Expanded.
         if self.pill.state == state::IslandState::Zen {
             self.set_state(state::IslandState::Compact);
+        } else if self.pill.state == state::IslandState::Compact && self.media.is_some() {
+            self.set_state(state::IslandState::Expanded);
         }
     }
 
     fn on_mouse_leave(&mut self) {
         self.tracking_mouse = false;
-        // Cursor exit closes to Zen (silent, no session in Phase 0).
-        // (Aura Mac: playing -> Compact, silent -> Zen. Phase 0 is silent.)
-        self.set_state(state::IslandState::Zen);
-    }
-
-    fn on_click(&mut self) {
-        // Click toggles Expanded <-> Compact (Aura Mac handleClick, no session check).
-        match self.pill.state {
-            state::IslandState::Expanded => self.set_state(state::IslandState::Compact),
-            _ => self.set_state(state::IslandState::Expanded),
+        // Cursor exit: session -> Compact, silent -> Zen (Aura Mac rule).
+        if self.media.is_some() {
+            self.set_state(state::IslandState::Compact);
+        } else {
+            self.set_state(state::IslandState::Zen);
         }
     }
 
+    fn on_click(&mut self, x_px: i32, y_px: i32) {
+        // Expanded music card: control buttons act (stay Expanded, refresh
+        // media immediately so the play/pause icon updates without waiting
+        // for the 1s tick); any other click closes to Compact.
+        if self.pill.state == state::IslandState::Expanded {
+            if self.media.is_some() {
+                let scale = window::dpi_scale(self.hwnd);
+                let x = x_px as f32 / scale;
+                let y = y_px as f32 / scale;
+                let in_rect =
+                    |r: (f32, f32, f32, f32)| x >= r.0 && x <= r.2 && y >= r.1 && y <= r.3;
+                let playing = self.media.as_ref().map(|m| m.playing).unwrap_or(false);
+                if in_rect(renderer::MUSIC_PREV_RECT) {
+                    let _ = media::skip_previous();
+                    self.media = media::poll();
+                } else if in_rect(renderer::MUSIC_PLAY_RECT) {
+                    if playing {
+                        let _ = media::pause();
+                    } else {
+                        let _ = media::play();
+                    }
+                    self.media = media::poll();
+                } else if in_rect(renderer::MUSIC_NEXT_RECT) {
+                    let _ = media::skip_next();
+                    self.media = media::poll();
+                } else {
+                    self.set_state(state::IslandState::Compact);
+                    return;
+                }
+                unsafe {
+                    let _ = InvalidateRect(self.hwnd, None, BOOL(0));
+                }
+                return;
+            }
+            // No session: any click closes the no-music card to Compact.
+            self.set_state(state::IslandState::Compact);
+            return;
+        }
+        // Not Expanded: click expands (music card if session, no-music card if not).
+        self.set_state(state::IslandState::Expanded);
+    }
+
     fn on_paint(&mut self) {
-        // Renderer draws current state (clock for Compact, placeholder for Expanded,
-        // "Aura" label for Zen). ValidateRect inside draw prevents a paint loop.
-        self.renderer
-            .draw(self.hwnd, self.pill.state, &self.clock_text);
+        // Renderer draws current state (clock for Compact, music/no-music
+        // card for Expanded, "Aura" label for Zen). ValidateRect inside
+        // draw prevents a paint loop.
+        self.renderer.draw(
+            self.hwnd,
+            self.pill.state,
+            &self.clock_text,
+            self.media.as_ref(),
+        );
     }
 
     fn on_tray_callback(&mut self, event: u32) {
@@ -227,7 +291,11 @@ unsafe extern "system" fn wnd_proc(
             LRESULT(0)
         }
         WM_LBUTTONUP => {
-            app.on_click();
+            // Client-area click position (physical pixels) for music-card
+            // control hit-testing (prev/play/next vs close).
+            let x = ((lparam.0 as u32) & 0xFFFF) as u16 as i16 as i32;
+            let y = (((lparam.0 as u32) >> 16) & 0xFFFF) as u16 as i16 as i32;
+            app.on_click(x, y);
             LRESULT(0)
         }
         WM_TIMER => {

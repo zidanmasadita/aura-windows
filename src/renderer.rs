@@ -21,6 +21,18 @@ use windows::Win32::Graphics::Gdi::ValidateRect;
 use crate::state::IslandState;
 use crate::window;
 
+/// Music card control button rects (logical points, 40x40, centered).
+/// Shared by renderer (drawing) and app (click hit-test) so they agree.
+pub const MUSIC_PREV_RECT: (f32, f32, f32, f32) = (196.0, 124.0, 236.0, 164.0);
+pub const MUSIC_PLAY_RECT: (f32, f32, f32, f32) = (240.0, 124.0, 280.0, 164.0);
+pub const MUSIC_NEXT_RECT: (f32, f32, f32, f32) = (284.0, 124.0, 324.0, 164.0);
+
+/// Format seconds as m:ss (e.g. 83.0 -> "1:23").
+fn format_time(secs: f64) -> String {
+    let s = secs.max(0.0) as i64;
+    format!("{}:{:02}", s / 60, s % 60)
+}
+
 pub struct Renderer {
     factory: ID2D1Factory,
     hwnd_target: Option<ID2D1HwndRenderTarget>,
@@ -29,6 +41,7 @@ pub struct Renderer {
     text_format: Option<IDWriteTextFormat>,
     text_format_small: Option<IDWriteTextFormat>,
     text_format_center: Option<IDWriteTextFormat>,
+    text_format_large: Option<IDWriteTextFormat>,
     black_brush: Option<ID2D1SolidColorBrush>,
     white_brush: Option<ID2D1SolidColorBrush>,
     dim_brush: Option<ID2D1SolidColorBrush>,
@@ -49,6 +62,7 @@ impl Renderer {
                 text_format: None,
                 text_format_small: None,
                 text_format_center: None,
+                text_format_large: None,
                 black_brush: None,
                 white_brush: None,
                 dim_brush: None,
@@ -181,6 +195,20 @@ impl Renderer {
                 let _ = f.SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
                 self.text_format_center = Some(f);
             }
+            if let Ok(f) = self.dwrite.CreateTextFormat(
+                windows::core::w!("Segoe UI"),
+                None,
+                DWRITE_FONT_WEIGHT_NORMAL,
+                DWRITE_FONT_STYLE_NORMAL,
+                DWRITE_FONT_STRETCH_NORMAL,
+                20.0,
+                windows::core::w!("en-US"),
+            ) {
+                // Large centered (for music-card control symbols).
+                let _ = f.SetTextAlignment(DWRITE_TEXT_ALIGNMENT_CENTER);
+                let _ = f.SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
+                self.text_format_large = Some(f);
+            }
             self.hwnd_target = Some(hwnd_target);
             self.target = Some(target);
             true
@@ -189,7 +217,13 @@ impl Renderer {
 
     /// Draw one frame for the given state. Coordinates are LOGICAL points
     /// (Aura Mac points); D2D scales to physical pixels via the target DPI.
-    pub fn draw(&mut self, hwnd: HWND, state: IslandState, clock_text: &str) {
+    pub fn draw(
+        &mut self,
+        hwnd: HWND,
+        state: IslandState,
+        clock_text: &str,
+        media: Option<&crate::media::MediaInfo>,
+    ) {
         let scale = window::dpi_scale(hwnd);
         let (lw, lh) = state.logical_size();
         let w_px = (lw * scale).round() as i32;
@@ -280,33 +314,167 @@ impl Renderer {
                     }
                 }
                 IslandState::Expanded => {
-                    // Placeholder card: "Aura" header + Fase 0 note.
-                    if let (Some(fmt), Some(brush)) = (&self.text_format, &self.white_brush)
-                    {
-                        let header = D2D_RECT_F {
-                            left: 24.0,
-                            top: 20.0,
-                            right: lw - 24.0,
-                            bottom: 60.0,
-                        };
-                        self.draw_text(target, "Aura", fmt, &header, brush);
-                    }
-                    if let (Some(fmt), Some(brush)) =
-                        (&self.text_format_small, &self.white_brush)
-                    {
-                        let sub = D2D_RECT_F {
-                            left: 24.0,
-                            top: 60.0,
-                            right: lw - 24.0,
-                            bottom: 100.0,
-                        };
-                        self.draw_text(
-                            target,
-                            "Fase 0 — kartu musik menyusul di Fase 1",
-                            fmt,
-                            &sub,
-                            brush,
-                        );
+                    match media {
+                        Some(m) => {
+                            // Cover placeholder box (56x56) + note glyph.
+                            // (GSMTC thumbnail decode arrives after basic
+                            // music works; placeholder until then.)
+                            if let Some(brush) = &self.dim_brush {
+                                let cover = D2D_RECT_F {
+                                    left: 24.0,
+                                    top: 28.0,
+                                    right: 80.0,
+                                    bottom: 84.0,
+                                };
+                                target.FillRectangle(&cover, brush);
+                            }
+                            if let (Some(fmt), Some(brush)) =
+                                (&self.text_format_center, &self.white_brush)
+                            {
+                                let cover = D2D_RECT_F {
+                                    left: 24.0,
+                                    top: 28.0,
+                                    right: 80.0,
+                                    bottom: 84.0,
+                                };
+                                self.draw_text(target, "♪", fmt, &cover, brush);
+                            }
+                            // Title + artist (right of cover).
+                            let title = if m.title.is_empty() {
+                                "Unknown title"
+                            } else {
+                                m.title.as_str()
+                            };
+                            let artist = if m.artist.is_empty() {
+                                "Unknown artist"
+                            } else {
+                                m.artist.as_str()
+                            };
+                            if let (Some(fmt), Some(brush)) =
+                                (&self.text_format, &self.white_brush)
+                            {
+                                let r = D2D_RECT_F {
+                                    left: 96.0,
+                                    top: 28.0,
+                                    right: 496.0,
+                                    bottom: 54.0,
+                                };
+                                self.draw_text(target, title, fmt, &r, brush);
+                            }
+                            if let (Some(fmt), Some(brush)) =
+                                (&self.text_format_small, &self.white_brush)
+                            {
+                                let r = D2D_RECT_F {
+                                    left: 96.0,
+                                    top: 54.0,
+                                    right: 496.0,
+                                    bottom: 76.0,
+                                };
+                                self.draw_text(target, artist, fmt, &r, brush);
+                            }
+                            // Progress track + fill + times.
+                            let frac = if m.duration_secs > 0.0 {
+                                (m.position_secs / m.duration_secs).clamp(0.0, 1.0)
+                            } else {
+                                0.0
+                            };
+                            if let Some(brush) = &self.dim_brush {
+                                let track = D2D_RECT_F {
+                                    left: 24.0,
+                                    top: 96.0,
+                                    right: 496.0,
+                                    bottom: 100.0,
+                                };
+                                target.FillRectangle(&track, brush);
+                            }
+                            if let Some(brush) = &self.white_brush {
+                                let fill = D2D_RECT_F {
+                                    left: 24.0,
+                                    top: 96.0,
+                                    right: 24.0 + 472.0 * frac,
+                                    bottom: 100.0,
+                                };
+                                target.FillRectangle(&fill, brush);
+                            }
+                            if let (Some(fmt), Some(brush)) =
+                                (&self.text_format_small, &self.white_brush)
+                            {
+                                let r = D2D_RECT_F {
+                                    left: 24.0,
+                                    top: 104.0,
+                                    right: 300.0,
+                                    bottom: 122.0,
+                                };
+                                let times = format!(
+                                    "{} / {}",
+                                    format_time(m.position_secs),
+                                    format_time(m.duration_secs)
+                                );
+                                self.draw_text(target, &times, fmt, &r, brush);
+                            }
+                            // Controls (prev / play-pause / next).
+                            if let (Some(fmt), Some(brush)) =
+                                (&self.text_format_large, &self.white_brush)
+                            {
+                                let prev = D2D_RECT_F {
+                                    left: MUSIC_PREV_RECT.0,
+                                    top: MUSIC_PREV_RECT.1,
+                                    right: MUSIC_PREV_RECT.2,
+                                    bottom: MUSIC_PREV_RECT.3,
+                                };
+                                self.draw_text(target, "⏮", fmt, &prev, brush);
+                                let play = D2D_RECT_F {
+                                    left: MUSIC_PLAY_RECT.0,
+                                    top: MUSIC_PLAY_RECT.1,
+                                    right: MUSIC_PLAY_RECT.2,
+                                    bottom: MUSIC_PLAY_RECT.3,
+                                };
+                                self.draw_text(
+                                    target,
+                                    if m.playing { "⏸" } else { "▶" },
+                                    fmt,
+                                    &play,
+                                    brush,
+                                );
+                                let next = D2D_RECT_F {
+                                    left: MUSIC_NEXT_RECT.0,
+                                    top: MUSIC_NEXT_RECT.1,
+                                    right: MUSIC_NEXT_RECT.2,
+                                    bottom: MUSIC_NEXT_RECT.3,
+                                };
+                                self.draw_text(target, "⏭", fmt, &next, brush);
+                            }
+                        }
+                        None => {
+                            if let (Some(fmt), Some(brush)) =
+                                (&self.text_format, &self.white_brush)
+                            {
+                                let r = D2D_RECT_F {
+                                    left: 24.0,
+                                    top: 40.0,
+                                    right: 496.0,
+                                    bottom: 70.0,
+                                };
+                                self.draw_text(target, "No music playing", fmt, &r, brush);
+                            }
+                            if let (Some(fmt), Some(brush)) =
+                                (&self.text_format_small, &self.white_brush)
+                            {
+                                let r = D2D_RECT_F {
+                                    left: 24.0,
+                                    top: 70.0,
+                                    right: 496.0,
+                                    bottom: 100.0,
+                                };
+                                self.draw_text(
+                                    target,
+                                    "Play something in Spotify or YouTube Music",
+                                    fmt,
+                                    &r,
+                                    brush,
+                                );
+                            }
+                        }
                     }
                 }
             }
