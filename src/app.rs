@@ -3,9 +3,9 @@
 //! Zen (idle) -> hover -> Compact -> click/hover (with session) ->
 //! Expanded (music card) -> bubble -> Lyrics (700x180) -> bubble back
 //! to Expanded; click outside controls / leave -> Compact (with
-//! session) or Zen (silent). Timers: 1s tick (clock + GSMTC poll),
-//! 0.25s (alert placeholder, Phase 4), 16ms (animation, only while
-//! animating).
+//! session) or Zen (silent). Timers: 0.25s tick (clock + GSMTC poll +
+//! synchronous repaint for realtime lyrics/progress), 0.25s alert
+//! placeholder (Phase 4), 16ms (animation, only while animating).
 
 use windows::core::{w, Result, PCWSTR};
 use windows::Win32::Foundation::*;
@@ -133,7 +133,10 @@ impl App {
     fn on_timer(&mut self, id: usize) {
         match id {
             TIMER_TICK => {
-                // 1s tick: poll GSMTC (Phase 1) + update clock + repaint.
+                // 0.25s tick: poll GSMTC + update clock + repaint NOW.
+                // (Was 1s + async InvalidateRect; user report 2026-10-27:
+                // open lyrics panel did not advance until pill reopened,
+                // so paint synchronously here instead of queuing WM_PAINT.)
                 self.media = media::poll();
                 // Lyrics cache follows song: new song (or session end) clears
                 // cached lyrics; if the lyrics card is open for the old song,
@@ -170,9 +173,10 @@ impl App {
                     self.set_state(state::IslandState::Zen);
                 }
                 self.clock_text = current_time_text();
-                unsafe {
-                    let _ = InvalidateRect(self.hwnd, None, BOOL(0));
-                }
+                // Synchronous repaint (not just InvalidateRect): draws the
+                // current position immediately, so lyrics/progress advance
+                // in realtime while the panel stays open.
+                self.on_paint();
             }
             TIMER_ALERT => {
                 // 0.25s alert tick: placeholder for Phase 4 (no-op in Phase 0).
@@ -470,8 +474,8 @@ pub fn run() -> Result<()> {
         SetWindowLongPtrW(hwnd, GWLP_USERDATA, app_ptr as isize);
         // Tray icon (must be after window creation; uses hwnd).
         let _ = tray::add_icon(hwnd);
-        // Timers: 1s tick + 0.25s alert placeholder.
-        let _ = SetTimer(hwnd, TIMER_TICK, 1000, None);
+        // Timers: 0.25s tick (clock + media, realtime) + 0.25s alert placeholder.
+        let _ = SetTimer(hwnd, TIMER_TICK, 250, None);
         let _ = SetTimer(hwnd, TIMER_ALERT, 250, None);
         // Show (no activation, so it never steals focus).
         let _ = ShowWindow(hwnd, SW_SHOWNOACTIVATE);
