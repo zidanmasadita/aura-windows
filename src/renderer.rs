@@ -37,13 +37,33 @@ pub const LYRICS_NUDGE_PLUS_RECT: (f32, f32, f32, f32) = (620.0, 148.0, 676.0, 1
 pub const POMODORO_FOCUS_RECT: (f32, f32, f32, f32) = (220.0, 100.0, 300.0, 124.0);
 pub const POMODORO_BREAK_RECT: (f32, f32, f32, f32) = (340.0, 100.0, 420.0, 124.0);
 pub const POMODORO_START_RECT: (f32, f32, f32, f32) = (280.0, 140.0, 360.0, 164.0);
-/// Section dots (2 sections for now: music, pomodoro). Right edge, vertical.
-/// Music card (520 wide): x 492-508. Pomodoro card (640 wide): x 612-628.
-/// Y: two 16px dots, 8px gap, centered in 180 (top 70 and 94).
-pub const MUSIC_DOT_MUSIC_RECT: (f32, f32, f32, f32) = (492.0, 70.0, 508.0, 86.0);
-pub const MUSIC_DOT_POMODORO_RECT: (f32, f32, f32, f32) = (492.0, 94.0, 508.0, 110.0);
-pub const POMODORO_DOT_MUSIC_RECT: (f32, f32, f32, f32) = (612.0, 70.0, 628.0, 86.0);
-pub const POMODORO_DOT_POMODORO_RECT: (f32, f32, f32, f32) = (612.0, 94.0, 628.0, 110.0);
+/// Section dots (4 sections: music, pomodoro, todo, water). Right edge,
+/// vertical. Music card (520 wide): x 492-508. Other cards (640 wide):
+/// x 612-628. Y for 180-tall cards: four 16px dots, 8px gap, centered
+/// (top 46, 70, 94, 118). Todo card is 220 tall: same x, y 66, 90, 114, 138.
+pub const MUSIC_DOT_MUSIC_RECT: (f32, f32, f32, f32) = (492.0, 46.0, 508.0, 62.0);
+pub const MUSIC_DOT_POMODORO_RECT: (f32, f32, f32, f32) = (492.0, 70.0, 508.0, 86.0);
+pub const MUSIC_DOT_TODO_RECT: (f32, f32, f32, f32) = (492.0, 94.0, 508.0, 110.0);
+pub const MUSIC_DOT_WATER_RECT: (f32, f32, f32, f32) = (492.0, 118.0, 508.0, 134.0);
+pub const POMODORO_DOT_MUSIC_RECT: (f32, f32, f32, f32) = (612.0, 46.0, 628.0, 62.0);
+pub const POMODORO_DOT_POMODORO_RECT: (f32, f32, f32, f32) = (612.0, 70.0, 628.0, 86.0);
+pub const POMODORO_DOT_TODO_RECT: (f32, f32, f32, f32) = (612.0, 94.0, 628.0, 110.0);
+pub const POMODORO_DOT_WATER_RECT: (f32, f32, f32, f32) = (612.0, 118.0, 628.0, 134.0);
+pub const TODO_DOT_MUSIC_RECT: (f32, f32, f32, f32) = (612.0, 66.0, 628.0, 82.0);
+pub const TODO_DOT_POMODORO_RECT: (f32, f32, f32, f32) = (612.0, 90.0, 628.0, 106.0);
+pub const TODO_DOT_TODO_RECT: (f32, f32, f32, f32) = (612.0, 114.0, 628.0, 130.0);
+pub const TODO_DOT_WATER_RECT: (f32, f32, f32, f32) = (612.0, 138.0, 628.0, 154.0);
+pub const WATER_DOT_MUSIC_RECT: (f32, f32, f32, f32) = (612.0, 46.0, 628.0, 62.0);
+pub const WATER_DOT_POMODORO_RECT: (f32, f32, f32, f32) = (612.0, 70.0, 628.0, 86.0);
+pub const WATER_DOT_TODO_RECT: (f32, f32, f32, f32) = (612.0, 94.0, 628.0, 110.0);
+pub const WATER_DOT_WATER_RECT: (f32, f32, f32, f32) = (612.0, 118.0, 628.0, 134.0);
+/// Todo card: Edit button (top-right) + row geometry (x0, y0, x1, pitch).
+pub const TODO_EDIT_RECT: (f32, f32, f32, f32) = (560.0, 16.0, 616.0, 36.0);
+pub const TODO_ROW_GEOM: (f32, f32, f32, f32) = (24.0, 44.0, 600.0, 28.0);
+pub const TODO_MAX_ROWS: usize = 6;
+/// Water card buttons: +250 ml + Reset (centered pair, y 120-144).
+pub const WATER_ADD_RECT: (f32, f32, f32, f32) = (230.0, 120.0, 310.0, 144.0);
+pub const WATER_RESET_RECT: (f32, f32, f32, f32) = (330.0, 120.0, 410.0, 144.0);
 
 /// Format seconds as m:ss (e.g. 83.0 -> "1:23").
 fn format_time(secs: f64) -> String {
@@ -257,6 +277,8 @@ impl Renderer {
         media: Option<&crate::media::MediaInfo>,
         lyrics: Option<&crate::lyrics::LyricsCache>,
         pomodoro: &crate::pomodoro::Pomodoro,
+        todo: &crate::todo::TodoList,
+        water: &crate::water::Water,
     ) {
         let scale = window::dpi_scale(hwnd);
         let (lw, lh) = state.logical_size();
@@ -531,8 +553,8 @@ impl Renderer {
                             }
                         }
                     }
-                    // Section dots (right edge): music (current, white),
-                    // pomodoro (gray). Clickable (hit-test in app).
+                    // Section dots (right edge, 4): music (current, white),
+                    // others gray. Clickable (hit-test in app).
                     if let (Some(fmt), Some(brush)) =
                         (&self.text_format_center, &self.white_brush)
                     {
@@ -554,6 +576,28 @@ impl Renderer {
                             bottom: MUSIC_DOT_POMODORO_RECT.3,
                         };
                         self.draw_text(target, "•", fmt, &dot_pomodoro, brush);
+                    }
+                    if let (Some(fmt), Some(brush)) =
+                        (&self.text_format_center, &self.gray_brush)
+                    {
+                        let dot_todo = D2D_RECT_F {
+                            left: MUSIC_DOT_TODO_RECT.0,
+                            top: MUSIC_DOT_TODO_RECT.1,
+                            right: MUSIC_DOT_TODO_RECT.2,
+                            bottom: MUSIC_DOT_TODO_RECT.3,
+                        };
+                        self.draw_text(target, "•", fmt, &dot_todo, brush);
+                    }
+                    if let (Some(fmt), Some(brush)) =
+                        (&self.text_format_center, &self.gray_brush)
+                    {
+                        let dot_water = D2D_RECT_F {
+                            left: MUSIC_DOT_WATER_RECT.0,
+                            top: MUSIC_DOT_WATER_RECT.1,
+                            right: MUSIC_DOT_WATER_RECT.2,
+                            bottom: MUSIC_DOT_WATER_RECT.3,
+                        };
+                        self.draw_text(target, "•", fmt, &dot_water, brush);
                     }
                 }
                 IslandState::Lyrics => {
@@ -885,7 +929,8 @@ impl Renderer {
                         };
                         self.draw_text(target, pomodoro.button_label(), fmt, &r, brush);
                     }
-                    // Section dots: music (gray), pomodoro (current, white).
+                    // Section dots (4): music gray, pomodoro white
+                    // (current), todo gray, water gray.
                     if let (Some(fmt), Some(brush)) =
                         (&self.text_format_center, &self.gray_brush)
                     {
@@ -907,6 +952,284 @@ impl Renderer {
                             bottom: POMODORO_DOT_POMODORO_RECT.3,
                         };
                         self.draw_text(target, "•", fmt, &dot_pomodoro, brush);
+                    }
+                    if let (Some(fmt), Some(brush)) =
+                        (&self.text_format_center, &self.gray_brush)
+                    {
+                        let dot_todo = D2D_RECT_F {
+                            left: POMODORO_DOT_TODO_RECT.0,
+                            top: POMODORO_DOT_TODO_RECT.1,
+                            right: POMODORO_DOT_TODO_RECT.2,
+                            bottom: POMODORO_DOT_TODO_RECT.3,
+                        };
+                        self.draw_text(target, "•", fmt, &dot_todo, brush);
+                    }
+                    if let (Some(fmt), Some(brush)) =
+                        (&self.text_format_center, &self.gray_brush)
+                    {
+                        let dot_water = D2D_RECT_F {
+                            left: POMODORO_DOT_WATER_RECT.0,
+                            top: POMODORO_DOT_WATER_RECT.1,
+                            right: POMODORO_DOT_WATER_RECT.2,
+                            bottom: POMODORO_DOT_WATER_RECT.3,
+                        };
+                        self.draw_text(target, "•", fmt, &dot_water, brush);
+                    }
+                }
+                IslandState::Todo => {
+                    // Todo card (640x220). Title + Edit button + up to 6 rows.
+                    // Tasks from %APPDATA%/Aura/todo.txt (reloaded on entry).
+                    // Click a row toggles done; Edit opens the file in Notepad.
+                    if let (Some(fmt), Some(brush)) =
+                        (&self.text_format, &self.white_brush)
+                    {
+                        let r = D2D_RECT_F {
+                            left: 24.0,
+                            top: 16.0,
+                            right: 200.0,
+                            bottom: 36.0,
+                        };
+                        self.draw_text(target, "Todo", fmt, &r, brush);
+                    }
+                    // Edit button (dim pill + label).
+                    if let Some(brush) = &self.dim_brush {
+                        let r = D2D_RECT_F {
+                            left: TODO_EDIT_RECT.0,
+                            top: TODO_EDIT_RECT.1,
+                            right: TODO_EDIT_RECT.2,
+                            bottom: TODO_EDIT_RECT.3,
+                        };
+                        target.FillRectangle(&r, brush);
+                    }
+                    if let (Some(fmt), Some(brush)) =
+                        (&self.text_format_center, &self.white_brush)
+                    {
+                        let r = D2D_RECT_F {
+                            left: TODO_EDIT_RECT.0,
+                            top: TODO_EDIT_RECT.1,
+                            right: TODO_EDIT_RECT.2,
+                            bottom: TODO_EDIT_RECT.3,
+                        };
+                        self.draw_text(target, "Edit", fmt, &r, brush);
+                    }
+                    if todo.tasks.is_empty() {
+                        if let (Some(fmt), Some(brush)) =
+                            (&self.text_format_center, &self.white_brush)
+                        {
+                            let r = D2D_RECT_F {
+                                left: 24.0,
+                                top: 80.0,
+                                right: 616.0,
+                                bottom: 100.0,
+                            };
+                            self.draw_text(
+                                target,
+                                "No tasks yet — click Edit to add some",
+                                fmt,
+                                &r,
+                                brush,
+                            );
+                        }
+                    } else {
+                        for (i, task) in todo.tasks.iter().take(6).enumerate() {
+                            let top = TODO_ROW_GEOM.1 + (i as f32) * TODO_ROW_GEOM.3;
+                            let r = D2D_RECT_F {
+                                left: TODO_ROW_GEOM.0,
+                                top,
+                                right: TODO_ROW_GEOM.2,
+                                bottom: top + 24.0,
+                            };
+                            let checkbox = if task.done { "☑" } else { "☐" };
+                            let text = format!("{} {}", checkbox, task.title);
+                            let brush = if task.done {
+                                &self.gray_brush
+                            } else {
+                                &self.white_brush
+                            };
+                            if let (Some(fmt), Some(brush)) =
+                                (&self.text_format, brush)
+                            {
+                                self.draw_text(target, &text, fmt, &r, brush);
+                            }
+                        }
+                    }
+                    // Section dots (4, x 612-628, y 66/90/114/138).
+                    // Music gray, pomodoro gray, todo white (current), water gray.
+                    if let (Some(fmt), Some(brush)) =
+                        (&self.text_format_center, &self.gray_brush)
+                    {
+                        let dot_music = D2D_RECT_F {
+                            left: TODO_DOT_MUSIC_RECT.0,
+                            top: TODO_DOT_MUSIC_RECT.1,
+                            right: TODO_DOT_MUSIC_RECT.2,
+                            bottom: TODO_DOT_MUSIC_RECT.3,
+                        };
+                        self.draw_text(target, "•", fmt, &dot_music, brush);
+                    }
+                    if let (Some(fmt), Some(brush)) =
+                        (&self.text_format_center, &self.gray_brush)
+                    {
+                        let dot_pomodoro = D2D_RECT_F {
+                            left: TODO_DOT_POMODORO_RECT.0,
+                            top: TODO_DOT_POMODORO_RECT.1,
+                            right: TODO_DOT_POMODORO_RECT.2,
+                            bottom: TODO_DOT_POMODORO_RECT.3,
+                        };
+                        self.draw_text(target, "•", fmt, &dot_pomodoro, brush);
+                    }
+                    if let (Some(fmt), Some(brush)) =
+                        (&self.text_format_center, &self.white_brush)
+                    {
+                        let dot_todo = D2D_RECT_F {
+                            left: TODO_DOT_TODO_RECT.0,
+                            top: TODO_DOT_TODO_RECT.1,
+                            right: TODO_DOT_TODO_RECT.2,
+                            bottom: TODO_DOT_TODO_RECT.3,
+                        };
+                        self.draw_text(target, "•", fmt, &dot_todo, brush);
+                    }
+                    if let (Some(fmt), Some(brush)) =
+                        (&self.text_format_center, &self.gray_brush)
+                    {
+                        let dot_water = D2D_RECT_F {
+                            left: TODO_DOT_WATER_RECT.0,
+                            top: TODO_DOT_WATER_RECT.1,
+                            right: TODO_DOT_WATER_RECT.2,
+                            bottom: TODO_DOT_WATER_RECT.3,
+                        };
+                        self.draw_text(target, "•", fmt, &dot_water, brush);
+                    }
+                }
+                IslandState::Water => {
+                    // Water card (640x180). Total / goal + progress + buttons.
+                    // Goal 1500 ml, glass 250 ml (fixed for now).
+                    if let (Some(fmt), Some(brush)) =
+                        (&self.text_format, &self.white_brush)
+                    {
+                        let r = D2D_RECT_F {
+                            left: 24.0,
+                            top: 16.0,
+                            right: 200.0,
+                            bottom: 36.0,
+                        };
+                        self.draw_text(target, "Water", fmt, &r, brush);
+                    }
+                    if let (Some(fmt), Some(brush)) =
+                        (&self.text_format_large, &self.white_brush)
+                    {
+                        let r = D2D_RECT_F {
+                            left: 220.0,
+                            top: 40.0,
+                            right: 420.0,
+                            bottom: 80.0,
+                        };
+                        let total_text = format!("{} / {} ml", water.ml, water.goal_ml);
+                        self.draw_text(target, &total_text, fmt, &r, brush);
+                    }
+                    // Progress track + fill (like music progress).
+                    let frac = if water.goal_ml > 0 {
+                        (water.ml as f32 / water.goal_ml as f32).clamp(0.0, 1.0)
+                    } else {
+                        0.0
+                    };
+                    if let Some(brush) = &self.dim_brush {
+                        let track = D2D_RECT_F {
+                            left: 24.0,
+                            top: 100.0,
+                            right: 616.0,
+                            bottom: 104.0,
+                        };
+                        target.FillRectangle(&track, brush);
+                    }
+                    if let Some(brush) = &self.white_brush {
+                        let fill = D2D_RECT_F {
+                            left: 24.0,
+                            top: 100.0,
+                            right: 24.0 + 592.0 * frac,
+                            bottom: 104.0,
+                        };
+                        target.FillRectangle(&fill, brush);
+                    }
+                    // +250 button + Reset button (dim pills + labels).
+                    if let Some(brush) = &self.dim_brush {
+                        let r = D2D_RECT_F {
+                            left: WATER_ADD_RECT.0,
+                            top: WATER_ADD_RECT.1,
+                            right: WATER_ADD_RECT.2,
+                            bottom: WATER_ADD_RECT.3,
+                        };
+                        target.FillRectangle(&r, brush);
+                        let r2 = D2D_RECT_F {
+                            left: WATER_RESET_RECT.0,
+                            top: WATER_RESET_RECT.1,
+                            right: WATER_RESET_RECT.2,
+                            bottom: WATER_RESET_RECT.3,
+                        };
+                        target.FillRectangle(&r2, brush);
+                    }
+                    if let (Some(fmt), Some(brush)) =
+                        (&self.text_format_center, &self.white_brush)
+                    {
+                        let r = D2D_RECT_F {
+                            left: WATER_ADD_RECT.0,
+                            top: WATER_ADD_RECT.1,
+                            right: WATER_ADD_RECT.2,
+                            bottom: WATER_ADD_RECT.3,
+                        };
+                        self.draw_text(target, "+250 ml", fmt, &r, brush);
+                        let r2 = D2D_RECT_F {
+                            left: WATER_RESET_RECT.0,
+                            top: WATER_RESET_RECT.1,
+                            right: WATER_RESET_RECT.2,
+                            bottom: WATER_RESET_RECT.3,
+                        };
+                        self.draw_text(target, "Reset", fmt, &r2, brush);
+                    }
+                    // Section dots (4, x 612-628, y 46/70/94/118).
+                    // Music gray, pomodoro gray, todo gray, water white.
+                    if let (Some(fmt), Some(brush)) =
+                        (&self.text_format_center, &self.gray_brush)
+                    {
+                        let dot_music = D2D_RECT_F {
+                            left: WATER_DOT_MUSIC_RECT.0,
+                            top: WATER_DOT_MUSIC_RECT.1,
+                            right: WATER_DOT_MUSIC_RECT.2,
+                            bottom: WATER_DOT_MUSIC_RECT.3,
+                        };
+                        self.draw_text(target, "•", fmt, &dot_music, brush);
+                    }
+                    if let (Some(fmt), Some(brush)) =
+                        (&self.text_format_center, &self.gray_brush)
+                    {
+                        let dot_pomodoro = D2D_RECT_F {
+                            left: WATER_DOT_POMODORO_RECT.0,
+                            top: WATER_DOT_POMODORO_RECT.1,
+                            right: WATER_DOT_POMODORO_RECT.2,
+                            bottom: WATER_DOT_POMODORO_RECT.3,
+                        };
+                        self.draw_text(target, "•", fmt, &dot_pomodoro, brush);
+                    }
+                    if let (Some(fmt), Some(brush)) =
+                        (&self.text_format_center, &self.gray_brush)
+                    {
+                        let dot_todo = D2D_RECT_F {
+                            left: WATER_DOT_TODO_RECT.0,
+                            top: WATER_DOT_TODO_RECT.1,
+                            right: WATER_DOT_TODO_RECT.2,
+                            bottom: WATER_DOT_TODO_RECT.3,
+                        };
+                        self.draw_text(target, "•", fmt, &dot_todo, brush);
+                    }
+                    if let (Some(fmt), Some(brush)) =
+                        (&self.text_format_center, &self.white_brush)
+                    {
+                        let dot_water = D2D_RECT_F {
+                            left: WATER_DOT_WATER_RECT.0,
+                            top: WATER_DOT_WATER_RECT.1,
+                            right: WATER_DOT_WATER_RECT.2,
+                            bottom: WATER_DOT_WATER_RECT.3,
+                        };
+                        self.draw_text(target, "•", fmt, &dot_water, brush);
                     }
                 }
             }

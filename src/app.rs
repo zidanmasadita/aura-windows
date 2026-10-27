@@ -25,7 +25,9 @@ use crate::media;
 use crate::pomodoro;
 use crate::renderer;
 use crate::state;
+use crate::todo;
 use crate::tray;
+use crate::water;
 use crate::window;
 
 const TIMER_TICK: usize = 1; // 1s: clock + (Phase 1+) media poll
@@ -47,7 +49,9 @@ pub struct App {
     media_tracker: media::MediaTracker, // Wall-clock position estimate (realtime fix).
     lyrics: Option<lyrics::LyricsCache>, // Fetched lyrics for current song (Phase 1b), None = not fetched yet.
     pomodoro: pomodoro::Pomodoro, // In-memory pomodoro timer (Phase 2).
-    last_section: state::IslandState, // Last section card (music/pomodoro); reopen shows this, not always music.
+    todo: todo::TodoList, // Tasks from todo.txt (Phase 2).
+    water: water::Water, // Daily intake (Phase 2).
+    last_section: state::IslandState, // Last section card (music/pomodoro/todo/water); reopen shows this, not always music.
 }
 
 fn current_time_text() -> String {
@@ -70,6 +74,8 @@ impl App {
             media_tracker: media::MediaTracker::new(),
             lyrics: None,
             pomodoro: pomodoro::Pomodoro::new(),
+            todo: todo::TodoList::load(),
+            water: water::Water::load(),
             last_section: state::IslandState::Expanded,
         });
         // Initial size + region + placement (Zen, top-center, no animation).
@@ -103,6 +109,8 @@ impl App {
         // becomes last_section (reopen after lyrics shows music).
         if new_state == state::IslandState::Expanded
             || new_state == state::IslandState::Pomodoro
+            || new_state == state::IslandState::Todo
+            || new_state == state::IslandState::Water
         {
             self.last_section = new_state;
         }
@@ -111,6 +119,11 @@ impl App {
         }
         let (from_w, from_h) = (self.pill.width, self.pill.height);
         self.pill.state = new_state;
+        // Reload todo on entering the Todo card (external edits via
+        // Notepad appear on re-entry; no tick polling for the file).
+        if new_state == state::IslandState::Todo {
+            self.todo = todo::TodoList::load();
+        }
         let (to_w, to_h) = new_state.logical_size();
         // If size is already the target, no animation needed.
         if (from_w - to_w).abs() < 0.01 && (from_h - to_h).abs() < 0.01 {
@@ -283,6 +296,12 @@ impl App {
                 } else if in_rect(renderer::MUSIC_DOT_POMODORO_RECT) {
                     self.set_state(state::IslandState::Pomodoro);
                     return;
+                } else if in_rect(renderer::MUSIC_DOT_TODO_RECT) {
+                    self.set_state(state::IslandState::Todo);
+                    return;
+                } else if in_rect(renderer::MUSIC_DOT_WATER_RECT) {
+                    self.set_state(state::IslandState::Water);
+                    return;
                 } else if in_rect(renderer::MUSIC_DOT_MUSIC_RECT) {
                     // Current section dot: no-op (stay open, do not close).
                     return;
@@ -305,6 +324,14 @@ impl App {
                     |r: (f32, f32, f32, f32)| x >= r.0 && x <= r.2 && y >= r.1 && y <= r.3;
                 if in_rect(renderer::MUSIC_DOT_POMODORO_RECT) {
                     self.set_state(state::IslandState::Pomodoro);
+                    return;
+                }
+                if in_rect(renderer::MUSIC_DOT_TODO_RECT) {
+                    self.set_state(state::IslandState::Todo);
+                    return;
+                }
+                if in_rect(renderer::MUSIC_DOT_WATER_RECT) {
+                    self.set_state(state::IslandState::Water);
                     return;
                 }
                 if in_rect(renderer::MUSIC_DOT_MUSIC_RECT) {
@@ -396,8 +423,109 @@ impl App {
                 self.set_state(state::IslandState::Expanded);
                 return;
             }
+            if in_rect(renderer::POMODORO_DOT_TODO_RECT) {
+                self.set_state(state::IslandState::Todo);
+                return;
+            }
+            if in_rect(renderer::POMODORO_DOT_WATER_RECT) {
+                self.set_state(state::IslandState::Water);
+                return;
+            }
             if in_rect(renderer::POMODORO_DOT_POMODORO_RECT) {
                 // Current section dot: no-op (stay open, do not close).
+                return;
+            }
+            self.set_state(state::IslandState::Compact);
+            return;
+        }
+        // Todo card: click a row toggles done, Edit opens todo.txt in
+        // Notepad (add tasks there, then leave/re-enter to refresh),
+        // dots switch section, any other click closes to Compact.
+        if self.pill.state == state::IslandState::Todo {
+            let scale = window::dpi_scale(self.hwnd);
+            let x = x_px as f32 / scale;
+            let y = y_px as f32 / scale;
+            let in_rect =
+                |r: (f32, f32, f32, f32)| x >= r.0 && x <= r.2 && y >= r.1 && y <= r.3;
+            if in_rect(renderer::TODO_EDIT_RECT) {
+                self.todo.open_in_editor();
+                return;
+            }
+            if in_rect(renderer::TODO_DOT_MUSIC_RECT) {
+                self.set_state(state::IslandState::Expanded);
+                return;
+            }
+            if in_rect(renderer::TODO_DOT_POMODORO_RECT) {
+                self.set_state(state::IslandState::Pomodoro);
+                return;
+            }
+            if in_rect(renderer::TODO_DOT_TODO_RECT) {
+                return;
+            }
+            if in_rect(renderer::TODO_DOT_WATER_RECT) {
+                self.set_state(state::IslandState::Water);
+                return;
+            }
+            // Rows: TODO_ROW_GEOM (x0, y0, x1, pitch), height 24, max 6.
+            // (Row rect check, not just row index, so gap clicks close.)
+            let (rx0, ry0, rx1, pitch) = (
+                renderer::TODO_ROW_GEOM.0,
+                renderer::TODO_ROW_GEOM.1,
+                renderer::TODO_ROW_GEOM.2,
+                renderer::TODO_ROW_GEOM.3,
+            );
+            if x >= rx0 && x <= rx1 && y >= ry0 {
+                let idx = ((y - ry0) / pitch) as usize;
+                let row_bottom = ry0 + (idx as f32) * pitch + 24.0;
+                if y <= row_bottom
+                    && idx < self.todo.tasks.len()
+                    && idx < renderer::TODO_MAX_ROWS
+                {
+                    self.todo.toggle(idx);
+                    unsafe {
+                        let _ = InvalidateRect(self.hwnd, None, BOOL(0));
+                    }
+                    return;
+                }
+            }
+            self.set_state(state::IslandState::Compact);
+            return;
+        }
+        // Water card: +250 adds a glass, Reset clears today, dots switch,
+        // any other click closes to Compact.
+        if self.pill.state == state::IslandState::Water {
+            let scale = window::dpi_scale(self.hwnd);
+            let x = x_px as f32 / scale;
+            let y = y_px as f32 / scale;
+            let in_rect =
+                |r: (f32, f32, f32, f32)| x >= r.0 && x <= r.2 && y >= r.1 && y <= r.3;
+            if in_rect(renderer::WATER_ADD_RECT) {
+                self.water.add_glass();
+                unsafe {
+                    let _ = InvalidateRect(self.hwnd, None, BOOL(0));
+                }
+                return;
+            }
+            if in_rect(renderer::WATER_RESET_RECT) {
+                self.water.reset();
+                unsafe {
+                    let _ = InvalidateRect(self.hwnd, None, BOOL(0));
+                }
+                return;
+            }
+            if in_rect(renderer::WATER_DOT_MUSIC_RECT) {
+                self.set_state(state::IslandState::Expanded);
+                return;
+            }
+            if in_rect(renderer::WATER_DOT_POMODORO_RECT) {
+                self.set_state(state::IslandState::Pomodoro);
+                return;
+            }
+            if in_rect(renderer::WATER_DOT_TODO_RECT) {
+                self.set_state(state::IslandState::Todo);
+                return;
+            }
+            if in_rect(renderer::WATER_DOT_WATER_RECT) {
                 return;
             }
             self.set_state(state::IslandState::Compact);
@@ -413,8 +541,8 @@ impl App {
     fn on_paint(&mut self) {
         // Renderer draws current state (clock for Compact, music/no-music
         // card for Expanded, lyrics panel for Lyrics, pomodoro card for
-        // Pomodoro, "Aura" label for Zen). ValidateRect inside draw
-        // prevents a paint loop.
+        // Pomodoro, todo card for Todo, water card for Water, "Aura"
+        // label for Zen). ValidateRect inside draw prevents a paint loop.
         self.renderer.draw(
             self.hwnd,
             self.pill.state,
@@ -422,6 +550,8 @@ impl App {
             self.media.as_ref(),
             self.lyrics.as_ref(),
             &self.pomodoro,
+            &self.todo,
+            &self.water,
         );
     }
 
