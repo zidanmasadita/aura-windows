@@ -85,7 +85,7 @@ fn init_com() {
 /// and GetMessage dispatches it; poll() runs inside that loop, where
 /// .get() can pump the completion messages. A stuck poll only
 /// freezes this thread's cache, never the main window.
-pub fn spawn_poller(cache: Arc<Mutex<Option<MediaInfo>>>) {
+pub fn spawn_poller(cache: Arc<Mutex<PollCache>>) {
     std::thread::spawn(move || {
         init_com();
         unsafe {
@@ -96,15 +96,20 @@ pub fn spawn_poller(cache: Arc<Mutex<Option<MediaInfo>>>) {
             // Thread timer (no HWND): WM_TIMER arrives in this
             // thread's queue every 250ms.
             let _ = SetTimer(None, 1, 250, None);
+            let mut count: u64 = 0;
             loop {
                 let ret = GetMessageW(&mut msg, None, 0, 0);
                 if ret.0 <= 0 {
                     break;
                 }
                 if msg.message == WM_TIMER {
-                    let info = poll();
+                    count += 1;
+                    let (info, status) = poll_status();
                     if let Ok(mut guard) = cache.lock() {
-                        *guard = info;
+                        *guard = PollCache {
+                            info,
+                            status: format!("{} | #{}", status, count),
+                        };
                     }
                 } else {
                     let _ = TranslateMessage(&msg);
@@ -141,6 +146,25 @@ pub fn skip_previous_async() {
     spawn_control(skip_previous);
 }
 
+/// Poll cache: what the last poll found + a short status string
+/// shown on the no-music card, so a failed detection can be diagnosed
+/// from a screenshot instead of guessing (waiting / no session /
+/// request failed / sessions: N, none usable / ...).
+#[derive(Clone)]
+pub struct PollCache {
+    pub info: Option<MediaInfo>,
+    pub status: String,
+}
+
+impl PollCache {
+    pub fn waiting() -> Self {
+        Self {
+            info: None,
+            status: "waiting for first poll...".to_string(),
+        }
+    }
+}
+
 /// Current media state for the music card + compact/zen decisions.
 #[derive(Clone, Debug)]
 pub struct MediaInfo {
@@ -152,15 +176,78 @@ pub struct MediaInfo {
     pub duration_secs: f64,
 }
 
-/// Poll the current GSMTC session. Returns None when there is no session
-/// (silent) or when any step fails (treated as silent, never a crash).
-pub fn poll() -> Option<MediaInfo> {
-    poll_inner().ok()
+/// Poll with a status string. Tries GetCurrentSession first, then
+/// falls back to GetSessions() (all sessions): GetCurrentSession can
+/// point at a different app than the one actually playing (e.g. a
+/// paused Spotify session outranking a playing Chrome YTM session),
+/// so only checking "current" can miss the real song entirely.
+/// Picks the first Playing session, else the first session with a
+/// non-empty title. Status strings are kept short for the no-music
+/// card line: "ok", "no session", "request failed 0x........",
+/// "sessions: N, none usable", etc.
+pub fn poll_status() -> (Option<MediaInfo>, String) {
+    let manager = match GlobalSystemMediaTransportControlsSessionManager::RequestAsync() {
+        Ok(op) => match op.get() {
+            Ok(m) => m,
+            Err(e) => {
+                return (
+                    None,
+                    format!("request failed {:#010x}", e.code().0 as u32),
+                )
+            }
+        },
+        Err(e) => {
+            return (
+                None,
+                format!("request failed {:#010x}", e.code().0 as u32),
+            )
+        }
+    };
+    // Current session first.
+    if let Ok(session) = manager.GetCurrentSession() {
+        if let Ok(info) = session_info(&session) {
+            if !info.title.is_empty() {
+                return (Some(info), "ok".to_string());
+            }
+        }
+    }
+    // Fallback: all sessions.
+    let sessions = match manager.GetSessions() {
+        Ok(s) => s,
+        Err(_) => return (None, "no session".to_string()),
+    };
+    let size = sessions.Size().unwrap_or(0);
+    let mut fallback: Option<MediaInfo> = None;
+    for i in 0..size {
+        let Ok(session) = sessions.GetAt(i) else {
+            continue;
+        };
+        let Ok(info) = session_info(&session) else {
+            continue;
+        };
+        if info.title.is_empty() {
+            continue;
+        }
+        if info.playing {
+            return (Some(info), "ok (session list)".to_string());
+        }
+        if fallback.is_none() {
+            fallback = Some(info);
+        }
+    }
+    if let Some(info) = fallback {
+        return (Some(info), "ok (session list, paused)".to_string());
+    }
+    (None, format!("sessions: {}, none usable", size))
 }
 
-fn poll_inner() -> Result<MediaInfo> {
-    let manager = GlobalSystemMediaTransportControlsSessionManager::RequestAsync()?.get()?;
-    let session = manager.GetCurrentSession()?;
+/// Kept for callers that only need the info (controls do not use it).
+pub fn poll() -> Option<MediaInfo> {
+    poll_status().0
+}
+
+/// One session -> MediaInfo (properties + playback + timeline).
+fn session_info(session: &GlobalSystemMediaTransportControlsSession) -> Result<MediaInfo> {
     let props = session.TryGetMediaPropertiesAsync()?.get()?;
     let title = props.Title()?.to_string();
     let artist = props.Artist()?.to_string();

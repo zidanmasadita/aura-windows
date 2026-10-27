@@ -305,6 +305,7 @@ impl Renderer {
         tray_page: usize,
         cur_w: f32,
         cur_h: f32,
+        poll_status: &str,
     ) {
         // Current animated size, NOT the target size (double-pill fix
         // 2026-10-27): during a Tray (640x280) -> Music (520x180)
@@ -580,6 +581,27 @@ impl Renderer {
                                 self.draw_text(
                                     target,
                                     "Play something in Spotify or YouTube Music",
+                                    fmt,
+                                    &r,
+                                    brush,
+                                );
+                            }
+                            // Diagnostic line (temporary, until detection
+                            // is proven): last GSMTC poll status, so a
+                            // screenshot shows whether the poller runs,
+                            // finds no session, or fails at a step.
+                            if let (Some(fmt), Some(brush)) =
+                                (&self.text_format_small, &self.gray_brush)
+                            {
+                                let r = D2D_RECT_F {
+                                    left: 24.0,
+                                    top: 100.0,
+                                    right: 496.0,
+                                    bottom: 130.0,
+                                };
+                                self.draw_text(
+                                    target,
+                                    &format!("GSMTC: {}", poll_status),
                                     fmt,
                                     &r,
                                     brush,

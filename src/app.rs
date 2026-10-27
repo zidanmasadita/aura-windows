@@ -59,7 +59,8 @@ pub struct App {
     clock_text: String, // HH:MM, updated on 1s tick
     media: Option<media::MediaInfo>, // Current GSMTC session (Phase 1), None = silent.
     media_tracker: media::MediaTracker, // Wall-clock position estimate (realtime fix).
-    media_cache: Arc<Mutex<Option<media::MediaInfo>>>, // Written by the poller thread (with its own message loop), read by the tick.
+    media_cache: Arc<Mutex<media::PollCache>>, // Written by the poller thread (with its own message loop), read by the tick.
+    poll_status: String, // Last poll status, shown on the no-music card for diagnosis.
     suppress_leave: bool, // True after a shrink: cursor may end up outside the smaller window without moving; that leave is not real (see set_state).
     media_none_streak: u32, // Consecutive ticks with no GSMTC session (transient-None hysteresis, hover-flicker fix).
     lyrics: Option<lyrics::LyricsCache>, // Fetched lyrics for current song (Phase 1b), None = not fetched yet.
@@ -80,7 +81,7 @@ fn current_time_text() -> String {
 }
 
 impl App {
-    fn new(hwnd: HWND, media_cache: Arc<Mutex<Option<media::MediaInfo>>>) -> Result<Box<Self>> {
+    fn new(hwnd: HWND, media_cache: Arc<Mutex<media::PollCache>>) -> Result<Box<Self>> {
         let renderer = renderer::Renderer::new()?;
         let mut app = Box::new(Self {
             hwnd,
@@ -92,6 +93,7 @@ impl App {
             media: None,
             media_tracker: media::MediaTracker::new(),
             media_cache,
+            poll_status: "waiting for first poll...".to_string(),
             suppress_leave: false,
             media_none_streak: 0,
             lyrics: None,
@@ -305,7 +307,10 @@ impl App {
                     .media_cache
                     .lock()
                     .ok()
-                    .and_then(|guard| guard.clone());
+                    .map(|guard| (guard.info.clone(), guard.status.clone()))
+                    .unwrap_or((None, "cache locked".to_string()));
+                self.poll_status = cached.1;
+                let cached = cached.0;
                 // Transient-None hysteresis: a single failed/empty GSMTC
                 // poll must not close the card (that close + hover-reopen
                 // is one open-close flicker source). Only after 4
@@ -1006,6 +1011,7 @@ impl App {
             self.tray_page,
             self.pill.width,
             self.pill.height,
+            &self.poll_status,
         );
     }
 
@@ -1178,7 +1184,7 @@ pub fn run() -> Result<()> {
         // returns from RequestAsync, and polling on the UI thread
         // freezes the window immediately). Started before App so the
         // cache exists from the first tick; UI only reads it.
-        let media_cache = Arc::new(Mutex::new(None));
+        let media_cache = Arc::new(Mutex::new(media::PollCache::waiting()));
         media::spawn_poller(media_cache.clone());
         // App (owns renderer + state). Store in USERDATA for WndProc.
         let app = App::new(hwnd, media_cache)?;
