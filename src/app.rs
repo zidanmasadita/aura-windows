@@ -42,6 +42,10 @@ const TIMER_ANIM: usize = 3; // 16ms: size animation (only while animating)
 // leaves the window. Defined locally because windows-rs 0.58 does not export
 // it from KeyboardAndMouse nor WindowsAndMessaging.
 const WM_MOUSELEAVE: u32 = 0x02A3;
+// GWL_EXSTYLE index + WS_EX_NOACTIVATE bit, for temporarily taking
+// keyboard focus while editing a todo (pill is normally NOACTIVATE).
+const GWL_EXSTYLE_IDX: i32 = -20;
+const NOACTIVATE_BIT: isize = 0x0800_0000;
 
 pub struct App {
     hwnd: HWND,
@@ -53,9 +57,12 @@ pub struct App {
     media: Option<media::MediaInfo>, // Current GSMTC session (Phase 1), None = silent.
     media_tracker: media::MediaTracker, // Wall-clock position estimate (realtime fix).
     media_cache: Arc<Mutex<Option<media::MediaInfo>>>, // Written by the poller thread, read by the tick (never polled on UI thread).
+    media_none_streak: u32, // Consecutive ticks with no GSMTC session (transient-None hysteresis, hover-flicker fix).
     lyrics: Option<lyrics::LyricsCache>, // Fetched lyrics for current song (Phase 1b), None = not fetched yet.
     pomodoro: pomodoro::Pomodoro, // In-memory pomodoro timer (Phase 2).
     todo: todo::TodoList, // Tasks from todo.txt (Phase 2).
+    todo_editing: bool, // True while the user types a task in the pill.
+    todo_input: String, // Text being typed (committed on Enter / click-outside).
     water: water::Water, // Daily intake (Phase 2).
     last_section: state::IslandState, // Last section card (music/pomodoro/todo/water); reopen shows this, not always music.
 }
@@ -79,9 +86,12 @@ impl App {
             media: None,
             media_tracker: media::MediaTracker::new(),
             media_cache,
+            media_none_streak: 0,
             lyrics: None,
             pomodoro: pomodoro::Pomodoro::new(),
             todo: todo::TodoList::load(),
+            todo_editing: false,
+            todo_input: String::new(),
             water: water::Water::load(),
             last_section: state::IslandState::Expanded,
         });
@@ -110,7 +120,98 @@ impl App {
         }
     }
 
+    /// End todo editing without committing (used when leaving the
+    /// Todo card by any path other than the Todo click handler).
+    fn end_todo_editing(&mut self, commit: bool) {
+        if !self.todo_editing {
+            return;
+        }
+        if commit {
+            let text = std::mem::take(&mut self.todo_input);
+            self.todo.add(&text);
+        } else {
+            self.todo_input.clear();
+        }
+        self.todo_editing = false;
+        unsafe {
+            let ex = GetWindowLongPtrW(self.hwnd, GWL_EXSTYLE_IDX);
+            let _ = SetWindowLongPtrW(self.hwnd, GWL_EXSTYLE_IDX, ex | NOACTIVATE_BIT);
+            let _ = InvalidateRect(self.hwnd, None, BOOL(0));
+        }
+    }
+
+    /// Start todo editing: temporarily clear NOACTIVATE so the pill can
+    /// take keyboard focus, then activate + focus the window. Only
+    /// during editing does the pill steal focus; all other states stay
+    /// NOACTIVATE as before.
+    fn begin_todo_editing(&mut self) {
+        if self.todo_editing {
+            return;
+        }
+        self.todo_editing = true;
+        self.todo_input.clear();
+        unsafe {
+            let ex = GetWindowLongPtrW(self.hwnd, GWL_EXSTYLE_IDX);
+            let _ = SetWindowLongPtrW(self.hwnd, GWL_EXSTYLE_IDX, ex & !NOACTIVATE_BIT);
+            let _ = SetForegroundWindow(self.hwnd);
+            let _ = SetFocus(self.hwnd);
+            let _ = InvalidateRect(self.hwnd, None, BOOL(0));
+        }
+    }
+
+    /// Keyboard input while editing a todo. WM_CHAR (printable chars)
+    /// appends; control chars (<32, incl. Return/Backspace echoes) are
+    /// ignored here because WM_KEYDOWN handles them.
+    fn on_todo_char(&mut self, code: u16) {
+        if !self.todo_editing {
+            return;
+        }
+        if code < 32 {
+            return;
+        }
+        if let Some(ch) = char::from_u32(code as u32) {
+            if self.todo_input.chars().count() < 200 {
+                self.todo_input.push(ch);
+                unsafe {
+                    let _ = InvalidateRect(self.hwnd, None, BOOL(0));
+                }
+            }
+        }
+    }
+
+    /// WM_KEYDOWN while editing: Backspace deletes, Return commits and
+    /// STAYS editing (rapid entry of several tasks), Esc cancels.
+    fn on_todo_keydown(&mut self, vk: u32) {
+        if !self.todo_editing {
+            return;
+        }
+        match vk {
+            0x08 => {
+                self.todo_input.pop();
+            }
+            0x0D => {
+                let text = std::mem::take(&mut self.todo_input);
+                self.todo.add(&text);
+            }
+            0x1B => {
+                self.end_todo_editing(false);
+                return;
+            }
+            _ => return,
+        }
+        unsafe {
+            let _ = InvalidateRect(self.hwnd, None, BOOL(0));
+        }
+    }
+
     fn set_state(&mut self, new_state: state::IslandState) {
+        // Leaving the Todo card discards uncommitted typed text and
+        // restores NOACTIVATE (the Todo click handler commits on
+        // click-outside before reaching set_state, so this path is
+        // only for leaves via hover/tick/other sections).
+        if new_state != state::IslandState::Todo && self.todo_editing {
+            self.end_todo_editing(false);
+        }
         // Remember the last section (Mac: reopen shows last section, not
         // always music). Lyrics is a panel, not a section, so it never
         // becomes last_section (reopen after lyrics shows music).
@@ -181,7 +282,23 @@ impl App {
                     .lock()
                     .ok()
                     .and_then(|guard| guard.clone());
-                self.media = self.media_tracker.update(cached);
+                // Transient-None hysteresis: a single failed/empty GSMTC
+                // poll must not close the card (that close + hover-reopen
+                // is one open-close flicker source). Only after 4
+                // consecutive empty ticks (1s) is the session treated
+                // as really ended; until then the previous media stays.
+                match cached {
+                    Some(info) => {
+                        self.media_none_streak = 0;
+                        self.media = self.media_tracker.update(Some(info));
+                    }
+                    None => {
+                        self.media_none_streak += 1;
+                        if self.media_none_streak >= 4 {
+                            self.media = self.media_tracker.update(None);
+                        }
+                    }
+                }
                 // Lyrics cache follows song: new song (or session end) clears
                 // cached lyrics; if the lyrics card is open for the old song,
                 // fall back to the music card for the new song (fetching new
@@ -234,19 +351,28 @@ impl App {
         }
     }
 
-    fn on_mouse_move(&mut self) {
-        if !self.tracking_mouse {
-            unsafe {
-                let mut tme = TRACKMOUSEEVENT {
-                    cbSize: std::mem::size_of::<TRACKMOUSEEVENT>() as u32,
-                    dwFlags: TME_LEAVE,
-                    hwndTrack: self.hwnd,
-                    dwHoverTime: 0,
-                };
-                let _ = TrackMouseEvent(&mut tme);
-            }
-            self.tracking_mouse = true;
+    /// (Re-)arm WM_MOUSELEAVE tracking. Called on every mouse move
+    /// and after a spurious leave (see on_mouse_leave): without
+    /// re-arming, a later real exit would never be reported and the
+    /// card would stay open forever.
+    fn arm_mouse_tracking(&mut self) {
+        if self.tracking_mouse {
+            return;
         }
+        unsafe {
+            let mut tme = TRACKMOUSEEVENT {
+                cbSize: std::mem::size_of::<TRACKMOUSEEVENT>() as u32,
+                dwFlags: TME_LEAVE,
+                hwndTrack: self.hwnd,
+                dwHoverTime: 0,
+            };
+            let _ = TrackMouseEvent(&mut tme);
+        }
+        self.tracking_mouse = true;
+    }
+
+    fn on_mouse_move(&mut self) {
+        self.arm_mouse_tracking();
         // Hover: Zen -> Compact (idle); Compact + session -> last section
         // (Aura Mac: hover opens the card when a session exists, and
         // reopen shows the last section, not always music).
@@ -261,6 +387,36 @@ impl App {
 
     fn on_mouse_leave(&mut self) {
         self.tracking_mouse = false;
+        // While typing a todo, cursor exit must NOT close the card
+        // (the user may move the mouse away mid-typing; Esc or a click
+        // outside the input field ends editing, not mouse-leave).
+        if self.todo_editing {
+            return;
+        }
+        // Spurious-leave guard (hover-flicker fix 2026-10-27): Windows
+        // sends WM_MOUSELEAVE when the cursor crosses the window
+        // REGION, not its rect. The pill region has tucked sides
+        // (12pt), rounded bottom corners, and changes size during the
+        // 0.35s expansion animation, so the cursor can leave the region
+        // while still visually over the pill. Closing here and
+        // reopening on the next mouse move is exactly the open-close
+        // loop the user reported. Verify against the real cursor
+        // position and the window RECT: if still inside the rect,
+        // re-arm tracking and keep the current state.
+        let mut pt = POINT::default();
+        let mut rect = RECT::default();
+        let inside = unsafe {
+            GetCursorPos(&mut pt).is_ok()
+                && GetWindowRect(self.hwnd, &mut rect).is_ok()
+                && pt.x >= rect.left
+                && pt.x < rect.right
+                && pt.y >= rect.top
+                && pt.y < rect.bottom
+        };
+        if inside {
+            self.arm_mouse_tracking();
+            return;
+        }
         // Cursor exit: session -> Compact, silent -> Zen (Aura Mac rule).
         if self.media.is_some() {
             self.set_state(state::IslandState::Compact);
@@ -454,17 +610,23 @@ impl App {
             self.set_state(state::IslandState::Compact);
             return;
         }
-        // Todo card: click a row toggles done, Edit opens todo.txt in
-        // Notepad (add tasks there, then leave/re-enter to refresh),
-        // dots switch section, any other click closes to Compact.
+        // Todo card: click the input field to type in the pill,
+        // click a row toggles done, dots switch section, any other
+        // click closes to Compact. While editing, the FIRST click
+        // outside the input field commits the typed task (if any)
+        // and stays on the card; the next click then acts normally.
         if self.pill.state == state::IslandState::Todo {
             let scale = window::dpi_scale(self.hwnd);
             let x = x_px as f32 / scale;
             let y = y_px as f32 / scale;
             let in_rect =
                 |r: (f32, f32, f32, f32)| x >= r.0 && x <= r.2 && y >= r.1 && y <= r.3;
-            if in_rect(renderer::TODO_EDIT_RECT) {
-                self.todo.open_in_editor();
+            if in_rect(renderer::TODO_INPUT_RECT) {
+                self.begin_todo_editing();
+                return;
+            }
+            if self.todo_editing {
+                self.end_todo_editing(true);
                 return;
             }
             if in_rect(renderer::TODO_DOT_MUSIC_RECT) {
@@ -568,6 +730,8 @@ impl App {
             &self.pomodoro,
             &self.todo,
             &self.water,
+            self.todo_editing,
+            &self.todo_input,
         );
     }
 
@@ -628,6 +792,25 @@ unsafe extern "system" fn wnd_proc(
         WM_TIMER => {
             app.on_timer(wparam.0);
             LRESULT(0)
+        }
+        0x0102 => {
+            // WM_CHAR: printable key typed while editing a todo.
+            let code = (wparam.0 & 0xFFFF) as u16;
+            app.on_todo_char(code);
+            LRESULT(0)
+        }
+        0x0100 => {
+            // WM_KEYDOWN: Backspace / Return / Esc while editing.
+            app.on_todo_keydown(wparam.0 as u32);
+            LRESULT(0)
+        }
+        0x0008 => {
+            // WM_KILLFOCUS: focus left the pill (user clicked another
+            // app) — commit typed text if any, then restore NOACTIVATE.
+            if app.todo_editing {
+                app.end_todo_editing(true);
+            }
+            DefWindowProcW(hwnd, msg, wparam, lparam)
         }
         WM_DESTROY => {
             // Remove tray icon, free App, quit.

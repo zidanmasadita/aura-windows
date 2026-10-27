@@ -57,8 +57,10 @@ pub const WATER_DOT_MUSIC_RECT: (f32, f32, f32, f32) = (612.0, 46.0, 628.0, 62.0
 pub const WATER_DOT_POMODORO_RECT: (f32, f32, f32, f32) = (612.0, 70.0, 628.0, 86.0);
 pub const WATER_DOT_TODO_RECT: (f32, f32, f32, f32) = (612.0, 94.0, 628.0, 110.0);
 pub const WATER_DOT_WATER_RECT: (f32, f32, f32, f32) = (612.0, 118.0, 628.0, 134.0);
-/// Todo card: Edit button (top-right) + row geometry (x0, y0, x1, pitch).
-pub const TODO_EDIT_RECT: (f32, f32, f32, f32) = (560.0, 16.0, 616.0, 36.0);
+/// Todo card: in-pill input field (top row, right of the title) +
+/// row geometry (x0, y0, x1, pitch). Click the field to type;
+/// Enter adds (stays editing for rapid entry), Esc cancels.
+pub const TODO_INPUT_RECT: (f32, f32, f32, f32) = (220.0, 16.0, 616.0, 36.0);
 pub const TODO_ROW_GEOM: (f32, f32, f32, f32) = (24.0, 44.0, 600.0, 28.0);
 pub const TODO_MAX_ROWS: usize = 6;
 /// Water card buttons: +250 ml + Reset (centered pair, y 120-144).
@@ -279,6 +281,8 @@ impl Renderer {
         pomodoro: &crate::pomodoro::Pomodoro,
         todo: &crate::todo::TodoList,
         water: &crate::water::Water,
+        todo_editing: bool,
+        todo_input: &str,
     ) {
         let scale = window::dpi_scale(hwnd);
         let (lw, lh) = state.logical_size();
@@ -977,9 +981,10 @@ impl Renderer {
                     }
                 }
                 IslandState::Todo => {
-                    // Todo card (640x220). Title + Edit button + up to 6 rows.
+                    // Todo card (640x220). Title + input field + up to 6 rows.
                     // Tasks from %APPDATA%/Aura/todo.txt (reloaded on entry).
-                    // Click a row toggles done; Edit opens the file in Notepad.
+                    // Click a row toggles done; click the field to type
+                    // a task in the pill (Enter adds, Esc cancels).
                     if let (Some(fmt), Some(brush)) =
                         (&self.text_format, &self.white_brush)
                     {
@@ -991,26 +996,51 @@ impl Renderer {
                         };
                         self.draw_text(target, "Todo", fmt, &r, brush);
                     }
-                    // Edit button (dim pill + label).
+                    // Input field (dim pill + typed text / placeholder).
+                    // Long input shows its tail (last chars) so the user
+                    // always sees what they are typing; the full string
+                    // is what gets saved on Enter / click-outside.
                     if let Some(brush) = &self.dim_brush {
                         let r = D2D_RECT_F {
-                            left: TODO_EDIT_RECT.0,
-                            top: TODO_EDIT_RECT.1,
-                            right: TODO_EDIT_RECT.2,
-                            bottom: TODO_EDIT_RECT.3,
+                            left: TODO_INPUT_RECT.0,
+                            top: TODO_INPUT_RECT.1,
+                            right: TODO_INPUT_RECT.2,
+                            bottom: TODO_INPUT_RECT.3,
                         };
                         target.FillRectangle(&r, brush);
                     }
-                    if let (Some(fmt), Some(brush)) =
-                        (&self.text_format_center, &self.white_brush)
                     {
-                        let r = D2D_RECT_F {
-                            left: TODO_EDIT_RECT.0,
-                            top: TODO_EDIT_RECT.1,
-                            right: TODO_EDIT_RECT.2,
-                            bottom: TODO_EDIT_RECT.3,
+                        let shown: String = if todo_editing {
+                            let tail: String = todo_input
+                                .chars()
+                                .rev()
+                                .take(36)
+                                .collect::<Vec<char>>()
+                                .into_iter()
+                                .rev()
+                                .collect();
+                            if tail.is_empty() {
+                                "|".to_string()
+                            } else {
+                                format!("{}|", tail)
+                            }
+                        } else {
+                            "Add task...".to_string()
                         };
-                        self.draw_text(target, "Edit", fmt, &r, brush);
+                        let brush = if todo_editing {
+                            &self.white_brush
+                        } else {
+                            &self.gray_brush
+                        };
+                        if let (Some(fmt), Some(brush)) = (&self.text_format, brush) {
+                            let r = D2D_RECT_F {
+                                left: TODO_INPUT_RECT.0 + 8.0,
+                                top: TODO_INPUT_RECT.1,
+                                right: TODO_INPUT_RECT.2 - 8.0,
+                                bottom: TODO_INPUT_RECT.3,
+                            };
+                            self.draw_text(target, &shown, fmt, &r, brush);
+                        }
                     }
                     if todo.tasks.is_empty() {
                         if let (Some(fmt), Some(brush)) =
@@ -1024,7 +1054,7 @@ impl Renderer {
                             };
                             self.draw_text(
                                 target,
-                                "No tasks yet — click Edit to add some",
+                                "No tasks yet - click the field above to add one",
                                 fmt,
                                 &r,
                                 brush,

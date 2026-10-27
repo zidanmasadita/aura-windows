@@ -1,10 +1,11 @@
 //! Todo (Phase 2, part 2): tasks from %APPDATA%/Aura/todo.txt.
 //! One task per line. "[x] " = done, "[ ] " or plain = todo.
 //!
-//! The pill is NOACTIVATE (never takes keyboard focus), so in-pill
-//! typing is impossible without stealing focus. Adding tasks is via
-//! Edit (opens todo.txt in Notepad); the app re-reads the file on
-//! entering the Todo card. Clicking a row toggles done (and saves).
+//! Tasks are typed directly in the pill (user request 2026-10-27:
+//! no Notepad). The pill is normally NOACTIVATE, so while editing
+//! app.rs temporarily clears WS_EX_NOACTIVATE, activates the window
+//! and takes keyboard focus; leaving edit mode restores NOACTIVATE.
+//! Clicking a row toggles done (and saves).
 
 use std::fs;
 use std::path::PathBuf;
@@ -87,22 +88,17 @@ impl TodoList {
         }
     }
 
-    /// Ensure todo.txt exists, then open it in Notepad so the user can
-    /// add tasks. Best-effort: if Notepad fails to launch, the user can
-    /// open %APPDATA%/Aura/todo.txt manually. (Notepad via std::process,
-    /// not ShellExecute, to avoid Win32 signature uncertainty.)
-    pub fn open_in_editor(&self) {
-        let Some(path) = Self::path() else {
+    /// Append a task (trimmed, ignored when empty) and save.
+    pub fn add(&mut self, title: &str) {
+        let title = title.trim();
+        if title.is_empty() {
             return;
-        };
-        if let Some(parent) = path.parent() {
-            let _ = fs::create_dir_all(parent);
         }
-        if !path.exists() {
-            let _ = fs::write(&path, "");
-        }
-        let _ = std::process::Command::new("notepad.exe")
-            .arg(&path)
-            .spawn();
+        self.tasks.push(Task {
+            title: title.to_string(),
+            done: false,
+        });
+        self.save();
     }
+
 }
