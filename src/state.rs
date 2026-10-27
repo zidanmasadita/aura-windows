@@ -8,6 +8,7 @@ pub enum IslandState {
     Compact,  // music pill, 180x32 (Phase 0 placeholder: clock + waveform)
     Expanded, // music card, 520x180
     Lyrics,   // lyrics panel, 700x180 (same height as music, wider)
+    Pomodoro, // pomodoro card, 640x180
 }
 
 impl IslandState {
@@ -17,6 +18,7 @@ impl IslandState {
             IslandState::Compact => (180.0, 32.0),
             IslandState::Expanded => (520.0, 180.0),
             IslandState::Lyrics => (700.0, 180.0),
+            IslandState::Pomodoro => (640.0, 180.0),
         }
     }
 }

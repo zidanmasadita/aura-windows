@@ -33,6 +33,17 @@ pub const LYRICS_MUSIC_BUBBLE_RECT: (f32, f32, f32, f32) = (620.0, 28.0, 676.0, 
 /// Nudge buttons on the lyrics panel (bottom-right, -0.5s / +0.5s).
 pub const LYRICS_NUDGE_MINUS_RECT: (f32, f32, f32, f32) = (548.0, 148.0, 612.0, 172.0);
 pub const LYRICS_NUDGE_PLUS_RECT: (f32, f32, f32, f32) = (620.0, 148.0, 676.0, 172.0);
+/// Pomodoro card buttons (640x180): mode pills + Start/Pause.
+pub const POMODORO_FOCUS_RECT: (f32, f32, f32, f32) = (220.0, 100.0, 300.0, 124.0);
+pub const POMODORO_BREAK_RECT: (f32, f32, f32, f32) = (340.0, 100.0, 420.0, 124.0);
+pub const POMODORO_START_RECT: (f32, f32, f32, f32) = (280.0, 140.0, 360.0, 164.0);
+/// Section dots (2 sections for now: music, pomodoro). Right edge, vertical.
+/// Music card (520 wide): x 492-508. Pomodoro card (640 wide): x 612-628.
+/// Y: two 16px dots, 8px gap, centered in 180 (top 70 and 94).
+pub const MUSIC_DOT_MUSIC_RECT: (f32, f32, f32, f32) = (492.0, 70.0, 508.0, 86.0);
+pub const MUSIC_DOT_POMODORO_RECT: (f32, f32, f32, f32) = (492.0, 94.0, 508.0, 110.0);
+pub const POMODORO_DOT_MUSIC_RECT: (f32, f32, f32, f32) = (612.0, 70.0, 628.0, 86.0);
+pub const POMODORO_DOT_POMODORO_RECT: (f32, f32, f32, f32) = (612.0, 94.0, 628.0, 110.0);
 
 /// Format seconds as m:ss (e.g. 83.0 -> "1:23").
 fn format_time(secs: f64) -> String {
@@ -245,6 +256,7 @@ impl Renderer {
         clock_text: &str,
         media: Option<&crate::media::MediaInfo>,
         lyrics: Option<&crate::lyrics::LyricsCache>,
+        pomodoro: &crate::pomodoro::Pomodoro,
     ) {
         let scale = window::dpi_scale(hwnd);
         let (lw, lh) = state.logical_size();
@@ -519,6 +531,30 @@ impl Renderer {
                             }
                         }
                     }
+                    // Section dots (right edge): music (current, white),
+                    // pomodoro (gray). Clickable (hit-test in app).
+                    if let (Some(fmt), Some(brush)) =
+                        (&self.text_format_center, &self.white_brush)
+                    {
+                        let dot_music = D2D_RECT_F {
+                            left: MUSIC_DOT_MUSIC_RECT.0,
+                            top: MUSIC_DOT_MUSIC_RECT.1,
+                            right: MUSIC_DOT_MUSIC_RECT.2,
+                            bottom: MUSIC_DOT_MUSIC_RECT.3,
+                        };
+                        self.draw_text(target, "•", fmt, &dot_music, brush);
+                    }
+                    if let (Some(fmt), Some(brush)) =
+                        (&self.text_format_center, &self.gray_brush)
+                    {
+                        let dot_pomodoro = D2D_RECT_F {
+                            left: MUSIC_DOT_POMODORO_RECT.0,
+                            top: MUSIC_DOT_POMODORO_RECT.1,
+                            right: MUSIC_DOT_POMODORO_RECT.2,
+                            bottom: MUSIC_DOT_POMODORO_RECT.3,
+                        };
+                        self.draw_text(target, "•", fmt, &dot_pomodoro, brush);
+                    }
                 }
                 IslandState::Lyrics => {
                     // Lyrics panel (700x180). App only enters Lyrics after a
@@ -718,6 +754,159 @@ impl Renderer {
                                 }
                             }
                         }
+                    }
+                }
+                IslandState::Pomodoro => {
+                    // Pomodoro card (640x180, in-memory, wall-clock).
+                    // Timer (large, centered) + mode pills + Start/Pause +
+                    // section dots. Ring is a follow-up (not in this increment).
+                    let remaining = pomodoro.remaining(chrono::Local::now());
+                    let timer_text = format!("{:02}:{:02}", remaining / 60, remaining % 60);
+                    if let (Some(fmt), Some(brush)) =
+                        (&self.text_format_large, &self.white_brush)
+                    {
+                        let r = D2D_RECT_F {
+                            left: 220.0,
+                            top: 30.0,
+                            right: 420.0,
+                            bottom: 80.0,
+                        };
+                        self.draw_text(target, &timer_text, fmt, &r, brush);
+                    }
+                    // Mode pills: selected = white fill + black text,
+                    // unselected = dim fill + white text.
+                    let focus_selected =
+                        pomodoro.mode == crate::pomodoro::PomodoroMode::Focus;
+                    if focus_selected {
+                        if let Some(brush) = &self.white_brush {
+                            let r = D2D_RECT_F {
+                                left: POMODORO_FOCUS_RECT.0,
+                                top: POMODORO_FOCUS_RECT.1,
+                                right: POMODORO_FOCUS_RECT.2,
+                                bottom: POMODORO_FOCUS_RECT.3,
+                            };
+                            target.FillRectangle(&r, brush);
+                        }
+                        if let (Some(fmt), Some(brush)) =
+                            (&self.text_format_center, &self.black_brush)
+                        {
+                            let r = D2D_RECT_F {
+                                left: POMODORO_FOCUS_RECT.0,
+                                top: POMODORO_FOCUS_RECT.1,
+                                right: POMODORO_FOCUS_RECT.2,
+                                bottom: POMODORO_FOCUS_RECT.3,
+                            };
+                            self.draw_text(target, "Focus", fmt, &r, brush);
+                        }
+                    } else {
+                        if let Some(brush) = &self.dim_brush {
+                            let r = D2D_RECT_F {
+                                left: POMODORO_FOCUS_RECT.0,
+                                top: POMODORO_FOCUS_RECT.1,
+                                right: POMODORO_FOCUS_RECT.2,
+                                bottom: POMODORO_FOCUS_RECT.3,
+                            };
+                            target.FillRectangle(&r, brush);
+                        }
+                        if let (Some(fmt), Some(brush)) =
+                            (&self.text_format_center, &self.white_brush)
+                        {
+                            let r = D2D_RECT_F {
+                                left: POMODORO_FOCUS_RECT.0,
+                                top: POMODORO_FOCUS_RECT.1,
+                                right: POMODORO_FOCUS_RECT.2,
+                                bottom: POMODORO_FOCUS_RECT.3,
+                            };
+                            self.draw_text(target, "Focus", fmt, &r, brush);
+                        }
+                    }
+                    // Break pill (mirror of Focus, selected state inverted).
+                    if !focus_selected {
+                        if let Some(brush) = &self.white_brush {
+                            let r = D2D_RECT_F {
+                                left: POMODORO_BREAK_RECT.0,
+                                top: POMODORO_BREAK_RECT.1,
+                                right: POMODORO_BREAK_RECT.2,
+                                bottom: POMODORO_BREAK_RECT.3,
+                            };
+                            target.FillRectangle(&r, brush);
+                        }
+                        if let (Some(fmt), Some(brush)) =
+                            (&self.text_format_center, &self.black_brush)
+                        {
+                            let r = D2D_RECT_F {
+                                left: POMODORO_BREAK_RECT.0,
+                                top: POMODORO_BREAK_RECT.1,
+                                right: POMODORO_BREAK_RECT.2,
+                                bottom: POMODORO_BREAK_RECT.3,
+                            };
+                            self.draw_text(target, "Break", fmt, &r, brush);
+                        }
+                    } else {
+                        if let Some(brush) = &self.dim_brush {
+                            let r = D2D_RECT_F {
+                                left: POMODORO_BREAK_RECT.0,
+                                top: POMODORO_BREAK_RECT.1,
+                                right: POMODORO_BREAK_RECT.2,
+                                bottom: POMODORO_BREAK_RECT.3,
+                            };
+                            target.FillRectangle(&r, brush);
+                        }
+                        if let (Some(fmt), Some(brush)) =
+                            (&self.text_format_center, &self.white_brush)
+                        {
+                            let r = D2D_RECT_F {
+                                left: POMODORO_BREAK_RECT.0,
+                                top: POMODORO_BREAK_RECT.1,
+                                right: POMODORO_BREAK_RECT.2,
+                                bottom: POMODORO_BREAK_RECT.3,
+                            };
+                            self.draw_text(target, "Break", fmt, &r, brush);
+                        }
+                    }
+                    // Start/Pause button (dim pill + white label).
+                    if let Some(brush) = &self.dim_brush {
+                        let r = D2D_RECT_F {
+                            left: POMODORO_START_RECT.0,
+                            top: POMODORO_START_RECT.1,
+                            right: POMODORO_START_RECT.2,
+                            bottom: POMODORO_START_RECT.3,
+                        };
+                        target.FillRectangle(&r, brush);
+                    }
+                    if let (Some(fmt), Some(brush)) =
+                        (&self.text_format_center, &self.white_brush)
+                    {
+                        let r = D2D_RECT_F {
+                            left: POMODORO_START_RECT.0,
+                            top: POMODORO_START_RECT.1,
+                            right: POMODORO_START_RECT.2,
+                            bottom: POMODORO_START_RECT.3,
+                        };
+                        self.draw_text(target, pomodoro.button_label(), fmt, &r, brush);
+                    }
+                    // Section dots: music (gray), pomodoro (current, white).
+                    if let (Some(fmt), Some(brush)) =
+                        (&self.text_format_center, &self.gray_brush)
+                    {
+                        let dot_music = D2D_RECT_F {
+                            left: POMODORO_DOT_MUSIC_RECT.0,
+                            top: POMODORO_DOT_MUSIC_RECT.1,
+                            right: POMODORO_DOT_MUSIC_RECT.2,
+                            bottom: POMODORO_DOT_MUSIC_RECT.3,
+                        };
+                        self.draw_text(target, "•", fmt, &dot_music, brush);
+                    }
+                    if let (Some(fmt), Some(brush)) =
+                        (&self.text_format_center, &self.white_brush)
+                    {
+                        let dot_pomodoro = D2D_RECT_F {
+                            left: POMODORO_DOT_POMODORO_RECT.0,
+                            top: POMODORO_DOT_POMODORO_RECT.1,
+                            right: POMODORO_DOT_POMODORO_RECT.2,
+                            bottom: POMODORO_DOT_POMODORO_RECT.3,
+                        };
+                        self.draw_text(target, "•", fmt, &dot_pomodoro, brush);
                     }
                 }
             }

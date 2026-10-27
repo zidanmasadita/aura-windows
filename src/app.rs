@@ -21,6 +21,7 @@ use windows::Win32::UI::WindowsAndMessaging::*;
 use crate::animator;
 use crate::lyrics;
 use crate::media;
+use crate::pomodoro;
 use crate::renderer;
 use crate::state;
 use crate::tray;
@@ -43,6 +44,8 @@ pub struct App {
     clock_text: String, // HH:MM, updated on 1s tick
     media: Option<media::MediaInfo>, // Current GSMTC session (Phase 1), None = silent.
     lyrics: Option<lyrics::LyricsCache>, // Fetched lyrics for current song (Phase 1b), None = not fetched yet.
+    pomodoro: pomodoro::Pomodoro, // In-memory pomodoro timer (Phase 2).
+    last_section: state::IslandState, // Last section card (music/pomodoro); reopen shows this, not always music.
 }
 
 fn current_time_text() -> String {
@@ -63,6 +66,8 @@ impl App {
             clock_text: current_time_text(),
             media: None,
             lyrics: None,
+            pomodoro: pomodoro::Pomodoro::new(),
+            last_section: state::IslandState::Expanded,
         });
         // Initial size + region + placement (Zen, top-center, no animation).
         app.apply_size();
@@ -90,6 +95,14 @@ impl App {
     }
 
     fn set_state(&mut self, new_state: state::IslandState) {
+        // Remember the last section (Mac: reopen shows last section, not
+        // always music). Lyrics is a panel, not a section, so it never
+        // becomes last_section (reopen after lyrics shows music).
+        if new_state == state::IslandState::Expanded
+            || new_state == state::IslandState::Pomodoro
+        {
+            self.last_section = new_state;
+        }
         if new_state == self.pill.state && self.anim.is_none() {
             return;
         }
@@ -172,6 +185,10 @@ impl App {
                 {
                     self.set_state(state::IslandState::Zen);
                 }
+                // Pomodoro: if running and time is up, stop (00:00, Start).
+                // (Wall-clock: remaining is computed from ends_at, so this
+                // check on tick is just for stopping promptly, not counting.)
+                self.pomodoro.check_finished(chrono::Local::now());
                 self.clock_text = current_time_text();
                 // Synchronous repaint (not just InvalidateRect): draws the
                 // current position immediately, so lyrics/progress advance
@@ -199,13 +216,15 @@ impl App {
             }
             self.tracking_mouse = true;
         }
-        // Hover: Zen -> Compact (idle); Compact + session -> Expanded
-        // (Aura Mac: hover opens the card when a session exists).
-        // If already Expanded, hovering keeps it Expanded.
+        // Hover: Zen -> Compact (idle); Compact + session -> last section
+        // (Aura Mac: hover opens the card when a session exists, and
+        // reopen shows the last section, not always music).
+        // If already in a card (Expanded/Pomodoro/Lyrics), hovering keeps it.
         if self.pill.state == state::IslandState::Zen {
             self.set_state(state::IslandState::Compact);
         } else if self.pill.state == state::IslandState::Compact && self.media.is_some() {
-            self.set_state(state::IslandState::Expanded);
+            let target = self.last_section;
+            self.set_state(target);
         }
     }
 
@@ -258,6 +277,12 @@ impl App {
                     }
                     self.set_state(state::IslandState::Lyrics);
                     return;
+                } else if in_rect(renderer::MUSIC_DOT_POMODORO_RECT) {
+                    self.set_state(state::IslandState::Pomodoro);
+                    return;
+                } else if in_rect(renderer::MUSIC_DOT_MUSIC_RECT) {
+                    // Current section dot: no-op (stay open, do not close).
+                    return;
                 } else {
                     self.set_state(state::IslandState::Compact);
                     return;
@@ -267,7 +292,22 @@ impl App {
                 }
                 return;
             }
-            // No session: any click closes the no-music card to Compact.
+            // No session: dots still navigate (pomodoro needs no session);
+            // any other click closes the no-music card to Compact.
+            {
+                let scale = window::dpi_scale(self.hwnd);
+                let x = x_px as f32 / scale;
+                let y = y_px as f32 / scale;
+                let in_rect =
+                    |r: (f32, f32, f32, f32)| x >= r.0 && x <= r.2 && y >= r.1 && y <= r.3;
+                if in_rect(renderer::MUSIC_DOT_POMODORO_RECT) {
+                    self.set_state(state::IslandState::Pomodoro);
+                    return;
+                }
+                if in_rect(renderer::MUSIC_DOT_MUSIC_RECT) {
+                    return;
+                }
+            }
             self.set_state(state::IslandState::Compact);
             return;
         }
@@ -320,20 +360,65 @@ impl App {
             self.set_state(state::IslandState::Compact);
             return;
         }
-        // Not Expanded/Lyrics: click expands (music card if session, no-music card if not).
-        self.set_state(state::IslandState::Expanded);
+        // Pomodoro card: mode pills select mode, Start/Pause toggles,
+        // dots switch section, any other click closes to Compact.
+        if self.pill.state == state::IslandState::Pomodoro {
+            let scale = window::dpi_scale(self.hwnd);
+            let x = x_px as f32 / scale;
+            let y = y_px as f32 / scale;
+            let in_rect =
+                |r: (f32, f32, f32, f32)| x >= r.0 && x <= r.2 && y >= r.1 && y <= r.3;
+            if in_rect(renderer::POMODORO_FOCUS_RECT) {
+                self.pomodoro.select_mode(pomodoro::PomodoroMode::Focus);
+                unsafe {
+                    let _ = InvalidateRect(self.hwnd, None, BOOL(0));
+                }
+                return;
+            }
+            if in_rect(renderer::POMODORO_BREAK_RECT) {
+                self.pomodoro.select_mode(pomodoro::PomodoroMode::Break);
+                unsafe {
+                    let _ = InvalidateRect(self.hwnd, None, BOOL(0));
+                }
+                return;
+            }
+            if in_rect(renderer::POMODORO_START_RECT) {
+                self.pomodoro.toggle_start_pause(chrono::Local::now());
+                unsafe {
+                    let _ = InvalidateRect(self.hwnd, None, BOOL(0));
+                }
+                return;
+            }
+            if in_rect(renderer::POMODORO_DOT_MUSIC_RECT) {
+                self.set_state(state::IslandState::Expanded);
+                return;
+            }
+            if in_rect(renderer::POMODORO_DOT_POMODORO_RECT) {
+                // Current section dot: no-op (stay open, do not close).
+                return;
+            }
+            self.set_state(state::IslandState::Compact);
+            return;
+        }
+        // Not in a card: click opens the last section (music by default).
+        {
+            let target = self.last_section;
+            self.set_state(target);
+        }
     }
 
     fn on_paint(&mut self) {
         // Renderer draws current state (clock for Compact, music/no-music
-        // card for Expanded, lyrics panel for Lyrics, "Aura" label for
-        // Zen). ValidateRect inside draw prevents a paint loop.
+        // card for Expanded, lyrics panel for Lyrics, pomodoro card for
+        // Pomodoro, "Aura" label for Zen). ValidateRect inside draw
+        // prevents a paint loop.
         self.renderer.draw(
             self.hwnd,
             self.pill.state,
             &self.clock_text,
             self.media.as_ref(),
             self.lyrics.as_ref(),
+            &self.pomodoro,
         );
     }
 
