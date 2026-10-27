@@ -1,5 +1,5 @@
 //! Window helpers: work area (excludes taskbar), DPI scale, top-center placement,
-//! rounded-rect window region (pill shape, like Nusa's SetWindowRgn approach).
+//! Nusa-shaped window region (boxy, square top + rounded bottom, via SetWindowRgn).
 //!
 //! Note (Phase 0 deviation, honest): shape uses SetWindowRgn (rounded rect),
 //! not a DComp visual tree. D2D draws the pill; the region clips the window
@@ -69,25 +69,19 @@ pub fn place_top_center(hwnd: HWND, width: i32, height: i32) {
     }
 }
 
-/// Set a tuck-shaped window region (Aura Mac shape): concave 12pt tuck
-/// at the top corners (flowing into the top edge, like a notch) +
-/// convex bottom corners (radius param: height/2 for short pills,
-/// 28pt*scale for tall cards). Built as a polygon (circular arcs, 8
-/// segments per corner). D2D still draws a rounded rect, which this
-/// region clips to the tuck silhouette (correct shape; the 0.5px stroke
-/// at the tuck curves is clipped — a PathGeometry stroke following the
-/// tuck exactly is a later polish step).
+/// Set a Nusa-shaped window region (boxy, square top merging into
+/// the top edge/bezel, rounded bottom): top corners square (radius 0,
+/// flush with y=0), bottom corners convex (radius param: height/2
+/// for short pills, 28pt*scale for tall cards). Built as a polygon
+/// (bottom arcs, 8 segments each). Matches the D2D path geometry in
+/// renderer.rs (same outline, physical pixels here).
 /// The system owns the region after a successful SetWindowRgn (do not delete).
 /// width/height/radius are PHYSICAL pixels.
 pub fn set_pill_region(hwnd: HWND, width: i32, height: i32, radius: i32) {
-    let scale = dpi_scale(hwnd);
-    let tuck = (12.0 * scale).round() as i32;
     let w = width.max(1);
     let h = height.max(1);
     let r = radius.clamp(0, h / 2);
-    let t = tuck.clamp(0, w / 2);
-    // Polygon points (clockwise from top edge). Arc helper appends
-    // intermediate points only (endpoints are pushed explicitly).
+    // Polygon points (clockwise from top-left, square top).
     let mut pts: Vec<POINT> = Vec::new();
     let seg = 8i32;
     let mut push_arc = |pts: &mut Vec<POINT>, cx: i32, cy: i32, rad: i32, a0: f32, a1: f32| {
@@ -99,12 +93,9 @@ pub fn set_pill_region(hwnd: HWND, width: i32, height: i32, radius: i32) {
             });
         }
     };
-    // Top edge.
-    pts.push(POINT { x: t, y: 0 });
-    pts.push(POINT { x: w - t, y: 0 });
-    // Top-right tuck (concave, center at outer corner (w, 0)): 180deg -> 90deg.
-    push_arc(&mut pts, w, 0, t, std::f32::consts::PI, std::f32::consts::FRAC_PI_2);
-    pts.push(POINT { x: w, y: t });
+    // Top edge (square corners, flush with top edge/bezel).
+    pts.push(POINT { x: 0, y: 0 });
+    pts.push(POINT { x: w, y: 0 });
     // Right side.
     pts.push(POINT { x: w, y: h - r });
     // Bottom-right (convex, center (w-r, h-r)): 0deg -> 90deg.
@@ -115,11 +106,7 @@ pub fn set_pill_region(hwnd: HWND, width: i32, height: i32, radius: i32) {
     // Bottom-left (convex, center (r, h-r)): 90deg -> 180deg.
     push_arc(&mut pts, r, h - r, r, std::f32::consts::FRAC_PI_2, std::f32::consts::PI);
     pts.push(POINT { x: 0, y: h - r });
-    // Left side.
-    pts.push(POINT { x: 0, y: t });
-    // Top-left tuck (concave, center (0, 0)): 90deg -> 0deg.
-    // (Region auto-closes back to (t, 0).)
-    push_arc(&mut pts, 0, 0, t, std::f32::consts::FRAC_PI_2, 0.0);
+    // (Region auto-closes back to (0, 0) along the left side.)
     unsafe {
         let rgn: HRGN = CreatePolygonRgn(&pts, ALTERNATE);
         if rgn.0 == std::ptr::null_mut() {

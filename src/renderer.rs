@@ -202,7 +202,11 @@ impl Renderer {
             target.BeginDraw();
             // Clear to transparent (outside the pill is clipped by the window region anyway).
             target.Clear(None);
-            // Pill/card background: rounded rect, black 0.98, white 0.15 stroke 0.5.
+            // Pill/card background: Nusa shape (boxy, square top merging
+            // into the top edge/bezel, rounded bottom). Drawn as a path
+            // geometry so fill + stroke follow the shape exactly. Falls
+            // back to a plain rect (clipped by the window region to the
+            // same silhouette) if path creation fails.
             let rect = D2D_RECT_F {
                 left: 0.0,
                 top: 0.0,
@@ -210,16 +214,21 @@ impl Renderer {
                 bottom: lh,
             };
             let radius = if lh <= 33.0 { lh / 2.0 } else { 28.0 };
-            let rounded = D2D1_ROUNDED_RECT {
-                rect,
-                radiusX: radius,
-                radiusY: radius,
-            };
-            if let Some(brush) = &self.black_brush {
-                target.FillRoundedRectangle(&rounded, brush);
-            }
-            if let Some(brush) = &self.dim_brush {
-                target.DrawRoundedRectangle(&rounded, brush, 0.5, None);
+            if let Some(geometry) = self.nusa_geometry(lw, lh, radius) {
+                if let Some(brush) = &self.black_brush {
+                    target.FillGeometry(&geometry, brush, None);
+                }
+                if let Some(brush) = &self.dim_brush {
+                    target.DrawGeometry(&geometry, brush, 0.5, None);
+                }
+            } else {
+                // Fallback: plain rect (window region clips bottom to rounded).
+                if let Some(brush) = &self.black_brush {
+                    target.FillRectangle(&rect, brush);
+                }
+                if let Some(brush) = &self.dim_brush {
+                    target.DrawRectangle(&rect, brush, 0.5, None);
+                }
             }
             // Content per state (Phase 0 placeholders).
             match state {
@@ -298,6 +307,53 @@ impl Renderer {
             }
             let _ = target.EndDraw(None, None);
             let _ = ValidateRect(hwnd, None);
+        }
+    }
+
+    /// Build a Nusa-shape path geometry (logical points): square top
+    /// (merging into the top edge/bezel) + rounded bottom corners.
+    /// Returns None if creation fails (caller falls back to a rect).
+    fn nusa_geometry(&self, lw: f32, lh: f32, radius: f32) -> Option<ID2D1Geometry> {
+        unsafe {
+            let path: ID2D1PathGeometry = self.factory.CreatePathGeometry().ok()?;
+            let sink: ID2D1GeometrySink = path.Open().ok()?;
+            // Outline points (clockwise from top-left, square top).
+            let r = radius.clamp(0.0, lh / 2.0);
+            let mut pts: Vec<D2D_POINT_2F> = Vec::new();
+            pts.push(D2D_POINT_2F { x: 0.0, y: 0.0 });
+            pts.push(D2D_POINT_2F { x: lw, y: 0.0 });
+            pts.push(D2D_POINT_2F { x: lw, y: lh - r });
+            // Bottom-right arc (center (lw-r, lh-r), 0deg -> 90deg).
+            let seg = 8i32;
+            for i in 1..seg {
+                let a = std::f32::consts::FRAC_PI_2 * (i as f32 / seg as f32);
+                pts.push(D2D_POINT_2F {
+                    x: lw - r + r * a.cos(),
+                    y: lh - r + r * a.sin(),
+                });
+            }
+            pts.push(D2D_POINT_2F { x: lw - r, y: lh });
+            pts.push(D2D_POINT_2F { x: r, y: lh });
+            // Bottom-left arc (center (r, lh-r), 90deg -> 180deg).
+            for i in 1..seg {
+                let a = std::f32::consts::FRAC_PI_2
+                    + std::f32::consts::FRAC_PI_2 * (i as f32 / seg as f32);
+                pts.push(D2D_POINT_2F {
+                    x: r + r * a.cos(),
+                    y: lh - r + r * a.sin(),
+                });
+            }
+            pts.push(D2D_POINT_2F { x: 0.0, y: lh - r });
+            // (EndFigure CLOSED closes back to (0, 0) along the left side.)
+            sink.BeginFigure(pts[0], D2D1_FIGURE_BEGIN_FILLED);
+            if pts.len() > 1 {
+                sink.AddLines(&pts[1..]);
+            }
+            sink.EndFigure(D2D1_FIGURE_END_CLOSED);
+            if sink.Close().is_err() {
+                return None;
+            }
+            path.cast::<ID2D1Geometry>().ok()
         }
     }
 
