@@ -1,5 +1,5 @@
 //! Direct2D renderer (Phase 0): HWND render target + DirectWrite text.
-//! Draws the pill/card: black 0.98 fill + white 0.15 stroke (0.5px) +
+//! Draws the pill/card: black 0.98 fill + white 0.15 stroke (1.0px) +
 //! rounded corners + text (Segoe UI). Cover/gradient/waveform detail
 //! arrives in Phase 1 (music card); Phase 0 draws placeholder content
 //! (clock + decorative waveform bars in Compact, "Aura / Fase 0" in Expanded).
@@ -105,6 +105,10 @@ impl Renderer {
             let Ok(target) = hwnd_target.cast::<ID2D1RenderTarget>() else {
                 return false;
             };
+            // Explicit anti-aliasing for fills/strokes (default is already
+            // per-primitive; make it explicit: the window region itself
+            // cannot anti-alias, so D2D AA is what keeps inner edges smooth).
+            target.SetAntialiasMode(D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
             // Brushes (None = default brush properties: opacity 1.0, identity).
             if let Ok(b) = hwnd_target.CreateSolidColorBrush(
                 &D2D1_COLOR_F {
@@ -220,7 +224,7 @@ impl Renderer {
                     target.FillGeometry(&geometry, brush, None);
                 }
                 if let Some(brush) = &self.dim_brush {
-                    target.DrawGeometry(&geometry, brush, 0.5, None);
+                    target.DrawGeometry(&geometry, brush, 1.0, None); // 1.0, not Mac 0.5: region clips outer half, so visible inner stroke is ~0.5px.
                 }
             } else {
                 // Fallback: plain rect (window region clips bottom to rounded).
@@ -228,7 +232,7 @@ impl Renderer {
                     target.FillRectangle(&rect, brush);
                 }
                 if let Some(brush) = &self.dim_brush {
-                    target.DrawRectangle(&rect, brush, 0.5, None);
+                    target.DrawRectangle(&rect, brush, 1.0, None); // Same 1.0 stroke (see above).
                 }
             }
             // Content per state (Phase 0 placeholders).
