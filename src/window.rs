@@ -91,7 +91,7 @@ pub fn set_pill_region(hwnd: HWND, width: i32, height: i32, radius: i32) {
     // intermediate points only (endpoints are pushed explicitly).
     let mut pts: Vec<POINT> = Vec::new();
     let seg = 8i32;
-    let mut push_arc = |pts: &mut Vec<POINT>, cx: i32, cy: i32, rad: i32, a0: f32, a1: f32| {
+    let push_arc = |pts: &mut Vec<POINT>, cx: i32, cy: i32, rad: i32, a0: f32, a1: f32| {
         for i in 1..seg {
             let a = a0 + (a1 - a0) * (i as f32 / seg as f32);
             pts.push(POINT {

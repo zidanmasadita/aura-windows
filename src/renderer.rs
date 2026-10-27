@@ -391,7 +391,7 @@ impl Renderer {
                                 let fill = D2D_RECT_F {
                                     left: 24.0,
                                     top: 96.0,
-                                    right: 24.0 + 472.0 * frac,
+                                    right: 24.0 + 472.0 * (frac as f32),
                                     bottom: 100.0,
                                 };
                                 target.FillRectangle(&fill, brush);
