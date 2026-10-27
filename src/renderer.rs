@@ -202,7 +202,7 @@ impl Renderer {
             target.BeginDraw();
             // Clear to transparent (outside the pill is clipped by the window region anyway).
             target.Clear(None);
-            // Pill/card background: Nusa shape (boxy, square top merging
+            // Pill/card background: Nusa shape (boxy, filleted top merging
             // into the top edge/bezel, rounded bottom). Drawn as a path
             // geometry so fill + stroke follow the shape exactly. Falls
             // back to a plain rect (clipped by the window region to the
@@ -310,21 +310,36 @@ impl Renderer {
         }
     }
 
-    /// Build a Nusa-shape path geometry (logical points): square top
-    /// (merging into the top edge/bezel) + rounded bottom corners.
+    /// Build a Nusa-shape path geometry (logical points): boxy with
+    /// small concave fillets at the top corners (merging into the top
+    /// edge/bezel, not sharp) + rounded bottom corners.
     /// Returns None if creation fails (caller falls back to a rect).
     fn nusa_geometry(&self, lw: f32, lh: f32, radius: f32) -> Option<ID2D1Geometry> {
         unsafe {
             let path: ID2D1PathGeometry = self.factory.CreatePathGeometry().ok()?;
             let sink: ID2D1GeometrySink = path.Open().ok()?;
-            // Outline points (clockwise from top-left, square top).
+            // Outline points (clockwise from top edge). Fillets are small
+            // concave arcs (8pt) at the top corners, softening the 90deg
+            // junctions into smooth flares that merge with the bezel.
             let r = radius.clamp(0.0, lh / 2.0);
+            let f = 8.0f32.min(lw / 2.0);
             let mut pts: Vec<D2D_POINT_2F> = Vec::new();
-            pts.push(D2D_POINT_2F { x: 0.0, y: 0.0 });
-            pts.push(D2D_POINT_2F { x: lw, y: 0.0 });
+            // Top edge (between fillets).
+            pts.push(D2D_POINT_2F { x: f, y: 0.0 });
+            pts.push(D2D_POINT_2F { x: lw - f, y: 0.0 });
+            // Top-right fillet (concave, center (lw, 0)): 180deg -> 90deg.
+            let seg = 8i32;
+            for i in 1..seg {
+                let a = std::f32::consts::PI
+                    - std::f32::consts::FRAC_PI_2 * (i as f32 / seg as f32);
+                pts.push(D2D_POINT_2F {
+                    x: lw + f * a.cos(),
+                    y: f * a.sin(),
+                });
+            }
+            pts.push(D2D_POINT_2F { x: lw, y: f });
             pts.push(D2D_POINT_2F { x: lw, y: lh - r });
             // Bottom-right arc (center (lw-r, lh-r), 0deg -> 90deg).
-            let seg = 8i32;
             for i in 1..seg {
                 let a = std::f32::consts::FRAC_PI_2 * (i as f32 / seg as f32);
                 pts.push(D2D_POINT_2F {
@@ -344,7 +359,17 @@ impl Renderer {
                 });
             }
             pts.push(D2D_POINT_2F { x: 0.0, y: lh - r });
-            // (EndFigure CLOSED closes back to (0, 0) along the left side.)
+            pts.push(D2D_POINT_2F { x: 0.0, y: f });
+            // Top-left fillet (concave, center (0, 0)): 90deg -> 0deg.
+            for i in 1..seg {
+                let a = std::f32::consts::FRAC_PI_2
+                    - std::f32::consts::FRAC_PI_2 * (i as f32 / seg as f32);
+                pts.push(D2D_POINT_2F {
+                    x: f * a.cos(),
+                    y: f * a.sin(),
+                });
+            }
+            // (EndFigure CLOSED closes back to (f, 0).)
             sink.BeginFigure(pts[0], D2D1_FIGURE_BEGIN_FILLED);
             if pts.len() > 1 {
                 sink.AddLines(&pts[1..]);

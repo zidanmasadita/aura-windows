@@ -69,19 +69,24 @@ pub fn place_top_center(hwnd: HWND, width: i32, height: i32) {
     }
 }
 
-/// Set a Nusa-shaped window region (boxy, square top merging into
-/// the top edge/bezel, rounded bottom): top corners square (radius 0,
-/// flush with y=0), bottom corners convex (radius param: height/2
-/// for short pills, 28pt*scale for tall cards). Built as a polygon
-/// (bottom arcs, 8 segments each). Matches the D2D path geometry in
-/// renderer.rs (same outline, physical pixels here).
+/// Set a Nusa-shaped window region (boxy, filleted top merging into
+/// the top edge/bezel, rounded bottom): top corners have small concave
+/// fillets (8pt, softening the 90deg junctions into smooth flares that
+/// merge with the bezel, not sharp perpendicular drops), bottom corners
+/// convex (radius param: height/2 for short pills, 28pt*scale for tall
+/// cards). Built as a polygon (arcs, 8 segments each). Matches the D2D
+/// path geometry in renderer.rs (same outline, physical pixels here).
 /// The system owns the region after a successful SetWindowRgn (do not delete).
 /// width/height/radius are PHYSICAL pixels.
 pub fn set_pill_region(hwnd: HWND, width: i32, height: i32, radius: i32) {
+    let scale = dpi_scale(hwnd);
+    let fillet = (8.0 * scale).round() as i32;
     let w = width.max(1);
     let h = height.max(1);
     let r = radius.clamp(0, h / 2);
-    // Polygon points (clockwise from top-left, square top).
+    let f = fillet.clamp(0, w / 2);
+    // Polygon points (clockwise from top edge). Arc helper appends
+    // intermediate points only (endpoints are pushed explicitly).
     let mut pts: Vec<POINT> = Vec::new();
     let seg = 8i32;
     let mut push_arc = |pts: &mut Vec<POINT>, cx: i32, cy: i32, rad: i32, a0: f32, a1: f32| {
@@ -93,9 +98,12 @@ pub fn set_pill_region(hwnd: HWND, width: i32, height: i32, radius: i32) {
             });
         }
     };
-    // Top edge (square corners, flush with top edge/bezel).
-    pts.push(POINT { x: 0, y: 0 });
-    pts.push(POINT { x: w, y: 0 });
+    // Top edge (between fillets).
+    pts.push(POINT { x: f, y: 0 });
+    pts.push(POINT { x: w - f, y: 0 });
+    // Top-right fillet (concave, center at outer corner (w, 0)): 180deg -> 90deg.
+    push_arc(&mut pts, w, 0, f, std::f32::consts::PI, std::f32::consts::FRAC_PI_2);
+    pts.push(POINT { x: w, y: f });
     // Right side.
     pts.push(POINT { x: w, y: h - r });
     // Bottom-right (convex, center (w-r, h-r)): 0deg -> 90deg.
@@ -106,7 +114,11 @@ pub fn set_pill_region(hwnd: HWND, width: i32, height: i32, radius: i32) {
     // Bottom-left (convex, center (r, h-r)): 90deg -> 180deg.
     push_arc(&mut pts, r, h - r, r, std::f32::consts::FRAC_PI_2, std::f32::consts::PI);
     pts.push(POINT { x: 0, y: h - r });
-    // (Region auto-closes back to (0, 0) along the left side.)
+    // Left side.
+    pts.push(POINT { x: 0, y: f });
+    // Top-left fillet (concave, center (0, 0)): 90deg -> 0deg.
+    // (Region auto-closes back to (f, 0).)
+    push_arc(&mut pts, 0, 0, f, std::f32::consts::FRAC_PI_2, 0.0);
     unsafe {
         let rgn: HRGN = CreatePolygonRgn(&pts, ALTERNATE);
         if rgn.0 == std::ptr::null_mut() {
