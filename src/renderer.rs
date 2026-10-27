@@ -26,6 +26,13 @@ use crate::window;
 pub const MUSIC_PREV_RECT: (f32, f32, f32, f32) = (196.0, 124.0, 236.0, 164.0);
 pub const MUSIC_PLAY_RECT: (f32, f32, f32, f32) = (240.0, 124.0, 280.0, 164.0);
 pub const MUSIC_NEXT_RECT: (f32, f32, f32, f32) = (284.0, 124.0, 324.0, 164.0);
+/// Bubble toggle on the music card (top-right) -> lyrics panel.
+pub const MUSIC_LYRICS_BUBBLE_RECT: (f32, f32, f32, f32) = (440.0, 28.0, 496.0, 52.0);
+/// Bubble toggle on the lyrics panel (top-right) -> music card.
+pub const LYRICS_MUSIC_BUBBLE_RECT: (f32, f32, f32, f32) = (620.0, 28.0, 676.0, 52.0);
+/// Nudge buttons on the lyrics panel (bottom-right, -0.5s / +0.5s).
+pub const LYRICS_NUDGE_MINUS_RECT: (f32, f32, f32, f32) = (548.0, 148.0, 612.0, 172.0);
+pub const LYRICS_NUDGE_PLUS_RECT: (f32, f32, f32, f32) = (620.0, 148.0, 676.0, 172.0);
 
 /// Format seconds as m:ss (e.g. 83.0 -> "1:23").
 fn format_time(secs: f64) -> String {
@@ -45,6 +52,7 @@ pub struct Renderer {
     black_brush: Option<ID2D1SolidColorBrush>,
     white_brush: Option<ID2D1SolidColorBrush>,
     dim_brush: Option<ID2D1SolidColorBrush>,
+    gray_brush: Option<ID2D1SolidColorBrush>,
 }
 
 impl Renderer {
@@ -66,6 +74,7 @@ impl Renderer {
                 black_brush: None,
                 white_brush: None,
                 dim_brush: None,
+                gray_brush: None,
             })
         }
     }
@@ -157,6 +166,18 @@ impl Renderer {
             ) {
                 self.dim_brush = Some(b);
             }
+            if let Ok(b) = hwnd_target.CreateSolidColorBrush(
+                &D2D1_COLOR_F {
+                    r: 1.0,
+                    g: 1.0,
+                    b: 1.0,
+                    a: 0.5,
+                },
+                None,
+            ) {
+                // Gray (secondary lyric lines around the current one).
+                self.gray_brush = Some(b);
+            }
             // Text formats (Segoe UI, the Windows system font replacing SF Pro).
             if let Ok(f) = self.dwrite.CreateTextFormat(
                 windows::core::w!("Segoe UI"),
@@ -223,6 +244,7 @@ impl Renderer {
         state: IslandState,
         clock_text: &str,
         media: Option<&crate::media::MediaInfo>,
+        lyrics: Option<&crate::lyrics::LyricsCache>,
     ) {
         let scale = window::dpi_scale(hwnd);
         let (lw, lh) = state.logical_size();
@@ -356,7 +378,7 @@ impl Renderer {
                                 let r = D2D_RECT_F {
                                     left: 96.0,
                                     top: 28.0,
-                                    right: 496.0,
+                                    right: 432.0,
                                     bottom: 54.0,
                                 };
                                 self.draw_text(target, title, fmt, &r, brush);
@@ -444,6 +466,27 @@ impl Renderer {
                                 };
                                 self.draw_text(target, "⏭", fmt, &next, brush);
                             }
+                            // Bubble toggle to lyrics (top-right, dim pill + label).
+                            if let Some(brush) = &self.dim_brush {
+                                let bubble = D2D_RECT_F {
+                                    left: MUSIC_LYRICS_BUBBLE_RECT.0,
+                                    top: MUSIC_LYRICS_BUBBLE_RECT.1,
+                                    right: MUSIC_LYRICS_BUBBLE_RECT.2,
+                                    bottom: MUSIC_LYRICS_BUBBLE_RECT.3,
+                                };
+                                target.FillRectangle(&bubble, brush);
+                            }
+                            if let (Some(fmt), Some(brush)) =
+                                (&self.text_format_center, &self.white_brush)
+                            {
+                                let bubble = D2D_RECT_F {
+                                    left: MUSIC_LYRICS_BUBBLE_RECT.0,
+                                    top: MUSIC_LYRICS_BUBBLE_RECT.1,
+                                    right: MUSIC_LYRICS_BUBBLE_RECT.2,
+                                    bottom: MUSIC_LYRICS_BUBBLE_RECT.3,
+                                };
+                                self.draw_text(target, "Lirik", fmt, &bubble, brush);
+                            }
                         }
                         None => {
                             if let (Some(fmt), Some(brush)) =
@@ -473,6 +516,206 @@ impl Renderer {
                                     &r,
                                     brush,
                                 );
+                            }
+                        }
+                    }
+                }
+                IslandState::Lyrics => {
+                    // Lyrics panel (700x180). App only enters Lyrics after a
+                    // fetch, so cache is Some in practice; None falls back to
+                    // a loading line (never blank, never a crash).
+                    match lyrics {
+                        None => {
+                            if let (Some(fmt), Some(brush)) =
+                                (&self.text_format_center, &self.white_brush)
+                            {
+                                let r = D2D_RECT_F {
+                                    left: 24.0,
+                                    top: 60.0,
+                                    right: 676.0,
+                                    bottom: 100.0,
+                                };
+                                self.draw_text(target, "Loading lyrics...", fmt, &r, brush);
+                            }
+                        }
+                        Some(cache) => {
+                            // Title line (song - artist, from current media).
+                            let title_line = match media {
+                                Some(m) => format!("{} - {}", m.title, m.artist),
+                                None => String::new(),
+                            };
+                            if let (Some(fmt), Some(brush)) =
+                                (&self.text_format_small, &self.white_brush)
+                            {
+                                let r = D2D_RECT_F {
+                                    left: 24.0,
+                                    top: 16.0,
+                                    right: 500.0,
+                                    bottom: 36.0,
+                                };
+                                self.draw_text(target, &title_line, fmt, &r, brush);
+                            }
+                            // Bubble back to music (top-right, dim pill + label).
+                            if let Some(brush) = &self.dim_brush {
+                                let bubble = D2D_RECT_F {
+                                    left: LYRICS_MUSIC_BUBBLE_RECT.0,
+                                    top: LYRICS_MUSIC_BUBBLE_RECT.1,
+                                    right: LYRICS_MUSIC_BUBBLE_RECT.2,
+                                    bottom: LYRICS_MUSIC_BUBBLE_RECT.3,
+                                };
+                                target.FillRectangle(&bubble, brush);
+                            }
+                            if let (Some(fmt), Some(brush)) =
+                                (&self.text_format_center, &self.white_brush)
+                            {
+                                let bubble = D2D_RECT_F {
+                                    left: LYRICS_MUSIC_BUBBLE_RECT.0,
+                                    top: LYRICS_MUSIC_BUBBLE_RECT.1,
+                                    right: LYRICS_MUSIC_BUBBLE_RECT.2,
+                                    bottom: LYRICS_MUSIC_BUBBLE_RECT.3,
+                                };
+                                self.draw_text(target, "Musik", fmt, &bubble, brush);
+                            }
+                            if cache.lines.is_empty() {
+                                if let (Some(fmt), Some(brush)) =
+                                    (&self.text_format_center, &self.white_brush)
+                                {
+                                    let r = D2D_RECT_F {
+                                        left: 24.0,
+                                        top: 60.0,
+                                        right: 676.0,
+                                        bottom: 100.0,
+                                    };
+                                    self.draw_text(
+                                        target,
+                                        "Lyrics not available for this song",
+                                        fmt,
+                                        &r,
+                                        brush,
+                                    );
+                                }
+                            } else {
+                                // Five lines around the current one (synced) or
+                                // the first five (plain). Current is white,
+                                // neighbours are gray (0.5); plain lines are
+                                // all white (no current to highlight).
+                                let position_ms = media
+                                    .map(|m| (m.position_secs * 1000.0) as i64)
+                                    .unwrap_or(0)
+                                    + cache.nudge_ms;
+                                let current = if cache.synced {
+                                    crate::lyrics::current_index(&cache.lines, position_ms)
+                                } else {
+                                    usize::MAX
+                                };
+                                let start = if cache.synced {
+                                    current.saturating_sub(2)
+                                } else {
+                                    0
+                                };
+                                for i in 0..5 {
+                                    let idx = start + i;
+                                    if idx >= cache.lines.len() {
+                                        break;
+                                    }
+                                    let line = &cache.lines[idx];
+                                    let brush = if !cache.synced || idx == current {
+                                        &self.white_brush
+                                    } else {
+                                        &self.gray_brush
+                                    };
+                                    if let (Some(fmt), Some(brush)) =
+                                        (&self.text_format_center, brush)
+                                    {
+                                        let top = 40.0 + (i as f32) * 20.0;
+                                        let r = D2D_RECT_F {
+                                            left: 24.0,
+                                            top,
+                                            right: 676.0,
+                                            bottom: top + 20.0,
+                                        };
+                                        self.draw_text(target, &line.text, fmt, &r, brush);
+                                    }
+                                }
+                            }
+                            // Progress track + fill + times (when media exists).
+                            if let Some(m) = media {
+                                let frac = if m.duration_secs > 0.0 {
+                                    (m.position_secs / m.duration_secs).clamp(0.0, 1.0)
+                                } else {
+                                    0.0
+                                };
+                                if let Some(brush) = &self.dim_brush {
+                                    let track = D2D_RECT_F {
+                                        left: 24.0,
+                                        top: 144.0,
+                                        right: 676.0,
+                                        bottom: 148.0,
+                                    };
+                                    target.FillRectangle(&track, brush);
+                                }
+                                if let Some(brush) = &self.white_brush {
+                                    let fill = D2D_RECT_F {
+                                        left: 24.0,
+                                        top: 144.0,
+                                        right: 24.0 + 652.0 * (frac as f32),
+                                        bottom: 148.0,
+                                    };
+                                    target.FillRectangle(&fill, brush);
+                                }
+                                if let (Some(fmt), Some(brush)) =
+                                    (&self.text_format_small, &self.white_brush)
+                                {
+                                    let r = D2D_RECT_F {
+                                        left: 24.0,
+                                        top: 150.0,
+                                        right: 200.0,
+                                        bottom: 172.0,
+                                    };
+                                    let times = format!(
+                                        "{} / {}",
+                                        format_time(m.position_secs),
+                                        format_time(m.duration_secs)
+                                    );
+                                    self.draw_text(target, &times, fmt, &r, brush);
+                                }
+                            }
+                            // Nudge buttons (synced lyrics only).
+                            if cache.synced {
+                                if let Some(brush) = &self.dim_brush {
+                                    let minus = D2D_RECT_F {
+                                        left: LYRICS_NUDGE_MINUS_RECT.0,
+                                        top: LYRICS_NUDGE_MINUS_RECT.1,
+                                        right: LYRICS_NUDGE_MINUS_RECT.2,
+                                        bottom: LYRICS_NUDGE_MINUS_RECT.3,
+                                    };
+                                    target.FillRectangle(&minus, brush);
+                                    let plus = D2D_RECT_F {
+                                        left: LYRICS_NUDGE_PLUS_RECT.0,
+                                        top: LYRICS_NUDGE_PLUS_RECT.1,
+                                        right: LYRICS_NUDGE_PLUS_RECT.2,
+                                        bottom: LYRICS_NUDGE_PLUS_RECT.3,
+                                    };
+                                    target.FillRectangle(&plus, brush);
+                                }
+                                if let (Some(fmt), Some(brush)) =
+                                    (&self.text_format_center, &self.white_brush)
+                                {
+                                    let minus = D2D_RECT_F {
+                                        left: LYRICS_NUDGE_MINUS_RECT.0,
+                                        top: LYRICS_NUDGE_MINUS_RECT.1,
+                                        right: LYRICS_NUDGE_MINUS_RECT.2,
+                                        bottom: LYRICS_NUDGE_MINUS_RECT.3,
+                                    };
+                                    self.draw_text(target, "-0.5s", fmt, &minus, brush);
+                                    let plus = D2D_RECT_F {
+                                        left: LYRICS_NUDGE_PLUS_RECT.0,
+                                        top: LYRICS_NUDGE_PLUS_RECT.1,
+                                        right: LYRICS_NUDGE_PLUS_RECT.2,
+                                        bottom: LYRICS_NUDGE_PLUS_RECT.3,
+                                    };
+                                    self.draw_text(target, "+0.5s", fmt, &plus, brush);
+                                }
                             }
                         }
                     }

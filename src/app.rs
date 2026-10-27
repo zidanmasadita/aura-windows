@@ -1,10 +1,11 @@
 //! App: window + state + animator + renderer + tray + timers.
 //! Owns the HWND (via GWLP_USERDATA) and drives the pill lifecycle:
 //! Zen (idle) -> hover -> Compact -> click/hover (with session) ->
-//! Expanded (music card) -> click outside controls / leave -> Compact
-//! (with session) or Zen (silent). Timers: 1s tick (clock + GSMTC
-//! poll), 0.25s (alert placeholder, Phase 4), 16ms (animation, only
-//! while animating).
+//! Expanded (music card) -> bubble -> Lyrics (700x180) -> bubble back
+//! to Expanded; click outside controls / leave -> Compact (with
+//! session) or Zen (silent). Timers: 1s tick (clock + GSMTC poll),
+//! 0.25s (alert placeholder, Phase 4), 16ms (animation, only while
+//! animating).
 
 use windows::core::{w, Result, PCWSTR};
 use windows::Win32::Foundation::*;
@@ -18,6 +19,7 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{TRACKMOUSEEVENT, TME_LEAVE, Tr
 use windows::Win32::UI::WindowsAndMessaging::*;
 
 use crate::animator;
+use crate::lyrics;
 use crate::media;
 use crate::renderer;
 use crate::state;
@@ -40,6 +42,7 @@ pub struct App {
     tracking_mouse: bool,
     clock_text: String, // HH:MM, updated on 1s tick
     media: Option<media::MediaInfo>, // Current GSMTC session (Phase 1), None = silent.
+    lyrics: Option<lyrics::LyricsCache>, // Fetched lyrics for current song (Phase 1b), None = not fetched yet.
 }
 
 fn current_time_text() -> String {
@@ -59,6 +62,7 @@ impl App {
             tracking_mouse: false,
             clock_text: current_time_text(),
             media: None,
+            lyrics: None,
         });
         // Initial size + region + placement (Zen, top-center, no animation).
         app.apply_size();
@@ -131,8 +135,28 @@ impl App {
             TIMER_TICK => {
                 // 1s tick: poll GSMTC (Phase 1) + update clock + repaint.
                 self.media = media::poll();
+                // Lyrics cache follows song: new song (or session end) clears
+                // cached lyrics; if the lyrics card is open for the old song,
+                // fall back to the music card for the new song (fetching new
+                // lyrics happens lazily on bubble click, never on tick, so a
+                // song change never freezes the UI on a network fetch).
+                let media_key = self
+                    .media
+                    .as_ref()
+                    .map(|m| lyrics::key_for(&m.title, &m.artist));
+                let lyrics_stale = match (&self.lyrics, &media_key) {
+                    (Some(cache), Some(key)) => &cache.key != key,
+                    (Some(_), None) => true,
+                    (None, _) => false,
+                };
+                if lyrics_stale {
+                    self.lyrics = None;
+                    if self.pill.state == state::IslandState::Lyrics {
+                        self.set_state(state::IslandState::Expanded);
+                    }
+                }
                 // Idle-state follows session: session -> Compact, none -> Zen
-                // (Expanded also closes to Zen when the session ends).
+                // (Expanded/Lyrics also close to Zen when the session ends).
                 // (Bool first, so set_state below holds no borrow of media.)
                 let has_media = self.media.is_some();
                 if has_media {
@@ -141,6 +165,7 @@ impl App {
                     }
                 } else if self.pill.state == state::IslandState::Compact
                     || self.pill.state == state::IslandState::Expanded
+                    || self.pill.state == state::IslandState::Lyrics
                 {
                     self.set_state(state::IslandState::Zen);
                 }
@@ -193,7 +218,7 @@ impl App {
     fn on_click(&mut self, x_px: i32, y_px: i32) {
         // Expanded music card: control buttons act (stay Expanded, refresh
         // media immediately so the play/pause icon updates without waiting
-        // for the 1s tick); any other click closes to Compact.
+        // for the 1s tick); bubble opens lyrics; any other click closes.
         if self.pill.state == state::IslandState::Expanded {
             if self.media.is_some() {
                 let scale = window::dpi_scale(self.hwnd);
@@ -215,6 +240,20 @@ impl App {
                 } else if in_rect(renderer::MUSIC_NEXT_RECT) {
                     let _ = media::skip_next();
                     self.media = media::poll();
+                } else if in_rect(renderer::MUSIC_LYRICS_BUBBLE_RECT) {
+                    // Fetch lyrics lazily on first entry (blocking; may
+                    // freeze briefly on slow networks — async is a follow-up).
+                    if self.lyrics.is_none() {
+                        let song = self.media.as_ref().map(|m| {
+                            (m.title.clone(), m.artist.clone(), m.album.clone())
+                        });
+                        if let Some((title, artist, album)) = song {
+                            let cache = lyrics::fetch(&title, &artist, &album);
+                            self.lyrics = Some(cache);
+                        }
+                    }
+                    self.set_state(state::IslandState::Lyrics);
+                    return;
                 } else {
                     self.set_state(state::IslandState::Compact);
                     return;
@@ -228,19 +267,69 @@ impl App {
             self.set_state(state::IslandState::Compact);
             return;
         }
-        // Not Expanded: click expands (music card if session, no-music card if not).
+        // Lyrics panel: bubble back to music, nudge buttons shift sync
+        // (synced lyrics only), any other click closes to Compact.
+        if self.pill.state == state::IslandState::Lyrics {
+            if self.media.is_some() {
+                let scale = window::dpi_scale(self.hwnd);
+                let x = x_px as f32 / scale;
+                let y = y_px as f32 / scale;
+                let in_rect =
+                    |r: (f32, f32, f32, f32)| x >= r.0 && x <= r.2 && y >= r.1 && y <= r.3;
+                let synced = self.lyrics.as_ref().map(|c| c.synced).unwrap_or(false);
+                if in_rect(renderer::LYRICS_MUSIC_BUBBLE_RECT) {
+                    self.set_state(state::IslandState::Expanded);
+                    return;
+                }
+                if synced && in_rect(renderer::LYRICS_NUDGE_MINUS_RECT) {
+                    let mut saved: Option<(String, i64)> = None;
+                    if let Some(cache) = &mut self.lyrics {
+                        cache.nudge_ms -= 500;
+                        saved = Some((cache.key.clone(), cache.nudge_ms));
+                    }
+                    if let Some((key, nudge)) = saved {
+                        lyrics::save_nudge(&key, nudge);
+                    }
+                    unsafe {
+                        let _ = InvalidateRect(self.hwnd, None, BOOL(0));
+                    }
+                    return;
+                }
+                if synced && in_rect(renderer::LYRICS_NUDGE_PLUS_RECT) {
+                    let mut saved: Option<(String, i64)> = None;
+                    if let Some(cache) = &mut self.lyrics {
+                        cache.nudge_ms += 500;
+                        saved = Some((cache.key.clone(), cache.nudge_ms));
+                    }
+                    if let Some((key, nudge)) = saved {
+                        lyrics::save_nudge(&key, nudge);
+                    }
+                    unsafe {
+                        let _ = InvalidateRect(self.hwnd, None, BOOL(0));
+                    }
+                    return;
+                }
+                self.set_state(state::IslandState::Compact);
+                return;
+            }
+            // No session: any click closes the lyrics panel to Compact.
+            self.set_state(state::IslandState::Compact);
+            return;
+        }
+        // Not Expanded/Lyrics: click expands (music card if session, no-music card if not).
         self.set_state(state::IslandState::Expanded);
     }
 
     fn on_paint(&mut self) {
         // Renderer draws current state (clock for Compact, music/no-music
-        // card for Expanded, "Aura" label for Zen). ValidateRect inside
-        // draw prevents a paint loop.
+        // card for Expanded, lyrics panel for Lyrics, "Aura" label for
+        // Zen). ValidateRect inside draw prevents a paint loop.
         self.renderer.draw(
             self.hwnd,
             self.pill.state,
             &self.clock_text,
             self.media.as_ref(),
+            self.lyrics.as_ref(),
         );
     }
 

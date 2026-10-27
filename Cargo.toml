@@ -24,8 +24,10 @@ windows = { version = "0.58", features = [
     "Win32_Security",
     "Media_Control",
     "Foundation",
+    "Web_Http",
 ] }
 chrono = "0.4"
+serde_json = "1.0"
 
 [profile.release]
 # Keep debug info in release builds during Phase 0-4 so crash stacks

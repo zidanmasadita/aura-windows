@@ -6,7 +6,8 @@
 pub enum IslandState {
     Zen,      // idle, 140x32
     Compact,  // music pill, 180x32 (Phase 0 placeholder: clock + waveform)
-    Expanded, // placeholder card, 520x180 (Phase 0; real music card in Phase 1)
+    Expanded, // music card, 520x180
+    Lyrics,   // lyrics panel, 700x180 (same height as music, wider)
 }
 
 impl IslandState {
@@ -15,6 +16,7 @@ impl IslandState {
             IslandState::Zen => (140.0, 32.0),
             IslandState::Compact => (180.0, 32.0),
             IslandState::Expanded => (520.0, 180.0),
+            IslandState::Lyrics => (700.0, 180.0),
         }
     }
 }
