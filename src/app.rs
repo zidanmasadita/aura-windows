@@ -39,6 +39,7 @@ use crate::window;
 const TIMER_TICK: usize = 1; // 1s: clock + (Phase 1+) media poll
 const TIMER_ALERT: usize = 2; // 0.25s: alert placeholder (Phase 4)
 const TIMER_ANIM: usize = 3; // 16ms: size animation (only while animating)
+const TIMER_CLOSE: usize = 4; // 150ms: debounced mouse-leave close (hover-glitch fix)
 // Win32 WM_MOUSELEAVE (0x02A3), sent by TrackMouseEvent when the cursor
 // leaves the window. Defined locally because windows-rs 0.58 does not export
 // it from KeyboardAndMouse nor WindowsAndMessaging.
@@ -336,7 +337,13 @@ impl App {
                     || self.pill.state == state::IslandState::Expanded
                     || self.pill.state == state::IslandState::Lyrics
                 {
-                    self.set_state(state::IslandState::Zen);
+                    // While the user hovers the pill, never close it
+                    // from the tick: the card stays until a real leave
+                    // (debounced below) closes it. Without this guard,
+                    // tick-close + hover-reopen alternate every 250ms.
+                    if !self.cursor_inside_window() {
+                        self.set_state(state::IslandState::Zen);
+                    }
                 }
                 // Pomodoro: if running and time is up, stop (00:00, Start).
                 // (Wall-clock: remaining is computed from ends_at, so this
@@ -352,6 +359,21 @@ impl App {
                 // 0.25s alert tick: placeholder for Phase 4 (no-op in Phase 0).
             }
             TIMER_ANIM => self.on_anim_tick(),
+            TIMER_CLOSE => {
+                // Debounced close fires: verify once more, because the
+                // cursor may have re-entered during the 150ms window.
+                unsafe {
+                    let _ = KillTimer(self.hwnd, TIMER_CLOSE);
+                }
+                if self.todo_editing {
+                    return;
+                }
+                if self.cursor_inside_window() {
+                    self.arm_mouse_tracking();
+                    return;
+                }
+                self.apply_mouse_leave();
+            }
             _ => {}
         }
     }
@@ -376,7 +398,37 @@ impl App {
         self.tracking_mouse = true;
     }
 
+    /// True when the cursor is currently over the window RECT
+    /// (not the region: tucked sides / rounded corners put the cursor
+    /// outside the region while still visually over the pill).
+    fn cursor_inside_window(&self) -> bool {
+        let mut pt = POINT::default();
+        let mut rect = RECT::default();
+        unsafe {
+            GetCursorPos(&mut pt).is_ok()
+                && GetWindowRect(self.hwnd, &mut rect).is_ok()
+                && pt.x >= rect.left
+                && pt.x < rect.right
+                && pt.y >= rect.top
+                && pt.y < rect.bottom
+        }
+    }
+
+    /// The actual leave action (session -> Compact, silent -> Zen),
+    /// used by the debounced close timer, not directly by WM_MOUSELEAVE.
+    fn apply_mouse_leave(&mut self) {
+        if self.media.is_some() {
+            self.set_state(state::IslandState::Compact);
+        } else {
+            self.set_state(state::IslandState::Zen);
+        }
+    }
+
     fn on_mouse_move(&mut self) {
+        // A re-enter cancels a pending debounced close.
+        unsafe {
+            let _ = KillTimer(self.hwnd, TIMER_CLOSE);
+        }
         self.arm_mouse_tracking();
         // Hover: Zen -> Compact (idle); Compact + session -> last section
         // (Aura Mac: hover opens the card when a session exists, and
@@ -398,39 +450,31 @@ impl App {
         if self.todo_editing {
             return;
         }
-        // Spurious-leave guard (hover-flicker fix 2026-10-27): Windows
-        // sends WM_MOUSELEAVE when the cursor crosses the window
-        // REGION, not its rect. The pill region has tucked sides
-        // (12pt), rounded bottom corners, and changes size during the
-        // 0.35s expansion animation, so the cursor can leave the region
-        // while still visually over the pill. Closing here and
-        // reopening on the next mouse move is exactly the open-close
-        // loop the user reported. Verify against the real cursor
-        // position and the window RECT: if still inside the rect,
-        // re-arm tracking and keep the current state.
-        let mut pt = POINT::default();
-        let mut rect = RECT::default();
-        let inside = unsafe {
-            GetCursorPos(&mut pt).is_ok()
-                && GetWindowRect(self.hwnd, &mut rect).is_ok()
-                && pt.x >= rect.left
-                && pt.x < rect.right
-                && pt.y >= rect.top
-                && pt.y < rect.bottom
-        };
-        if inside {
+        // Debounced close (hover-glitch fix 2026-10-27, round 2):
+        // the user still sees Zen ("Aura") <-> Compact (clock +
+        // waveform) alternating on hover. A single WM_MOUSELEAVE is
+        // not trusted on its own: region leaves, resize leaves, and
+        // tick closes can all fire while the cursor is effectively
+        // still over the pill. So: if the cursor is inside the rect,
+        // ignore the leave outright; otherwise do NOT close yet —
+        // start a 150ms one-shot timer and only close if the cursor
+        // is still outside when it fires. Any mouse move in between
+        // cancels the timer, so a rapid leave/re-enter can never
+        // flip the state. A real leave is delayed by just 150ms,
+        // which is imperceptible next to the 350ms animation.
+        if self.cursor_inside_window() {
             self.arm_mouse_tracking();
             return;
         }
-        // Cursor exit: session -> Compact, silent -> Zen (Aura Mac rule).
-        if self.media.is_some() {
-            self.set_state(state::IslandState::Compact);
-        } else {
-            self.set_state(state::IslandState::Zen);
+        unsafe {
+            let _ = SetTimer(self.hwnd, TIMER_CLOSE, 150, None);
         }
     }
 
     fn on_click(&mut self, x_px: i32, y_px: i32) {
+        unsafe {
+            let _ = KillTimer(self.hwnd, TIMER_CLOSE);
+        }
         // Expanded music card: control buttons act (stay Expanded, refresh
         // media immediately so the play/pause icon updates without waiting
         // for the 1s tick); bubble opens lyrics; any other click closes.
