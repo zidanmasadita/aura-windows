@@ -13,7 +13,7 @@
 
 use std::sync::{Arc, Mutex};
 
-use windows::core::{w, PWSTR, Result, PCWSTR};
+use windows::core::{w, Result, PCWSTR};
 use windows::Win32::UI::Shell::{DragAcceptFiles, DragFinish, DragQueryFileW, HDROP};
 use windows::Win32::Foundation::*;
 use windows::Win32::Graphics::Gdi::{HBRUSH, InvalidateRect};
@@ -45,7 +45,7 @@ const TIMER_ANIM: usize = 3; // 16ms: size animation (only while animating)
 const WM_MOUSELEAVE: u32 = 0x02A3;
 // GWL_EXSTYLE index + WS_EX_NOACTIVATE bit, for temporarily taking
 // keyboard focus while editing a todo (pill is normally NOACTIVATE).
-const GWL_EXSTYLE_IDX: i32 = -20;
+const GWL_EXSTYLE_IDX: WINDOW_LONG_PTR_INDEX = WINDOW_LONG_PTR_INDEX(-20);
 const NOACTIVATE_BIT: isize = 0x0800_0000;
 
 pub struct App {
@@ -159,7 +159,6 @@ impl App {
             let ex = GetWindowLongPtrW(self.hwnd, GWL_EXSTYLE_IDX);
             let _ = SetWindowLongPtrW(self.hwnd, GWL_EXSTYLE_IDX, ex & !NOACTIVATE_BIT);
             let _ = SetForegroundWindow(self.hwnd);
-            let _ = SetFocus(self.hwnd);
             let _ = InvalidateRect(self.hwnd, None, BOOL(0));
         }
     }
@@ -881,20 +880,21 @@ impl App {
     /// exist), then the Tray card opens on the last page.
     fn on_drop_files(&mut self, hdrop_raw: isize) {
         unsafe {
-            let hdrop = HDROP(hdrop_raw);
-            let count = DragQueryFileW(hdrop, u32::MAX, PWSTR::null(), 0);
+            let hdrop = HDROP(hdrop_raw as *mut core::ffi::c_void);
+            let count = DragQueryFileW(hdrop, u32::MAX, None);
             let mut added = false;
             for i in 0..count {
-                let len = DragQueryFileW(hdrop, i, PWSTR::null(), 0);
+                let len = DragQueryFileW(hdrop, i, None);
                 if len == 0 {
                     continue;
                 }
                 let mut buf = vec![0u16; (len + 1) as usize];
-                let got = DragQueryFileW(hdrop, i, PWSTR(buf.as_mut_ptr()), len + 1);
+                let got = DragQueryFileW(hdrop, i, Some(&mut buf));
                 if got == 0 {
                     continue;
                 }
-                let path = String::from_utf16_lossy(&buf[..got as usize]);
+                let end = buf.iter().position(|&c| c == 0).unwrap_or(buf.len());
+                let path = String::from_utf16_lossy(&buf[..end]);
                 if self.shelf.add(&path) {
                     added = true;
                 }
