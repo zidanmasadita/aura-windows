@@ -190,11 +190,11 @@ pub fn spawn_poller(cache: Arc<Mutex<PollCache>>) {
                         shared.busy.store(true, Ordering::SeqCst);
                         std::thread::spawn(move || {
                             init_com();
-                            unsafe {
-                                let mut wmsg = MSG::default();
-                                let _ =
-                                    PeekMessageW(&mut wmsg, None, 0, 0, PM_NOREMOVE);
-                            }
+                            // Tanpa blok unsafe dalam: compiler menyatakan
+                            // closure ini sudah berada dalam unsafe context
+                            // thread loop (warning unused_unsafe).
+                            let mut wmsg = MSG::default();
+                            let _ = PeekMessageW(&mut wmsg, None, 0, 0, PM_NOREMOVE);
                             let (info, status) = poll_status();
                             if worker_shared.generation.load(Ordering::SeqCst) == gen {
                                 if let Ok(mut guard) = worker_shared.cache.lock() {
@@ -251,7 +251,7 @@ fn spawn_control(action: fn() -> bool) {
                     break;
                 }
                 if msg.message == CONTROL_MSG {
-                    let f: fn() -> bool = std::mem::transmute(msg.wparam.0);
+                    let f: fn() -> bool = std::mem::transmute(msg.wParam.0);
                     let _ = f();
                     break;
                 }
