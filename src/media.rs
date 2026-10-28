@@ -67,8 +67,10 @@
 //!   bentuk yang terbukti mengembalikan hasil di riwayat Aura).
 //!   Watchdog thread terpisah (tanpa COM, hanya Atomics) melaporkan
 //!   freeze dan menelurkan incarnation baru bila tidak ada cache
-//!   write >10 detik; incarnation lama yang belakangan lolos gagal
-//!   cek generation dan tidak bisa menimpa data yang lebih baru.
+//!   write >10 detik; incarnation lama yang belakangan lolos tetap
+//!   boleh menulis sekali (data segar yang tersedia), lalu keluar
+//!   di tick berikutnya — gate lama terbukti membuang poll lambat
+//!   selamanya sehingga 'stuck' tampil permanen (fix malam 28 Okt).
 //! - Batas kejujuran: RE membuktikan arsitektur timer + single-thread
 //!   Nusa, BUKAN pola panggil GSMTC persisnya (poll vs event WinRT
 //!   tidak bisa dipulihkan dari biner stripped — hanya string
@@ -137,7 +139,10 @@ fn init_com() {
 /// Only one poller incarnation polls at a time BY DESIGN, but an
 /// incarnation frozen inside .get() cannot stop itself: a separate
 /// watchdog thread watches last_write and spawns a fresh incarnation.
-/// Generation guards late writes from a superseded incarnation.
+/// Generation marks the active incarnation; a superseded one exits
+/// at its next timer tick instead of polling forever. Writes are
+/// NOT generation-gated (see incarnation handler): a late write is
+/// still the freshest available data.
 struct PollerShared {
     cache: Arc<Mutex<PollCache>>,
     generation: AtomicU64,
@@ -164,8 +169,9 @@ struct PollerHealth {
 /// handler (the configuration that demonstrably returned results in
 /// Aura's own history), and a watchdog thread (no COM, only Atomics)
 /// reports a freeze and spawns a fresh incarnation when no cache
-/// write lands for >10s. A frozen incarnation that later unblocks
-/// fails its generation check and cannot overwrite newer data.
+/// write lands for >10s. A superseded incarnation that later
+/// unblocks writes once if it completes, then exits at its next
+/// timer tick (see handler).
 /// Honest limit: the RE proved Nusa's timer-driven single-thread
 /// architecture, not its exact GSMTC call pattern (poll vs WinRT
 /// events is not recoverable from the stripped binary — only the
@@ -211,7 +217,8 @@ pub fn spawn_poller(cache: Arc<Mutex<PollCache>>) {
 /// INLINE in the timer handler (pumped thread — the only shape that
 /// ever returned results here). Exits when its message loop ends
 /// (practically never; superseded incarnations are abandoned, not
-/// killed — a frozen one just leaks, its writes generation-gated).
+/// killed — a frozen one just leaks; a superseded one that later
+/// unblocks writes once, then exits at its next timer tick).
 fn spawn_poller_incarnation(shared: Arc<PollerShared>) {
     std::thread::spawn(move || {
         init_com();
@@ -226,19 +233,32 @@ fn spawn_poller_incarnation(shared: Arc<PollerShared>) {
                     break;
                 }
                 if msg.message == WM_TIMER {
+                    // Superseded incarnation: exit instead of polling
+                    // forever alongside its replacement (bounds leaked
+                    // threads; the replacement already polls).
+                    if shared.generation.load(Ordering::SeqCst) != gen {
+                        break;
+                    }
                     let tick = shared.tick_counter.fetch_add(1, Ordering::SeqCst) + 1;
                     let (info, status) = poll_status();
-                    if shared.generation.load(Ordering::SeqCst) == gen {
-                        if let Ok(mut guard) = shared.cache.lock() {
-                            *guard = PollCache {
-                                info,
-                                status: format!("{} | #{}", status, tick),
-                            };
-                        }
-                        if let Ok(mut health) = shared.health.lock() {
-                            health.last_write = Instant::now();
-                            health.backoff_secs = 3;
-                        }
+                    // Accept EVERY completed poll (fix 2026-10-28 malam):
+                    // the old generation gate discarded slow polls
+                    // forever — a poll slower than the watchdog fuse
+                    // was replaced, then its result rejected, then the
+                    // replacement was replaced too, so no write ever
+                    // landed and 'poll stuck' showed permanently even
+                    // though polls eventually completed. A late write
+                    // is still the freshest available data; the next
+                    // poll (250ms later) corrects any staleness.
+                    if let Ok(mut guard) = shared.cache.lock() {
+                        *guard = PollCache {
+                            info,
+                            status: format!("{} | #{}", status, tick),
+                        };
+                    }
+                    if let Ok(mut health) = shared.health.lock() {
+                        health.last_write = Instant::now();
+                        health.backoff_secs = 3;
                     }
                 } else {
                     let _ = TranslateMessage(&msg);
