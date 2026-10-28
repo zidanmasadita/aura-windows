@@ -1640,7 +1640,7 @@ impl App {
             let item = dialog.GetResult().ok()?;
             let name = item.GetDisplayName(SIGDN_FILESYSPATH).ok()?;
             let s = name.to_string().ok()?;
-            CoTaskMemFree(name.0 as *const core::ffi::c_void);
+            CoTaskMemFree(Some(name.0 as *const core::ffi::c_void));
             Some(s)
         }
     }
