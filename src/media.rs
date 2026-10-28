@@ -30,17 +30,37 @@
 //! card draws a placeholder cover box until basic title/artist/progress/
 //! controls are verified working. Thumbnail arrives after that.
 //!
+//! Fix 2026-10-28 (deteksi intermittent, lebih sering tidak kedetect):
+//! - poll_status kini mengutamakan sesi PLAYING dari daftar semua sesi
+//!   dibanding GetCurrentSession mentah: kode lama mengembalikan sesi
+//!   current apa adanya bila ada judulnya, walau itu sesi paused yang
+//!   sudah basi sementara aplikasi lain sedang memutar lagu.
+//! - Poller kini loop thread + satu worker per poll + watchdog: satu
+//!   .get() yang nyangkut dulu membekukan cache di None selamanya;
+//!   kini worker tanpa cache write >3 detik ditinggalkan (generation
+//!   guard) dan diganti, dengan backoff 3s -> 30s.
+//! - Kontrol jalan di thread STA sekali-pakai DENGAN queue+loop
+//!   sendiri, pelajaran yang sama dengan poller (thread tanpa queue
+//!   tidak pernah kembali dari RequestAsync di sini).
+//! Penyebab pasti di mesin user tidak bisa dibuktikan dari VM ini
+//! (tidak ada Rust/Windows di sini); fix ini menutup tiga jalur
+//! gagal yang nyata ada di kode + status line menunjukkan kasus
+//! stuck bila terjadi ("poll stuck, worker restarted").
 //! If `cargo build` reports a signature mismatch (notably `.get()` on
 //! IAsyncOperation, HSTRING conversion, or TimeSpan field access), paste
 //! it — Eve cannot compile Rust in this VM, so the first build on the
 //! user's Windows PC is where WinRT signatures get corrected.
 
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use windows::core::Result;
+use windows::Win32::Foundation::{LPARAM, WPARAM};
+use windows::Win32::System::Threading::GetCurrentThreadId;
 use windows::Win32::UI::WindowsAndMessaging::{
-    DispatchMessageW, GetMessageW, PeekMessageW, SetTimer, TranslateMessage, MSG, PM_NOREMOVE,
-    WM_TIMER,
+    DispatchMessageW, GetMessageW, PeekMessageW, PostThreadMessageW, SetTimer, TranslateMessage,
+    MSG, PM_NOREMOVE, WM_TIMER,
 };
 use windows::Media::Control::{
     GlobalSystemMediaTransportControlsSession, GlobalSystemMediaTransportControlsSessionManager,
@@ -85,16 +105,49 @@ fn init_com() {
 /// and GetMessage dispatches it; poll() runs inside that loop, where
 /// .get() can pump the completion messages. A stuck poll only
 /// freezes this thread's cache, never the main window.
+/// Shared watchdog state. The loop thread never calls GSMTC itself;
+/// it only ticks and watches. A worker does one poll and exits. If a
+/// worker's .get() hangs (media app wedged mid-request), the loop
+/// abandons it after 3s without a cache write and spawns a replacement.
+/// Generation guards stale writes; backoff (3s -> 30s) bounds leaked
+/// threads during a persistent hang. Lock order (never violated):
+/// cache and health are never held at the same time.
+struct PollerShared {
+    cache: Arc<Mutex<PollCache>>,
+    generation: AtomicU64,
+    busy: AtomicBool,
+    health: Mutex<PollerHealth>,
+}
+
+struct PollerHealth {
+    last_write: Instant,
+    backoff_secs: u64,
+    next_respawn_at: Instant,
+}
+
+/// Start the poller: one STA loop thread (timer + watchdog) plus one
+/// short-lived STA worker per poll. The loop thread owns the 250ms
+/// timer and never blocks on GSMTC, so one hung poll can no longer
+/// freeze detection at None forever — the failure mode behind
+/// "sometimes detected, mostly not". Workers create their own message
+/// queue (PeekMessage) before polling, the same precondition the old
+/// loop-thread design relied on for .get() completion delivery.
 pub fn spawn_poller(cache: Arc<Mutex<PollCache>>) {
+    let shared = Arc::new(PollerShared {
+        cache,
+        generation: AtomicU64::new(0),
+        busy: AtomicBool::new(false),
+        health: Mutex::new(PollerHealth {
+            last_write: Instant::now(),
+            backoff_secs: 3,
+            next_respawn_at: Instant::now(),
+        }),
+    });
     std::thread::spawn(move || {
         init_com();
         unsafe {
-            // Create this thread's message queue (required before
-            // any COM async completion can be delivered to it).
             let mut msg = MSG::default();
             let _ = PeekMessageW(&mut msg, None, 0, 0, PM_NOREMOVE);
-            // Thread timer (no HWND): WM_TIMER arrives in this
-            // thread's queue every 250ms.
             let _ = SetTimer(None, 1, 250, None);
             let mut count: u64 = 0;
             loop {
@@ -104,12 +157,63 @@ pub fn spawn_poller(cache: Arc<Mutex<PollCache>>) {
                 }
                 if msg.message == WM_TIMER {
                     count += 1;
-                    let (info, status) = poll_status();
-                    if let Ok(mut guard) = cache.lock() {
-                        *guard = PollCache {
-                            info,
-                            status: format!("{} | #{}", status, count),
-                        };
+                    let now = Instant::now();
+                    // Watchdog: abandon a worker with no cache write
+                    // for >3s (and past backoff), then replace it.
+                    let mut respawn = false;
+                    if shared.busy.load(Ordering::SeqCst) {
+                        if let Ok(mut health) = shared.health.lock() {
+                            if now.duration_since(health.last_write)
+                                > Duration::from_secs(3)
+                                && now >= health.next_respawn_at
+                            {
+                                shared.generation.fetch_add(1, Ordering::SeqCst);
+                                shared.busy.store(false, Ordering::SeqCst);
+                                health.next_respawn_at =
+                                    now + Duration::from_secs(health.backoff_secs);
+                                health.backoff_secs = (health.backoff_secs * 3).min(30);
+                                respawn = true;
+                            }
+                        }
+                    }
+                    if respawn {
+                        // Best-effort status note (cache lock taken
+                        // alone, never together with the health lock).
+                        if let Ok(mut guard) = shared.cache.lock() {
+                            guard.status = "poll stuck, worker restarted".to_string();
+                        }
+                    }
+                    if !shared.busy.load(Ordering::SeqCst) {
+                        let worker_shared = shared.clone();
+                        let gen = shared.generation.load(Ordering::SeqCst);
+                        let tick = count;
+                        shared.busy.store(true, Ordering::SeqCst);
+                        std::thread::spawn(move || {
+                            init_com();
+                            unsafe {
+                                let mut wmsg = MSG::default();
+                                let _ =
+                                    PeekMessageW(&mut wmsg, None, 0, 0, PM_NOREMOVE);
+                            }
+                            let (info, status) = poll_status();
+                            if worker_shared.generation.load(Ordering::SeqCst) == gen {
+                                if let Ok(mut guard) = worker_shared.cache.lock() {
+                                    *guard = PollCache {
+                                        info,
+                                        status: format!("{} | #{}", status, tick),
+                                    };
+                                }
+                                if let Ok(mut health) = worker_shared.health.lock() {
+                                    health.last_write = Instant::now();
+                                    health.backoff_secs = 3;
+                                }
+                            }
+                            // Clearing busy after the write keeps the
+                            // loop from spawning a duplicate mid-write;
+                            // a duplicate from the tiny load/store race
+                            // is benign (idempotent polls, same gen).
+                            worker_shared.busy.store(false, Ordering::SeqCst);
+                        });
                     }
                 } else {
                     let _ = TranslateMessage(&msg);
@@ -123,10 +227,38 @@ pub fn spawn_poller(cache: Arc<Mutex<PollCache>>) {
 /// Run a control action on a throwaway thread (never the UI thread).
 /// The caller does not wait: the next poller cycle (<=250ms) refreshes
 /// the card icon/progress, so the play/pause icon flips within a tick.
+/// Message a control thread posts to itself (see spawn_control).
+const CONTROL_MSG: u32 = 0x8002; // WM_APP + 2 (tray callback uses 0x8001)
+
+/// Run a control action on a throwaway STA thread WITH its own message
+/// queue + loop. Same lesson as the poller: a bare thread (init_com +
+/// direct .get(), no queue) never returns from RequestAsync on this
+/// machine's COM setup (b19b92a/9f1f911). The thread posts itself
+/// CONTROL_MSG, runs the action while its loop owns the queue, then
+/// exits. Fire-and-forget, like before: the next poll refreshes the
+/// card icon/progress within a tick.
 fn spawn_control(action: fn() -> bool) {
     std::thread::spawn(move || {
         init_com();
-        let _ = action();
+        unsafe {
+            let mut msg = MSG::default();
+            let _ = PeekMessageW(&mut msg, None, 0, 0, PM_NOREMOVE);
+            let tid = GetCurrentThreadId();
+            let _ = PostThreadMessageW(tid, CONTROL_MSG, WPARAM(action as usize), LPARAM(0));
+            loop {
+                let ret = GetMessageW(&mut msg, None, 0, 0);
+                if ret.0 <= 0 {
+                    break;
+                }
+                if msg.message == CONTROL_MSG {
+                    let f: fn() -> bool = std::mem::transmute(msg.wparam.0);
+                    let _ = f();
+                    break;
+                }
+                let _ = TranslateMessage(&msg);
+                let _ = DispatchMessageW(&msg);
+            }
+        }
     });
 }
 
@@ -185,6 +317,17 @@ pub struct MediaInfo {
 /// non-empty title. Status strings are kept short for the no-music
 /// card line: "ok", "no session", "request failed 0x........",
 /// "sessions: N, none usable", etc.
+/// Poll with a status string. Selection order (fix 2026-10-28):
+/// 1. Any PLAYING session from the full session list (first with a
+///    title). The old code returned GetCurrentSession unread when it
+///    had a title, even if it was a stale paused app while another
+///    app was actually playing — one direct cause of "music not
+///    detected" while a song plays.
+/// 2. GetCurrentSession (covers managers whose list is empty).
+/// 3. First titled paused session from the list (paused fallback).
+/// Per-session property errors are still skipped (transient during
+/// track changes), and the UI's 1s None-hysteresis still covers short
+/// gaps. Status strings stay short for the no-music card line.
 pub fn poll_status() -> (Option<MediaInfo>, String) {
     let manager = match GlobalSystemMediaTransportControlsSessionManager::RequestAsync() {
         Ok(op) => match op.get() {
@@ -203,42 +346,54 @@ pub fn poll_status() -> (Option<MediaInfo>, String) {
             )
         }
     };
-    // Current session first.
-    if let Ok(session) = manager.GetCurrentSession() {
-        if let Ok(info) = session_info(&session) {
-            if !info.title.is_empty() {
-                return (Some(info), "ok".to_string());
+    // 1. Full session list first: prefer a PLAYING session.
+    let mut paused_fallback: Option<MediaInfo> = None;
+    let mut session_count: u32 = 0;
+    if let Ok(sessions) = manager.GetSessions() {
+        let size = sessions.Size().unwrap_or(0);
+        session_count = size;
+        for i in 0..size {
+            let Ok(session) = sessions.GetAt(i) else {
+                continue;
+            };
+            let Ok(info) = session_info(&session) else {
+                continue;
+            };
+            if info.title.is_empty() {
+                continue;
+            }
+            if info.playing {
+                return (Some(info), "ok (playing)".to_string());
+            }
+            if paused_fallback.is_none() {
+                paused_fallback = Some(info);
             }
         }
     }
-    // Fallback: all sessions.
-    let sessions = match manager.GetSessions() {
-        Ok(s) => s,
-        Err(_) => return (None, "no session".to_string()),
-    };
-    let size = sessions.Size().unwrap_or(0);
-    let mut fallback: Option<MediaInfo> = None;
-    for i in 0..size {
-        let Ok(session) = sessions.GetAt(i) else {
-            continue;
-        };
-        let Ok(info) = session_info(&session) else {
-            continue;
-        };
-        if info.title.is_empty() {
-            continue;
-        }
-        if info.playing {
-            return (Some(info), "ok (session list)".to_string());
-        }
-        if fallback.is_none() {
-            fallback = Some(info);
+    // 2. Current session (covers an empty list).
+    let mut current_fallback: Option<MediaInfo> = None;
+    if let Ok(session) = manager.GetCurrentSession() {
+        if let Ok(info) = session_info(&session) {
+            if !info.title.is_empty() {
+                if info.playing {
+                    return (Some(info), "ok".to_string());
+                }
+                current_fallback = Some(info);
+            }
         }
     }
-    if let Some(info) = fallback {
+    // 3. Paused fallbacks: current first, then list.
+    if let Some(info) = current_fallback {
+        return (Some(info), "ok (current, paused)".to_string());
+    }
+    if let Some(info) = paused_fallback {
         return (Some(info), "ok (session list, paused)".to_string());
     }
-    (None, format!("sessions: {}, none usable", size))
+    if session_count == 0 {
+        (None, "no session".to_string())
+    } else {
+        (None, format!("sessions: {}, none usable", session_count))
+    }
 }
 
 /// Kept for callers that only need the info (controls do not use it).
