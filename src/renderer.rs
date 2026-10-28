@@ -89,8 +89,15 @@ pub const TRAY_LEFT_ARROW_RECT: (f32, f32, f32, f32) = (26.0, 128.0, 70.0, 172.0
 pub const TRAY_RIGHT_ARROW_RECT: (f32, f32, f32, f32) = (570.0, 128.0, 614.0, 172.0);
 
 /// Hit test for the vertical section dots on the right edge (`IslandView.dotIndex(at:)`).
+/// Remove BG card geometry (pill points, `(x0, y0, x1, y1)` like `TRAY_*_RECT`).
+pub const RB_MODEL_RECT: (f32, f32, f32, f32) = (500.0, 10.0, 600.0, 34.0);
+pub const RB_LEFT_RECT: (f32, f32, f32, f32) = (20.0, 48.0, 300.0, 208.0);
+pub const RB_FROM_TRAY_RECT: (f32, f32, f32, f32) = (20.0, 218.0, 150.0, 242.0);
+pub const RB_RIGHT_RECT: (f32, f32, f32, f32) = (320.0, 48.0, 600.0, 208.0);
+pub const RB_SAVE_RECT: (f32, f32, f32, f32) = (320.0, 218.0, 400.0, 242.0);
+
 pub fn dot_index_at(x: f32, y: f32, lw: f32, lh: f32) -> Option<usize> {
-    let count = 5usize;
+    let count = 6usize;
     if x < lw - 32.0 || x > lw - 10.0 {
         return None;
     }
@@ -153,6 +160,8 @@ pub struct RenderContext<'a> {
     pub todo_editing: bool,
     pub todo_input: &'a str,
     pub shelf: &'a crate::shelf::Shelf,
+    pub removebg: &'a crate::removebg::RemoveBgState,
+    pub removebg_drop_highlight: bool,
     pub tray_page: usize,
     pub tray_drop_highlight: bool,
     pub tray_drag_pt: Option<(f32, f32)>,
@@ -240,6 +249,10 @@ pub struct Renderer {
     // Cover art & dominant color cache:
     cover_bitmap: Option<ID2D1Bitmap>,
     cover_arc_ptr: usize,
+    removebg_in_bitmap: Option<ID2D1Bitmap>,
+    removebg_in_key: (String, usize),
+    removebg_bitmap: Option<ID2D1Bitmap>,
+    removebg_gen: u64,
     dominant_rgb: Option<(f32, f32, f32)>,
     // Lyric slot-machine roll animation state:
     lyric_roll: Option<LyricRollState>,
@@ -350,6 +363,10 @@ impl Renderer {
                 stroke_dotted,
                 cover_bitmap: None,
                 cover_arc_ptr: 0,
+                removebg_in_bitmap: None,
+                removebg_in_key: (String::new(), 0),
+                removebg_bitmap: None,
+                removebg_gen: 0,
                 dominant_rgb: None,
                 lyric_roll: None,
                 started_at: Instant::now(),
@@ -583,6 +600,72 @@ impl Renderer {
             ) {
                 self.cover_bitmap = Some(bmp);
                 self.cover_arc_ptr = ptr;
+            }
+        }
+    }
+
+    fn bitmap_from_pixels(
+        &self,
+        target: &ID2D1RenderTarget,
+        pixels: &[u8],
+        w: u32,
+        h: u32,
+    ) -> Option<ID2D1Bitmap> {
+        unsafe {
+            target
+                .CreateBitmap(
+                    D2D_SIZE_U {
+                        width: w,
+                        height: h,
+                    },
+                    Some(pixels.as_ptr() as *const core::ffi::c_void),
+                    w * 4,
+                    &D2D1_BITMAP_PROPERTIES {
+                        pixelFormat: D2D1_PIXEL_FORMAT {
+                            format: DXGI_FORMAT_B8G8R8A8_UNORM,
+                            alphaMode: D2D1_ALPHA_MODE_PREMULTIPLIED,
+                        },
+                        dpiX: 96.0,
+                        dpiY: 96.0,
+                    },
+                )
+                .ok()
+        }
+    }
+
+    /// Refresh cached Remove BG bitmaps from the current section state
+    /// (mirror of `update_cover_bitmap`): input keyed by path+length,
+    /// result keyed by run generation.
+    fn update_removebg_bitmaps(&mut self, rb: &crate::removebg::RemoveBgState) {
+        let Some(target) = self.target.clone() else {
+            return;
+        };
+        match &rb.input_preview {
+            Some((pixels, w, h)) => {
+                let key = (rb.input_path.clone().unwrap_or_default(), pixels.len());
+                if self.removebg_in_key != key || self.removebg_in_bitmap.is_none() {
+                    if let Some(bmp) = self.bitmap_from_pixels(&target, pixels, *w, *h) {
+                        self.removebg_in_bitmap = Some(bmp);
+                        self.removebg_in_key = key;
+                    }
+                }
+            }
+            None => {
+                self.removebg_in_bitmap = None;
+                self.removebg_in_key = (String::new(), 0);
+            }
+        }
+        match &rb.result_preview {
+            Some((pixels, w, h)) => {
+                if self.removebg_gen != rb.run_gen || self.removebg_bitmap.is_none() {
+                    if let Some(bmp) = self.bitmap_from_pixels(&target, pixels, *w, *h) {
+                        self.removebg_bitmap = Some(bmp);
+                        self.removebg_gen = rb.run_gen;
+                    }
+                }
+            }
+            None => {
+                self.removebg_bitmap = None;
             }
         }
     }
@@ -1166,9 +1249,39 @@ impl Renderer {
         self.draw_waveform(target, width - 68.0, 14.0, 48.0, 16.0, playing);
     }
 
+    /// Card header without the waveform (Mac `showWaveform: false`):
+    /// green dot + centered date.
+    fn draw_card_header_no_waveform(&self, target: &ID2D1RenderTarget, width: f32) {
+        let date_str = chrono::Local::now()
+            .format("%a %-d %b %Y %H:%M")
+            .to_string();
+        let Some(fmt) = self.fmt_13_med.as_ref() else {
+            return;
+        };
+        let (date_w, _) = self.measure_text(&date_str, fmt);
+        let group_w = date_w + 16.0;
+        let group_x = (width - group_w) * 0.5;
+        self.fill_oval(
+            target,
+            group_x,
+            17.0,
+            8.0,
+            8.0,
+            color(SYSTEM_GREEN.0, SYSTEM_GREEN.1, SYSTEM_GREEN.2, 1.0),
+        );
+        self.draw_text_at(
+            target,
+            &date_str,
+            Some(fmt),
+            color(1.0, 1.0, 1.0, 1.0),
+            group_x + 16.0,
+            14.0,
+        );
+    }
+
     /// Vertical page dots on the right edge (`drawPageDots`, `IslandView.swift` lines 554-565, 2117-2130).
     fn draw_page_dots(&self, target: &ID2D1RenderTarget, state: IslandState, lw: f32, lh: f32) {
-        let count = 5usize;
+        let count = 6usize;
         let active = state.section_index();
         let top = (lh - (count as f32) * 18.0) * 0.5;
         let x = lw - 24.0;
@@ -2612,6 +2725,310 @@ impl Renderer {
         }
     }
 
+    /// Aspect-fit rect for a `w`x`h` image inside a box, centered.
+    fn fit_rect(bx0: f32, by0: f32, bx1: f32, by1: f32, w: u32, h: u32) -> D2D_RECT_F {
+        if w == 0 || h == 0 {
+            return D2D_RECT_F {
+                left: bx0,
+                top: by0,
+                right: bx1,
+                bottom: by1,
+            };
+        }
+        let bw = bx1 - bx0;
+        let bh = by1 - by0;
+        let s = (bw / w as f32).min(bh / h as f32);
+        let dw = w as f32 * s;
+        let dh = h as f32 * s;
+        let x0 = bx0 + (bw - dw) * 0.5;
+        let y0 = by0 + (bh - dh) * 0.5;
+        D2D_RECT_F {
+            left: x0,
+            top: y0,
+            right: x0 + dw,
+            bottom: y0 + dh,
+        }
+    }
+
+    fn draw_checkerboard(
+        &self,
+        target: &ID2D1RenderTarget,
+        x0: f32,
+        y0: f32,
+        x1: f32,
+        y1: f32,
+    ) {
+        let sq = 12.0;
+        let mut row = 0;
+        let mut y = y0;
+        while y < y1 {
+            let mut col = 0;
+            let mut x = x0;
+            while x < x1 {
+                let light = (row + col) % 2 == 0;
+                let c = if light {
+                    color(1.0, 1.0, 1.0, 0.10)
+                } else {
+                    color(1.0, 1.0, 1.0, 0.04)
+                };
+                let w = (x + sq).min(x1) - x;
+                let h = (y + sq).min(y1) - y;
+                self.fill_rounded(target, x, y, w, h, 0.0, c);
+                x += sq;
+                col += 1;
+            }
+            y += sq;
+            row += 1;
+        }
+    }
+
+    fn draw_removebg(
+        &self,
+        target: &ID2D1RenderTarget,
+        rb: &crate::removebg::RemoveBgState,
+        shelf: &crate::shelf::Shelf,
+        drop_highlight: bool,
+    ) {
+        self.draw_card_header_no_waveform(target, 640.0);
+        if let Some(fmt) = self.fmt_13_med.as_ref() {
+            self.draw_text_at(
+                target,
+                "Remove BG",
+                Some(fmt),
+                color(1.0, 1.0, 1.0, 0.90),
+                20.0,
+                14.0,
+            );
+        }
+        // Model pill (Mac `Model:` pill, header row, ends at x600).
+        let (mx0, my0, mx1, my1) = RB_MODEL_RECT;
+        self.fill_rounded(
+            target,
+            mx0,
+            my0,
+            mx1 - mx0,
+            my1 - my0,
+            12.0,
+            color(1.0, 1.0, 1.0, 0.12),
+        );
+        let model_label = format!("Model: {} \u{25BE}", rb.model.label());
+        if let Some(fmt) = self.fmt_13_med.as_ref() {
+            let (tw, th) = self.measure_text(&model_label, fmt);
+            self.draw_text_at(
+                target,
+                &model_label,
+                Some(fmt),
+                color(1.0, 1.0, 1.0, 1.0),
+                mx0 + (mx1 - mx0 - tw) * 0.5,
+                my0 + (my1 - my0 - th) * 0.5,
+            );
+        }
+        // Left panel: input.
+        let (lx0, ly0, lx1, ly1) = RB_LEFT_RECT;
+        let left_fill = if drop_highlight { 0.15 } else { 0.08 };
+        self.fill_rounded(
+            target,
+            lx0,
+            ly0,
+            lx1 - lx0,
+            ly1 - ly0,
+            12.0,
+            color(1.0, 1.0, 1.0, left_fill),
+        );
+        if rb.input_path.is_some() {
+            if let Some((_, pw, ph)) = &rb.input_preview {
+                if let Some(bmp) = &self.removebg_in_bitmap {
+                    let rect = Self::fit_rect(28.0, 56.0, 292.0, 164.0, *pw, *ph);
+                    unsafe {
+                        target.DrawBitmap(
+                            bmp,
+                            Some(&rect),
+                            1.0,
+                            D2D1_BITMAP_INTERPOLATION_MODE_LINEAR,
+                            None,
+                        );
+                    }
+                }
+            }
+            if let Some(fmt) = self.fmt_13_reg.as_ref() {
+                let shown = self.truncate_text(&rb.input_name, 260.0, fmt);
+                self.draw_text_at(
+                    target,
+                    &shown,
+                    Some(fmt),
+                    color(1.0, 1.0, 1.0, 1.0),
+                    28.0,
+                    170.0,
+                );
+                let size_str = if rb.input_size >= 1024 * 1024 {
+                    format!("{:.1} MB", rb.input_size as f32 / 1048576.0)
+                } else if rb.input_size >= 1024 {
+                    format!("{:.0} KB", rb.input_size as f32 / 1024.0)
+                } else {
+                    format!("{} B", rb.input_size)
+                };
+                self.draw_text_at(
+                    target,
+                    &size_str,
+                    Some(fmt),
+                    color(1.0, 1.0, 1.0, 0.60),
+                    28.0,
+                    188.0,
+                );
+            }
+        } else {
+            if let Some(fmt) = self.fmt_13_med.as_ref() {
+                let msg = "Drop an image here";
+                let (tw, _) = self.measure_text(msg, fmt);
+                self.draw_text_at(
+                    target,
+                    msg,
+                    Some(fmt),
+                    color(1.0, 1.0, 1.0, 0.90),
+                    160.0 - tw * 0.5,
+                    108.0,
+                );
+            }
+            if let Some(fmt) = self.fmt_13_reg.as_ref() {
+                let msg = "or click to choose a file";
+                let (tw, _) = self.measure_text(msg, fmt);
+                self.draw_text_at(
+                    target,
+                    msg,
+                    Some(fmt),
+                    color(1.0, 1.0, 1.0, 0.60),
+                    160.0 - tw * 0.5,
+                    130.0,
+                );
+            }
+        }
+        // From Tray pill (only when the tray holds images).
+        if !crate::removebg::tray_images(shelf).is_empty() {
+            let (fx0, fy0, fx1, fy1) = RB_FROM_TRAY_RECT;
+            self.fill_rounded(
+                target,
+                fx0,
+                fy0,
+                fx1 - fx0,
+                fy1 - fy0,
+                12.0,
+                color(1.0, 1.0, 1.0, 0.12),
+            );
+            if let Some(fmt) = self.fmt_13_med.as_ref() {
+                let label = "From Tray \u{25BE}";
+                let (tw, th) = self.measure_text(label, fmt);
+                self.draw_text_at(
+                    target,
+                    label,
+                    Some(fmt),
+                    color(1.0, 1.0, 1.0, 1.0),
+                    fx0 + (fx1 - fx0 - tw) * 0.5,
+                    fy0 + (fy1 - fy0 - th) * 0.5,
+                );
+            }
+        }
+        // Right panel: result.
+        let (rx0, ry0, rx1, ry1) = RB_RIGHT_RECT;
+        self.fill_rounded(
+            target,
+            rx0,
+            ry0,
+            rx1 - rx0,
+            ry1 - ry0,
+            12.0,
+            color(1.0, 1.0, 1.0, 0.08),
+        );
+        if let Some((_, pw, ph)) = &rb.result_preview {
+            self.draw_checkerboard(target, 328.0, 56.0, 592.0, 200.0);
+            if let Some(bmp) = &self.removebg_bitmap {
+                let rect = Self::fit_rect(328.0, 56.0, 592.0, 200.0, *pw, *ph);
+                unsafe {
+                    target.DrawBitmap(
+                        bmp,
+                        Some(&rect),
+                        1.0,
+                        D2D1_BITMAP_INTERPOLATION_MODE_LINEAR,
+                        None,
+                    );
+                }
+            }
+        } else if rb.uploading {
+            if let Some(fmt) = self.fmt_13_med.as_ref() {
+                let msg = "Uploading\u{2026}";
+                let (tw, _) = self.measure_text(msg, fmt);
+                self.draw_text_at(
+                    target,
+                    msg,
+                    Some(fmt),
+                    color(1.0, 1.0, 1.0, 0.90),
+                    460.0 - tw * 0.5,
+                    120.0,
+                );
+            }
+        } else if let Some(err) = &rb.error {
+            if let Some(fmt) = self.fmt_13_reg.as_ref() {
+                let shown = self.truncate_text(err, 260.0, fmt);
+                self.draw_text_at(
+                    target,
+                    &shown,
+                    Some(fmt),
+                    color(1.0, 0.45, 0.45, 1.0),
+                    328.0,
+                    120.0,
+                );
+            }
+        } else if let Some(fmt) = self.fmt_13_reg.as_ref() {
+            let msg = "Result appears here";
+            let (tw, _) = self.measure_text(msg, fmt);
+            self.draw_text_at(
+                target,
+                msg,
+                Some(fmt),
+                color(1.0, 1.0, 1.0, 0.60),
+                460.0 - tw * 0.5,
+                120.0,
+            );
+        }
+        // Save button + notice (only with a result).
+        if rb.result_bytes.is_some() {
+            let (sx0, sy0, sx1, sy1) = RB_SAVE_RECT;
+            self.fill_rounded(
+                target,
+                sx0,
+                sy0,
+                sx1 - sx0,
+                sy1 - sy0,
+                12.0,
+                color(1.0, 1.0, 1.0, 0.12),
+            );
+            if let Some(fmt) = self.fmt_13_med.as_ref() {
+                let label = "Save";
+                let (tw, th) = self.measure_text(label, fmt);
+                self.draw_text_at(
+                    target,
+                    label,
+                    Some(fmt),
+                    color(1.0, 1.0, 1.0, 1.0),
+                    sx0 + (sx1 - sx0 - tw) * 0.5,
+                    sy0 + (sy1 - sy0 - th) * 0.5,
+                );
+            }
+            if !rb.notice.is_empty() {
+                if let Some(fmt) = self.fmt_13_reg.as_ref() {
+                    let shown = self.truncate_text(&rb.notice, 180.0, fmt);
+                    self.draw_text_at(
+                        target,
+                        &shown,
+                        Some(fmt),
+                        color(1.0, 1.0, 1.0, 0.80),
+                        410.0,
+                        226.0,
+                    );
+                }
+            }
+        }
+    }
+
     fn draw_tray(
         &self,
         target: &ID2D1RenderTarget,
@@ -2842,6 +3259,7 @@ impl Renderer {
             return;
         }
         self.update_cover_bitmap(ctx.media);
+        self.update_removebg_bitmaps(ctx.removebg);
         let (lw, lh) = (ctx.cur_w, ctx.cur_h);
         let lyrics_t = if ctx.state == IslandState::Expanded || ctx.state == IslandState::Lyrics {
             ((lw - 520.0) / (700.0 - 520.0)).clamp(0.0, 1.0)
@@ -3003,6 +3421,15 @@ impl Renderer {
                             playing,
                             ctx.tray_drop_highlight,
                             ctx.tray_drag_pt,
+                        );
+                        self.draw_page_dots(&target, ctx.state, lw, lh);
+                    }
+                    IslandState::RemoveBg => {
+                        self.draw_removebg(
+                            &target,
+                            ctx.removebg,
+                            ctx.shelf,
+                            ctx.removebg_drop_highlight,
                         );
                         self.draw_page_dots(&target, ctx.state, lw, lh);
                     }

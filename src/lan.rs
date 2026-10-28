@@ -78,7 +78,7 @@ fn aura_dir() -> Option<PathBuf> {
 }
 
 /// %USERPROFILE%\Downloads\Aura (same rule as Aura Mac's Downloads/Aura).
-fn downloads_dir() -> Option<PathBuf> {
+pub(crate) fn downloads_dir() -> Option<PathBuf> {
     if let Some(home) = std::env::var_os("USERPROFILE").map(PathBuf::from) {
         return Some(home.join("Downloads").join("Aura"));
     }
@@ -137,7 +137,7 @@ fn format_size(bytes: u64) -> String {
 /// "name 2.ext", ... Directory components in a peer-supplied name
 /// are stripped first (a peer name must never traverse out of
 /// Downloads\Aura); an empty name becomes "shared-file".
-fn unique_path(dir: &Path, name: &str) -> PathBuf {
+pub(crate) fn unique_path(dir: &Path, name: &str) -> PathBuf {
     let base_name = Path::new(name)
         .file_name()
         .map(|s| s.to_string_lossy().into_owned())

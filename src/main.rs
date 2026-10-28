@@ -12,6 +12,7 @@ mod lan;
 mod lyrics;
 mod media;
 mod pomodoro;
+mod removebg;
 mod renderer;
 mod shelf;
 mod state;

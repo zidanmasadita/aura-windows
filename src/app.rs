@@ -11,12 +11,13 @@ use windows::Win32::Foundation::*;
 use windows::Win32::Graphics::Gdi::HBRUSH;
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::System::Ole::{OleInitialize, OleUninitialize};
+use windows::Win32::System::Com::{CoCreateInstance, CoTaskMemFree, CLSCTX_INPROC_SERVER};
 use windows::Win32::System::Threading::{CreateMutexW, ReleaseMutex};
 use windows::Win32::UI::HiDpi::{
     SetProcessDpiAwarenessContext, DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2,
 };
 use windows::Win32::UI::Input::KeyboardAndMouse::{TrackMouseEvent, TME_LEAVE, TRACKMOUSEEVENT};
-use windows::Win32::UI::Shell::{DragAcceptFiles, DragFinish, DragQueryFileW, HDROP};
+use windows::Win32::UI::Shell::{CLSID_FileOpenDialog, DragAcceptFiles, DragFinish, DragQueryFileW, HDROP, IFileOpenDialog, SIGDN_FILESYSPATH};
 use windows::Win32::UI::WindowsAndMessaging::*;
 
 use crate::animator;
@@ -25,6 +26,7 @@ use crate::lan;
 use crate::lyrics;
 use crate::media;
 use crate::pomodoro;
+use crate::removebg;
 use crate::renderer::{self, AlertIcon, PillAlert, RenderContext};
 use crate::state::{self, IslandState};
 use crate::todo;
@@ -40,6 +42,10 @@ const TIMER_CLOSE: usize = 4; // 150ms: debounced mouse-leave close
 const MENU_TILE_OPEN: usize = 2001;
 const MENU_TILE_REMOVE: usize = 2002;
 const MENU_TILE_SHARE_BASE: usize = 2100;
+const MENU_RB_TRAY_BASE: usize = 2200;
+const MENU_RB_MODEL_QUALITY: usize = 2301;
+const MENU_RB_MODEL_BALANCED: usize = 2302;
+const MENU_RB_MODEL_FAST: usize = 2303;
 
 const MENU_WATER_GOAL_1500: usize = 3001;
 const MENU_WATER_GOAL_2000: usize = 3002;
@@ -96,6 +102,9 @@ pub struct App {
     dropped_files: Arc<Mutex<Vec<String>>>,
     drag_arm: Option<(usize, i32, i32)>,
     swallow_next_click: bool,
+    removebg: removebg::RemoveBgState,
+    removebg_pending: Arc<Mutex<Option<removebg::RemoveBgResult>>>,
+    removebg_drag_arm: Option<(i32, i32)>,
     water: water::Water,
     last_water_reminder: Instant,
     last_section: IslandState,
@@ -156,6 +165,9 @@ impl App {
             dropped_files,
             drag_arm: None,
             swallow_next_click: false,
+            removebg: removebg::RemoveBgState::new(),
+            removebg_pending: Arc::new(Mutex::new(None)),
+            removebg_drag_arm: None,
             water: water::Water::load(),
             last_water_reminder: now,
             last_section: IslandState::Expanded,
@@ -835,9 +847,9 @@ impl App {
         }
         let cur_idx = self.pill.state.section_index() as isize;
         let next_idx = if wheel_delta < 0 {
-            (cur_idx + 1).clamp(0, 4) as usize
+            (cur_idx + 1).clamp(0, 5) as usize
         } else {
-            (cur_idx - 1).clamp(0, 4) as usize
+            (cur_idx - 1).clamp(0, 5) as usize
         };
         if next_idx != cur_idx as usize {
             self.last_scroll_switch = now;
@@ -847,6 +859,18 @@ impl App {
 
     fn on_mouse_down(&mut self, x_px: i32, y_px: i32) {
         self.drag_arm = None;
+        self.removebg_drag_arm = None;
+        if self.pill.state == IslandState::RemoveBg {
+            // Arm drag-out from the result panel (mirror of tray tile arming).
+            if self.removebg.result_bytes.is_some() {
+                let (x, y) = self.client_px_to_pill_pt(x_px, y_px);
+                let r = renderer::RB_RIGHT_RECT;
+                if x >= r.0 && x <= r.2 && y >= r.1 && y <= r.3 {
+                    self.removebg_drag_arm = Some((x_px, y_px));
+                }
+            }
+            return;
+        }
         if self.pill.state != IslandState::Tray {
             return;
         }
@@ -890,6 +914,26 @@ impl App {
     }
 
     fn on_mouse_move_drag(&mut self, x_px: i32, y_px: i32) {
+        if let Some((down_x, down_y)) = self.removebg_drag_arm {
+            if self.pill.state != IslandState::RemoveBg {
+                self.removebg_drag_arm = None;
+                return;
+            }
+            let (threshold_x, threshold_y) =
+                unsafe { (GetSystemMetrics(SM_CXDRAG), GetSystemMetrics(SM_CYDRAG)) };
+            if (x_px - down_x).abs() < threshold_x && (y_px - down_y).abs() < threshold_y {
+                return;
+            }
+            self.removebg_drag_arm = None;
+            if let Some(path) = self.removebg.ensure_saved() {
+                self.dragging_out = true;
+                let _dropped = drag::do_drag_file(&path);
+                self.dragging_out = false;
+                self.swallow_next_click = true;
+                self.on_paint();
+            }
+            return;
+        }
         let Some((idx, down_x, down_y)) = self.drag_arm else {
             return;
         };
@@ -1181,6 +1225,41 @@ impl App {
                 }
                 self.close_by_click();
             }
+            IslandState::RemoveBg => {
+                if in_rect(renderer::RB_MODEL_RECT) {
+                    self.show_removebg_model_menu();
+                    return;
+                }
+                if in_rect(renderer::RB_FROM_TRAY_RECT)
+                    && !removebg::tray_images(&self.shelf).is_empty()
+                {
+                    self.show_removebg_tray_menu();
+                    return;
+                }
+                if in_rect(renderer::RB_SAVE_RECT) && self.removebg.result_bytes.is_some() {
+                    if let Some(path) = self.removebg.ensure_saved() {
+                        let name = std::path::Path::new(&path)
+                            .file_name()
+                            .map(|s| s.to_string_lossy().into_owned())
+                            .unwrap_or(path.clone());
+                        self.removebg.notice = format!("Saved: {}", name);
+                    }
+                    self.on_paint();
+                    return;
+                }
+                if in_rect(renderer::RB_LEFT_RECT) {
+                    if let Some(path) = Self::pick_image_file(self.hwnd) {
+                        if removebg::is_image_path(&path) {
+                            self.removebg_set_input_and_run(&path);
+                        } else {
+                            self.removebg.error =
+                                Some("That file is not an image.".to_string());
+                            self.on_paint();
+                        }
+                    }
+                    return;
+                }
+            }
             IslandState::Zen | IslandState::Compact => {}
         }
     }
@@ -1397,6 +1476,175 @@ impl App {
         }
     }
 
+    /// Set Remove BG input and start an upload run (shared by
+    /// pick/drop/From Tray).
+    fn removebg_set_input_and_run(&mut self, path: &str) {
+        self.removebg.set_input(path);
+        if let Some((gen, bytes, filename, model_param)) = self.removebg.start_run() {
+            removebg::run_async(
+                self.hwnd,
+                self.removebg_pending.clone(),
+                gen,
+                bytes,
+                filename,
+                model_param,
+            );
+            self.on_paint();
+        }
+    }
+
+    /// Called when `WM_REMOVEBG_READY` (`0x8010`) arrives from the upload
+    /// worker. Stale results (superseded by a newer run) are dropped.
+    fn on_removebg_ready(&mut self) {
+        let fetched = self
+            .removebg_pending
+            .lock()
+            .ok()
+            .and_then(|mut g| g.take());
+        if let Some(res) = fetched {
+            if res.gen != self.removebg.run_gen {
+                return;
+            }
+            self.removebg.uploading = false;
+            match res.result {
+                Ok(bytes) => {
+                    self.removebg.result_preview =
+                        removebg::decode_preview_fit(&bytes, 264, 144);
+                    self.removebg.result_bytes = Some(bytes);
+                    self.removebg.error = None;
+                }
+                Err(msg) => {
+                    self.removebg.error = Some(msg);
+                    self.removebg.result_bytes = None;
+                    self.removebg.result_preview = None;
+                }
+            }
+            self.on_paint();
+        }
+    }
+
+    /// Popup menu for the Remove BG model pill (Mac `Model:` pill).
+    fn show_removebg_model_menu(&mut self) {
+        self.suppress_leave = true;
+        unsafe {
+            let Ok(menu) = CreatePopupMenu() else {
+                self.suppress_leave = false;
+                return;
+            };
+            let items = [
+                (MENU_RB_MODEL_QUALITY, removebg::RemoveBgModel::Quality),
+                (MENU_RB_MODEL_BALANCED, removebg::RemoveBgModel::Balanced),
+                (MENU_RB_MODEL_FAST, removebg::RemoveBgModel::Fast),
+            ];
+            for (id, model) in items {
+                let flags = if model == self.removebg.model {
+                    MF_STRING | MF_CHECKED
+                } else {
+                    MF_STRING
+                };
+                let mut wide: Vec<u16> = model.label().encode_utf16().collect();
+                wide.push(0);
+                let _ = AppendMenuW(menu, flags, id, PCWSTR::from_raw(wide.as_ptr()));
+            }
+            let _ = SetForegroundWindow(self.hwnd);
+            let mut pt = POINT::default();
+            let _ = GetCursorPos(&mut pt);
+            let id = TrackPopupMenu(
+                menu,
+                TPM_RIGHTBUTTON | TPM_RETURNCMD,
+                pt.x,
+                pt.y,
+                0,
+                self.hwnd,
+                None,
+            );
+            let _ = DestroyMenu(menu);
+            self.suppress_leave = false;
+            let picked = id.0 as usize;
+            let new_model = match picked {
+                MENU_RB_MODEL_QUALITY => Some(removebg::RemoveBgModel::Quality),
+                MENU_RB_MODEL_BALANCED => Some(removebg::RemoveBgModel::Balanced),
+                MENU_RB_MODEL_FAST => Some(removebg::RemoveBgModel::Fast),
+                _ => None,
+            };
+            if let Some(model) = new_model {
+                if model != self.removebg.model {
+                    self.removebg.model = model;
+                    // Mac: changing the model re-runs from the stored input.
+                    if let Some(path) = self.removebg.input_path.clone() {
+                        self.removebg_set_input_and_run(&path);
+                    } else {
+                        self.on_paint();
+                    }
+                }
+            }
+        }
+    }
+
+    /// Popup menu listing tray images for Remove BG input (Mac `From Tray` pill).
+    fn show_removebg_tray_menu(&mut self) {
+        let images = removebg::tray_images(&self.shelf);
+        if images.is_empty() {
+            return;
+        }
+        self.suppress_leave = true;
+        unsafe {
+            let Ok(menu) = CreatePopupMenu() else {
+                self.suppress_leave = false;
+                return;
+            };
+            let shown: Vec<String> = images.into_iter().take(100).collect();
+            for (i, path) in shown.iter().enumerate() {
+                let name = std::path::Path::new(path)
+                    .file_name()
+                    .map(|s| s.to_string_lossy().into_owned())
+                    .unwrap_or_else(|| path.clone());
+                let mut wide: Vec<u16> =
+                    name.encode_utf16().collect();
+                wide.push(0);
+                let _ = AppendMenuW(
+                    menu,
+                    MF_STRING,
+                    MENU_RB_TRAY_BASE + i,
+                    PCWSTR::from_raw(wide.as_ptr()),
+                );
+            }
+            let _ = SetForegroundWindow(self.hwnd);
+            let mut pt = POINT::default();
+            let _ = GetCursorPos(&mut pt);
+            let id = TrackPopupMenu(
+                menu,
+                TPM_RIGHTBUTTON | TPM_RETURNCMD,
+                pt.x,
+                pt.y,
+                0,
+                self.hwnd,
+                None,
+            );
+            let _ = DestroyMenu(menu);
+            self.suppress_leave = false;
+            let picked = id.0 as usize;
+            if picked >= MENU_RB_TRAY_BASE && picked < MENU_RB_TRAY_BASE + shown.len() {
+                let path = shown[picked - MENU_RB_TRAY_BASE].clone();
+                self.removebg_set_input_and_run(&path);
+            }
+        }
+    }
+
+    /// Single-file picker (IFileOpenDialog; no new Cargo feature needed).
+    fn pick_image_file(hwnd: HWND) -> Option<String> {
+        unsafe {
+            let dialog: IFileOpenDialog =
+                CoCreateInstance(&CLSID_FileOpenDialog, None, CLSCTX_INPROC_SERVER).ok()?;
+            dialog.Show(hwnd).ok()?;
+            let item = dialog.GetResult().ok()?;
+            let name = item.GetDisplayName(SIGDN_FILESYSPATH).ok()?;
+            let s = name.to_string().ok()?;
+            CoTaskMemFree(name.0 as *const core::ffi::c_void);
+            Some(s)
+        }
+    }
+
     fn on_right_click(&mut self, x_px: i32, y_px: i32) {
         if self.pill.state != IslandState::Tray {
             return;
@@ -1461,6 +1709,13 @@ impl App {
         if self.dragging_out {
             return;
         }
+        if self.pill.state == IslandState::RemoveBg {
+            // Open tool section handles its own drop (Mac rule): stay here
+            // and highlight the card instead of switching to Tray.
+            self.drag_hovering = true;
+            self.on_paint();
+            return;
+        }
         self.suppress_hover_open_after_click_close = false;
         unsafe {
             let _ = KillTimer(self.hwnd, TIMER_CLOSE);
@@ -1507,6 +1762,21 @@ impl App {
             .ok()
             .map(|mut g| std::mem::take(&mut *g))
             .unwrap_or_default();
+        if self.pill.state == IslandState::RemoveBg {
+            // Open tool section handles its own drop (Mac rule): first image
+            // becomes Remove BG input, the rest fall through to Tray.
+            let mut used_as_input = false;
+            for path in &paths {
+                if !used_as_input && removebg::is_image_path(path) {
+                    self.removebg_set_input_and_run(path);
+                    used_as_input = true;
+                } else {
+                    let _ = self.shelf.add(path);
+                }
+            }
+            self.on_paint();
+            return;
+        }
         let mut added = false;
         for path in paths {
             if self.shelf.add(&path) {
@@ -1529,7 +1799,7 @@ impl App {
         unsafe {
             let hdrop = HDROP(hdrop_raw as *mut core::ffi::c_void);
             let count = DragQueryFileW(hdrop, u32::MAX, None);
-            let mut added = false;
+            let mut paths: Vec<String> = Vec::new();
             for i in 0..count {
                 let len = DragQueryFileW(hdrop, i, None);
                 if len == 0 {
@@ -1541,12 +1811,29 @@ impl App {
                     continue;
                 }
                 let end = buf.iter().position(|&c| c == 0).unwrap_or(buf.len());
-                let path = String::from_utf16_lossy(&buf[..end]);
-                if self.shelf.add(&path) {
+                paths.push(String::from_utf16_lossy(&buf[..end]));
+            }
+            DragFinish(hdrop);
+            if self.pill.state == IslandState::RemoveBg {
+                // Same routing as the OLE drop path (Mac rule).
+                let mut used_as_input = false;
+                for path in &paths {
+                    if !used_as_input && removebg::is_image_path(path) {
+                        self.removebg_set_input_and_run(path);
+                        used_as_input = true;
+                    } else {
+                        let _ = self.shelf.add(path);
+                    }
+                }
+                self.on_paint();
+                return;
+            }
+            let mut added = false;
+            for path in &paths {
+                if self.shelf.add(path) {
                     added = true;
                 }
             }
-            DragFinish(hdrop);
             if added {
                 self.tray_page = self
                     .shelf
@@ -1580,6 +1867,10 @@ impl App {
                 todo_editing: self.todo_editing,
                 todo_input: &self.todo_input,
                 shelf: &self.shelf,
+                removebg: &self.removebg,
+                removebg_drop_highlight: self.drag_hovering
+                    && self.pill.state == IslandState::RemoveBg
+                    && !self.dragging_out,
                 tray_page: self.tray_page,
                 tray_drop_highlight: self.drag_hovering && !self.dragging_out,
                 tray_drag_pt: self.tray_drag_pt,
@@ -1719,6 +2010,10 @@ unsafe extern "system" fn wnd_proc(
         }
         lyrics::WM_LYRICS_READY => {
             app.on_lyrics_ready();
+            LRESULT(0)
+        }
+        removebg::WM_REMOVEBG_READY => {
+            app.on_removebg_ready();
             LRESULT(0)
         }
         0x0102 => {

@@ -12,6 +12,7 @@ pub enum IslandState {
     Todo,     // todo card, 640x220
     Water,    // water card, 640x180
     Tray,     // tray shelf card, 640x280
+    RemoveBg, // remove-bg card, 640x280
 }
 
 impl IslandState {
@@ -25,6 +26,7 @@ impl IslandState {
             IslandState::Todo => (640.0, 220.0),
             IslandState::Water => (640.0, 180.0),
             IslandState::Tray => (640.0, 280.0),
+            IslandState::RemoveBg => (640.0, 280.0),
         }
     }
 
@@ -41,16 +43,18 @@ impl IslandState {
             IslandState::Todo => 2,
             IslandState::Water => 3,
             IslandState::Tray => 4,
+            IslandState::RemoveBg => 5,
         }
     }
 
     pub fn from_section_index(idx: usize) -> Self {
-        match idx % 5 {
+        match idx % 6 {
             0 => IslandState::Expanded,
             1 => IslandState::Pomodoro,
             2 => IslandState::Todo,
             3 => IslandState::Water,
-            _ => IslandState::Tray,
+            4 => IslandState::Tray,
+            _ => IslandState::RemoveBg,
         }
     }
 }
