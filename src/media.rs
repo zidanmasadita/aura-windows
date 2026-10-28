@@ -5,8 +5,10 @@
 //! MediaRemote reads). Covers Spotify, Chrome/Edge YouTube Music, etc.
 //!
 //! Polling every 0.25s: RequestAsync + GetCurrentSession +
-//! TryGetMediaPropertiesAsync + GetPlaybackInfo + GetTimelineProperties,
-//! all via blocking `.get()` on the WinRT async operations.
+//! TryGetMediaPropertiesAsync + GetPlaybackInfo + GetTimelineProperties.
+//! WinRT async waits use get_with_timeout (Status polling + queue
+//! pump + hard timeout) — plain `.get()` proved to hang forever at
+//! [manager request] on background STA threads (2026-10-28).
 //!
 //! BUG 2026-10-27 (dugaan dari kode, bukan dari log Windows): poll dan
 //! kontrol itu TADINYA jalan di UI thread (tick 250ms + klik tombol).
@@ -86,17 +88,18 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use windows::core::Result;
-use windows::Win32::Foundation::{LPARAM, WPARAM};
+use windows::Win32::Foundation::{HRESULT, LPARAM, WPARAM};
 use windows::Win32::System::Threading::GetCurrentThreadId;
 use windows::Win32::UI::WindowsAndMessaging::{
     DispatchMessageW, GetMessageW, PeekMessageW, PostThreadMessageW, SetTimer, TranslateMessage,
-    MSG, PM_NOREMOVE, WM_TIMER,
+    MSG, PM_NOREMOVE, PM_REMOVE, WM_TIMER,
 };
 use windows::Media::Control::{
     GlobalSystemMediaTransportControlsSession, GlobalSystemMediaTransportControlsSessionManager,
     GlobalSystemMediaTransportControlsSessionPlaybackStatus,
 };
 use windows::Win32::System::Com::{CoInitializeEx, COINIT_APARTMENTTHREADED};
+use windows::Foundation::{AsyncStatus, IAsyncOperation};
 
 /// Init COM (STA) untuk thread pemanggil. Best-effort: kalau sudah
 /// di-init thread itu, hasilnya diabaikan (bukan error).
@@ -106,8 +109,12 @@ use windows::Win32::System::Com::{CoInitializeEx, COINIT_APARTMENTTHREADED};
 /// terdeteksi lagi setelah poll pindah ke thread latar MTA di
 /// b19b92a — RequestAsync GSMTC tampaknya gagal / nyangkut di
 /// apartment MTA, sementara UI thread STA + message loop adalah
-/// kombinasi yang terbukti jalan. .get() di thread STA memompa
-/// pesan COM selagi menunggu, sama seperti di UI thread dulu).
+/// kombinasi yang terbukti jalan. KOREKSI 2026-10-28: .get() di thread
+/// STA latar TERBUKTI menggantung selamanya di [manager request]
+/// (diagnostik fase 49f014a; Spotify juga tidak terdeteksi, Chrome
+/// tertutup penuh tetap stuck) — STA saja tidak cukup. Penantian
+/// kini memakai get_with_timeout (Status + pump + timeout), bukan
+/// .get().
 fn init_com() {
     unsafe {
         let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
@@ -367,6 +374,41 @@ pub struct MediaInfo {
 /// Per-session property errors are still skipped (transient during
 /// track changes), and the UI's 1s None-hysteresis still covers short
 /// gaps. Status strings stay short for the no-music card line.
+/// Bounded WinRT async wait (2026-10-28: plain `.get()` hangs forever
+/// at [manager request] on this machine's background STA threads, proven
+/// by the phase diagnostic in build 49f014a — Spotify also undetected,
+/// Chrome fully closed still stuck there, so it is not a Chrome
+/// provider stall). Polls Status() while pumping this thread's queue
+/// (so COM completions can arrive) and gives up after `timeout`
+/// instead of hanging: the poll always returns, the cache always gets
+/// written, and the watchdog stops spawning incarnations. A service
+/// that truly never responds surfaces as ERROR_TIMEOUT (0x800705b4),
+/// not as an endless 'stuck'.
+fn get_with_timeout<T>(op: &IAsyncOperation<T>, timeout: Duration) -> Result<T>
+where
+    T: windows::core::RuntimeType,
+{
+    let start = Instant::now();
+    loop {
+        match op.Status()? {
+            AsyncStatus::Completed => return op.GetResults(),
+            AsyncStatus::Error | AsyncStatus::Canceled => return op.GetResults(),
+            AsyncStatus::Started => {}
+        }
+        if start.elapsed() >= timeout {
+            return Err(windows::core::Error::from(HRESULT::from_win32(1460)));
+        }
+        unsafe {
+            let mut msg = MSG::default();
+            while PeekMessageW(&mut msg, None, 0, 0, PM_REMOVE).as_bool() {
+                let _ = TranslateMessage(&msg);
+                let _ = DispatchMessageW(&msg);
+            }
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+}
+
 fn set_phase(cache: &Mutex<PollCache>, phase: &str) {
     if let Ok(mut guard) = cache.lock() {
         guard.phase = phase.to_string();
@@ -376,7 +418,7 @@ fn set_phase(cache: &Mutex<PollCache>, phase: &str) {
 pub fn poll_status(cache: &Mutex<PollCache>) -> (Option<MediaInfo>, String) {
     set_phase(cache, "manager request");
     let manager = match GlobalSystemMediaTransportControlsSessionManager::RequestAsync() {
-        Ok(op) => match op.get() {
+        Ok(op) => match get_with_timeout(&op, Duration::from_secs(3)) {
             Ok(m) => m,
             Err(e) => {
                 return (
@@ -454,7 +496,8 @@ pub fn poll() -> Option<MediaInfo> {
 
 /// One session -> MediaInfo (properties + playback + timeline).
 fn session_info(session: &GlobalSystemMediaTransportControlsSession) -> Result<MediaInfo> {
-    let props = session.TryGetMediaPropertiesAsync()?.get()?;
+    let props_op = session.TryGetMediaPropertiesAsync()?;
+    let props = get_with_timeout(&props_op, Duration::from_secs(2))?;
     let title = props.Title()?.to_string();
     let artist = props.Artist()?.to_string();
     let album = props.AlbumTitle()?.to_string();
@@ -481,7 +524,9 @@ where
     F: FnOnce(GlobalSystemMediaTransportControlsSession) -> Result<bool>,
 {
     let run = || -> Result<bool> {
-        let manager = GlobalSystemMediaTransportControlsSessionManager::RequestAsync()?.get()?;
+        let manager_op =
+            GlobalSystemMediaTransportControlsSessionManager::RequestAsync()?;
+        let manager = get_with_timeout(&manager_op, Duration::from_secs(3))?;
         let session = manager.GetCurrentSession()?;
         f(session)
     };
@@ -489,19 +534,31 @@ where
 }
 
 pub fn play() -> bool {
-    with_session(|s| Ok(s.TryPlayAsync()?.get()?))
+    with_session(|s| {
+        let op = s.TryPlayAsync()?;
+        Ok(get_with_timeout(&op, Duration::from_secs(2))?)
+    })
 }
 
 pub fn pause() -> bool {
-    with_session(|s| Ok(s.TryPauseAsync()?.get()?))
+    with_session(|s| {
+        let op = s.TryPauseAsync()?;
+        Ok(get_with_timeout(&op, Duration::from_secs(2))?)
+    })
 }
 
 pub fn skip_next() -> bool {
-    with_session(|s| Ok(s.TrySkipNextAsync()?.get()?))
+    with_session(|s| {
+        let op = s.TrySkipNextAsync()?;
+        Ok(get_with_timeout(&op, Duration::from_secs(2))?)
+    })
 }
 
 pub fn skip_previous() -> bool {
-    with_session(|s| Ok(s.TrySkipPreviousAsync()?.get()?))
+    with_session(|s| {
+        let op = s.TrySkipPreviousAsync()?;
+        Ok(get_with_timeout(&op, Duration::from_secs(2))?)
+    })
 }
 
 /// Wall-clock position estimate (realtime fix, attempt 2).
