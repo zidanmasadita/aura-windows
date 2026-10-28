@@ -1,15 +1,15 @@
-//! Todo (Phase 2, part 2): tasks from %APPDATA%/Aura/todo.txt.
+//! Todo: tasks persisted in `%APPDATA%/Aura/todo.txt`.
 //! One task per line. "[x] " = done, "[ ] " or plain = todo.
 //!
-//! Tasks are typed directly in the pill (user request 2026-10-27:
-//! no Notepad). The pill is normally NOACTIVATE, so while editing
-//! app.rs temporarily clears WS_EX_NOACTIVATE, activates the window
-//! and takes keyboard focus; leaving edit mode restores NOACTIVATE.
-//! Clicking a row toggles done (and saves).
+//! Layout and behavior match `aura-island` (`IslandView.swift` `drawTodo`):
+//! - Left column shows `{done}/{total}` + `"done"` (or `"No tasks yet"`) and `"+ Add task"` pill.
+//! - Right column shows up to 4 tasks (incomplete-first), each as a rounded pill
+//!   with circular checkmark toggle on the left and `"×"` delete button on the right.
 
 use std::fs;
 use std::path::PathBuf;
 
+#[derive(Clone, Debug)]
 pub struct Task {
     pub title: String,
     pub done: bool,
@@ -20,7 +20,6 @@ pub struct TodoList {
 }
 
 fn aura_dir() -> Option<PathBuf> {
-    // %APPDATA%/Aura, fallback %USERPROFILE%/AppData/Roaming/Aura.
     let base = std::env::var_os("APPDATA")
         .map(PathBuf::from)
         .or_else(|| {
@@ -67,7 +66,6 @@ impl TodoList {
     }
 
     pub fn save(&self) {
-        // Best-effort (never panic): create dir + write file.
         if let Some(path) = Self::path() {
             if let Some(parent) = path.parent() {
                 let _ = fs::create_dir_all(parent);
@@ -88,6 +86,25 @@ impl TodoList {
         }
     }
 
+    pub fn remove(&mut self, index: usize) {
+        if index < self.tasks.len() {
+            self.tasks.remove(index);
+            self.save();
+        }
+    }
+
+    /// Indices of tasks in Aura Mac display order (incomplete-first, up to 4 rows).
+    pub fn visible_indices(&self) -> Vec<usize> {
+        let mut indices: Vec<usize> = (0..self.tasks.len()).collect();
+        indices.sort_by_key(|&i| self.tasks[i].done);
+        indices.truncate(4);
+        indices
+    }
+
+    pub fn done_count(&self) -> usize {
+        self.tasks.iter().filter(|t| t.done).count()
+    }
+
     /// Append a task (trimmed, ignored when empty) and save.
     pub fn add(&mut self, title: &str) {
         let title = title.trim();
@@ -100,5 +117,4 @@ impl TodoList {
         });
         self.save();
     }
-
 }

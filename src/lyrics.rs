@@ -1,29 +1,26 @@
-//! Lyrics (Phase 1b): LRCLIB + lyrics.ovh fallback, LRC sync, per-song nudge.
-//!
-//! Fetch is lazy and blocking: app.rs fetches only when the user opens
-//! the lyrics panel (bubble click), never on the 1s tick, so a song
-//! change never freezes the UI on a network request. The bubble click
-//! itself may freeze briefly on a slow network (async fetch is a
-//! follow-up if that feels bad).
-//!
-//! Sources (in order): LRCLIB syncedLyrics (timestamped, syncable) ->
-//! LRCLIB plainLyrics (unsynced, shown from the top) -> lyrics.ovh
-//! lyrics (unsynced). If both sources fail or return nothing, the cache
-//! holds zero lines and the panel shows "Lyrics not available" (cached,
-//! so re-entering does not re-fetch; a network outage is therefore also
-//! cached as not-available until the song changes — acceptable for a
-//! first increment).
-//!
-//! Nudge: per-song millisecond offset, persisted in
-//! %APPDATA%/Aura/lyric-nudges.json (best-effort; in-memory only if the
-//! file cannot be written). Key is "title|artist".
-//!
-//! New WinRT surface in this increment (unproven until the user's build,
-//! like GSMTC was in Phase 1a): HttpClient + Uri::CreateUri + GetStringAsync.
-//! If `cargo build` reports a signature mismatch, paste it.
+//! Lyrics (Phase 1b + Nusa RE upgrade):
+//! - Non-blocking async MTA worker thread (`fetch_async`) that posts
+//!   `WM_LYRICS_READY` (`0x800F`, matching `nusa.exe` `0x14000B9AA`) to the HWND
+//!   when complete so clicking "Lirik" or switching songs never freezes the UI.
+//! - LRCLIB `/api/get` + Nusa's `/api/search?track_name=...&artist_name=...`
+//!   array fallback (catches remastered/featured track titles where exact `/api/get`
+//!   returns 404) + `lyrics.ovh` plain fallback.
+//! - Custom `User-Agent` header on `Windows.Web.Http.HttpClient` as required by
+//!   LRCLIB API etiquette (`nusa.exe` `0x0b0580`).
+//! - Per-song millisecond nudge persisted in `%APPDATA%/Aura/lyric-nudges.json`.
 
 use std::collections::HashMap;
 use std::path::PathBuf;
+use std::sync::{Arc, Mutex};
+
+use windows::core::{h, HSTRING};
+use windows::Foundation::Uri;
+use windows::Web::Http::HttpClient;
+use windows::Win32::Foundation::{HWND, LPARAM, WPARAM};
+use windows::Win32::UI::WindowsAndMessaging::PostMessageW;
+
+/// Posted to the main HWND when background lyrics fetch completes (Nusa `0x800F`).
+pub const WM_LYRICS_READY: u32 = 0x800F;
 
 /// One lyric line. `time_ms` is None for unsynced (plain) lyrics.
 #[derive(Clone, Debug)]
@@ -61,13 +58,42 @@ pub fn current_index(lines: &[LyricLine], position_ms: i64) -> usize {
     current
 }
 
-/// Fetch lyrics for a song (blocking). Always returns a cache, even when
-/// no lyrics were found (empty lines = not available, cached).
+/// Spawn a non-blocking MTA worker thread to fetch lyrics and post
+/// `WM_LYRICS_READY` (`0x800F`) to `hwnd` when done (`nusa.exe` `0x14000B9AA`).
+pub fn fetch_async(
+    hwnd: HWND,
+    slot: Arc<Mutex<Option<LyricsCache>>>,
+    title: String,
+    artist: String,
+    album: String,
+) {
+    let hwnd_raw = hwnd.0 as isize;
+    std::thread::spawn(move || {
+        crate::media::init_mta();
+        let result = fetch(&title, &artist, &album);
+        if let Ok(mut guard) = slot.lock() {
+            *guard = Some(result);
+        }
+        unsafe {
+            let hwnd = HWND(hwnd_raw as *mut core::ffi::c_void);
+            let _ = PostMessageW(hwnd, WM_LYRICS_READY, WPARAM(0), LPARAM(0));
+        }
+    });
+}
+
+/// Fetch lyrics for a song (runs on the MTA worker thread).
+/// Order:
+/// 1. LRCLIB `/api/get` (synced preferred)
+/// 2. LRCLIB `/api/search` (Nusa's primary search endpoint — handles slight title/album diffs)
+/// 3. LRCLIB plainLyrics fallback
+/// 4. `lyrics.ovh` plain fallback
 pub fn fetch(title: &str, artist: &str, album: &str) -> LyricsCache {
     let key = key_for(title, artist);
     let nudge_ms = load_nudge(&key);
-    // LRCLIB first (synced preferred, plain fallback).
-    if let Ok(text) = http_get(&lrclib_url(title, artist, album)) {
+    let mut plain_candidate: Option<Vec<LyricLine>> = None;
+
+    // 1. LRCLIB exact /api/get
+    if let Ok(text) = http_get(&lrclib_get_url(title, artist, album)) {
         if let Ok(value) = serde_json::from_str::<serde_json::Value>(&text) {
             if let Some(synced) = value.get("syncedLyrics").and_then(|v| v.as_str()) {
                 if !synced.trim().is_empty() {
@@ -84,17 +110,60 @@ pub fn fetch(title: &str, artist: &str, album: &str) -> LyricsCache {
             }
             if let Some(plain) = value.get("plainLyrics").and_then(|v| v.as_str()) {
                 if !plain.trim().is_empty() {
-                    return LyricsCache {
-                        key,
-                        lines: parse_plain(plain),
-                        synced: false,
-                        nudge_ms,
-                    };
+                    let parsed = parse_plain(plain);
+                    if !parsed.is_empty() {
+                        plain_candidate = Some(parsed);
+                    }
                 }
             }
         }
     }
-    // Fallback: lyrics.ovh (plain only).
+
+    // 2. LRCLIB /api/search (Nusa's endpoint: returns array of matching tracks)
+    if let Ok(text) = http_get(&lrclib_search_url(title, artist)) {
+        if let Ok(serde_json::Value::Array(items)) = serde_json::from_str::<serde_json::Value>(&text)
+        {
+            for item in &items {
+                if let Some(synced) = item.get("syncedLyrics").and_then(|v| v.as_str()) {
+                    if !synced.trim().is_empty() {
+                        let lines = parse_lrc(synced);
+                        if !lines.is_empty() {
+                            return LyricsCache {
+                                key,
+                                lines,
+                                synced: true,
+                                nudge_ms,
+                            };
+                        }
+                    }
+                }
+            }
+            if plain_candidate.is_none() {
+                for item in &items {
+                    if let Some(plain) = item.get("plainLyrics").and_then(|v| v.as_str()) {
+                        if !plain.trim().is_empty() {
+                            let parsed = parse_plain(plain);
+                            if !parsed.is_empty() {
+                                plain_candidate = Some(parsed);
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    if let Some(lines) = plain_candidate {
+        return LyricsCache {
+            key,
+            lines,
+            synced: false,
+            nudge_ms,
+        };
+    }
+
+    // 3. Fallback: lyrics.ovh (plain only).
     if let Ok(text) = http_get(&lyrics_ovh_url(title, artist)) {
         if let Ok(value) = serde_json::from_str::<serde_json::Value>(&text) {
             if let Some(plain) = value.get("lyrics").and_then(|v| v.as_str()) {
@@ -109,6 +178,7 @@ pub fn fetch(title: &str, artist: &str, album: &str) -> LyricsCache {
             }
         }
     }
+
     LyricsCache {
         key,
         lines: Vec::new(),
@@ -117,7 +187,7 @@ pub fn fetch(title: &str, artist: &str, album: &str) -> LyricsCache {
     }
 }
 
-fn lrclib_url(title: &str, artist: &str, album: &str) -> String {
+fn lrclib_get_url(title: &str, artist: &str, album: &str) -> String {
     let mut url = format!(
         "https://lrclib.net/api/get?artist_name={}&track_name={}",
         url_encode(artist),
@@ -129,6 +199,14 @@ fn lrclib_url(title: &str, artist: &str, album: &str) -> String {
     url
 }
 
+fn lrclib_search_url(title: &str, artist: &str) -> String {
+    format!(
+        "https://lrclib.net/api/search?track_name={}&artist_name={}",
+        url_encode(title),
+        url_encode(artist)
+    )
+}
+
 fn lyrics_ovh_url(title: &str, artist: &str) -> String {
     format!(
         "https://api.lyrics.ovh/v1/{}/{}",
@@ -138,8 +216,6 @@ fn lyrics_ovh_url(title: &str, artist: &str) -> String {
 }
 
 /// Percent-encode a string for a URL (query value or path segment).
-/// Alphanumerics + -_.~ pass through; everything else (including space
-/// and non-ASCII UTF-8 bytes) becomes %XX.
 fn url_encode(s: &str) -> String {
     let mut out = String::new();
     for &b in s.as_bytes() {
@@ -153,20 +229,19 @@ fn url_encode(s: &str) -> String {
     out
 }
 
-/// Blocking HTTP GET via WinRT HttpClient (same .get() pattern as GSMTC).
+/// HTTP GET via WinRT `HttpClient` on an MTA thread with `User-Agent` header
+/// (`nusa.exe` `0x14000B9AA`).
 fn http_get(url: &str) -> windows::core::Result<String> {
-    use windows::core::HSTRING;
-    use windows::Foundation::Uri;
-    use windows::Web::Http::HttpClient;
     let client = HttpClient::new()?;
+    if let Ok(headers) = client.DefaultRequestHeaders() {
+        let _ = headers.Append(h!("User-Agent"), h!("Aura-Notch/1.0 (Windows)"));
+    }
     let uri = Uri::CreateUri(&HSTRING::from(url))?;
     let text = client.GetStringAsync(&uri)?.get()?;
     Ok(text.to_string())
 }
 
-/// Parse LRC text into timestamped lines. Skips metadata ([ti:], [ar:],
-/// etc.) and lines without a parseable timestamp. Strips word-timing
-/// tags (<00:12.34>) from the text. Result is sorted by time.
+/// Parse LRC text into timestamped lines.
 fn parse_lrc(text: &str) -> Vec<LyricLine> {
     let mut lines: Vec<LyricLine> = Vec::new();
     for raw in text.lines() {
@@ -182,7 +257,6 @@ fn parse_lrc(text: &str) -> Vec<LyricLine> {
             continue;
         };
         let mut lyric = line[close + 1..].trim().to_string();
-        // Strip <...> word-timing tags.
         while let Some(start) = lyric.find('<') {
             if let Some(end_rel) = lyric[start..].find('>') {
                 let end = start + end_rel + 1;
@@ -200,7 +274,6 @@ fn parse_lrc(text: &str) -> Vec<LyricLine> {
     lines
 }
 
-/// Parse an LRC timestamp "mm:ss.xx" (fraction optional, 1-3 digits).
 fn parse_lrc_time(s: &str) -> Option<i64> {
     let (mm, rest) = s.split_once(':')?;
     let minutes: i64 = mm.trim().parse().ok()?;
@@ -228,7 +301,6 @@ fn parse_lrc_time(s: &str) -> Option<i64> {
     Some(minutes * 60_000 + seconds * 1_000 + millis)
 }
 
-/// Parse plain lyrics text into unsynced lines (blank lines skipped).
 fn parse_plain(text: &str) -> Vec<LyricLine> {
     text.lines()
         .map(|l| l.trim_end_matches('\r').trim().to_string())
@@ -264,7 +336,6 @@ fn nudges_path() -> Option<PathBuf> {
     None
 }
 
-/// Load the saved nudge (ms) for a song key, or 0 when none is saved.
 pub fn load_nudge(key: &str) -> i64 {
     let Some(path) = nudges_path() else {
         return 0;
@@ -275,13 +346,10 @@ pub fn load_nudge(key: &str) -> i64 {
     let Ok(value) = serde_json::from_str::<serde_json::Value>(&text) else {
         return 0;
     };
-    value
-        .get(key)
-        .and_then(|v| v.as_i64())
-        .unwrap_or(0)
+    value.get(key).and_then(|v| v.as_i64()).unwrap_or(0)
 }
 
-/// Save a nudge (ms) for a song key (best-effort, never panics).
+#[allow(dead_code)]
 pub fn save_nudge(key: &str, nudge_ms: i64) {
     let Some(path) = nudges_path() else {
         return;

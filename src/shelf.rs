@@ -1,16 +1,19 @@
-//! Tray shelf (Phase 3a): file references dragged in from Explorer.
+//! Tray shelf: file references dragged in from Explorer, matching `aura-island` (`IslandView.swift` `drawTray`).
 //! References only — Clear / Remove never delete the actual file.
-//! Persisted as JSON %APPDATA%/Aura/tray.json: {"files": [paths]}.
-//! Stale references (file moved/deleted) are kept and drawn dim, like
-//! Aura Mac; they can be removed but not opened. Drag-out (copy to
-//! Explorer) and LAN share arrive in Phase 3b; this increment is
-//! drag-in + grid + open + remove + clear.
+//! Persisted as JSON `%APPDATA%/Aura/tray.json`: `{"files": [paths]}`.
 
 use std::fs;
 use std::path::{Path, PathBuf};
 
 pub struct Shelf {
     pub files: Vec<String>,
+}
+
+pub struct ShelfFileInfo {
+    pub name: String,
+    pub is_dir: bool,
+    pub size_text: String,
+    pub exists: bool,
 }
 
 fn aura_dir() -> Option<PathBuf> {
@@ -21,6 +24,49 @@ fn aura_dir() -> Option<PathBuf> {
                 .map(|p| PathBuf::from(p).join("AppData").join("Roaming"))
         })?;
     Some(base.join("Aura"))
+}
+
+pub fn format_bytes(bytes: u64) -> String {
+    if bytes < 1024 {
+        format!("{} B", bytes)
+    } else if bytes < 1024 * 1024 {
+        format!("{:.1} KB", bytes as f64 / 1024.0)
+    } else if bytes < 1024 * 1024 * 1024 {
+        format!("{:.1} MB", bytes as f64 / 1_048_576.0)
+    } else {
+        format!("{:.1} GB", bytes as f64 / 1_073_741_824.0)
+    }
+}
+
+pub fn file_info(path: &str) -> ShelfFileInfo {
+    let p = Path::new(path);
+    let name = p
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or_else(|| path.rsplit(['\\', '/']).next().unwrap_or(path))
+        .to_string();
+    match fs::metadata(p) {
+        Ok(meta) => {
+            let is_dir = meta.is_dir();
+            let size_text = if is_dir {
+                "Folder".to_string()
+            } else {
+                format_bytes(meta.len())
+            };
+            ShelfFileInfo {
+                name,
+                is_dir,
+                size_text,
+                exists: true,
+            }
+        }
+        Err(_) => ShelfFileInfo {
+            name: format!("{} (missing)", name),
+            is_dir: false,
+            size_text: "0 B".to_string(),
+            exists: false,
+        },
+    }
 }
 
 impl Shelf {
@@ -63,8 +109,6 @@ impl Shelf {
         }
     }
 
-    /// Add a dropped path (file or folder) if it exists and is not
-    /// already referenced. Returns true when a new reference was added.
     pub fn add(&mut self, path: &str) -> bool {
         let trimmed = path.trim();
         if trimmed.is_empty() || !Path::new(trimmed).exists() {

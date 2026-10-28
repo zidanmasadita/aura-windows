@@ -1,321 +1,508 @@
-//! GSMTC media sensor + controls (Phase 1, music card).
-//! Uses the public Windows GSMTC API (GlobalSystemMediaTransportControls
-//! SessionManager) — no Chrome extension, no Accessibility prompt, unlike
-//! Mac (which needed JXA because macOS 15.4+ blocks third-party
-//! MediaRemote reads). Covers Spotify, Chrome/Edge YouTube Music, etc.
+//! GSMTC media sensor + controls + WIC cover art decoder.
 //!
-//! Polling every 0.25s: RequestAsync + GetCurrentSession +
-//! TryGetMediaPropertiesAsync + GetPlaybackInfo + GetTimelineProperties.
-//! WinRT async waits use get_with_timeout (Status polling + queue
-//! pump + hard timeout) — plain `.get()` proved to hang forever at
-//! [manager request] on background STA threads (2026-10-28).
-//!
-//! BUG 2026-10-27 (dugaan dari kode, bukan dari log Windows): poll dan
-//! kontrol itu TADINYA jalan di UI thread (tick 250ms + klik tombol).
-//! Kalau satu panggilan WinRT `.get()` itu nunggu lama (mis. app media
-//! sibuk saat play), message loop ikut berhenti dan Windows menandai
-//! window "Not Responding". Karena itu sejak fix ini poll + kontrol
-//! TIDAK PERNAH jalan di UI thread lagi: poll jalan di satu thread
-//! latar yang menulis cache, kontrol jalan di thread sekali-pakai.
-//! UI thread (tick) hanya membaca cache — jadi kalaupun satu poll
-//! nyangkut, pill tetap responsif (progress/judul boleh beku, tapi
-//! window tidak Not Responding; itu sekaligus pemisah diagnostik:
-//! kalau setelah fix ini UI responsif tapi judul/progress beku,
-//! berarti poll GSMTC-nya yang nyangkut di app media itu).
-//!
-//! Position: GSMTC Position alone is NOT realtime for some apps (they
-//! set it on track change/seek only, not during playback), so App feeds
-//! every poll through MediaTracker (below), which advances the position
-//! by wall-clock elapsed time while Playing.
-//!
-//! Artwork thumbnail decoding (WIC) is NOT in this increment: the music
-//! card draws a placeholder cover box until basic title/artist/progress/
-//! controls are verified working. Thumbnail arrives after that.
-//!
-//! Fix 2026-10-28 (deteksi intermittent, lebih sering tidak kedetect):
-//! - poll_status kini mengutamakan sesi PLAYING dari daftar semua sesi
-//!   dibanding GetCurrentSession mentah: kode lama mengembalikan sesi
-//!   current apa adanya bila ada judulnya, walau itu sesi paused yang
-//!   sudah basi sementara aplikasi lain sedang memutar lagu.
-//! - Poller kini loop thread + satu worker per poll + watchdog: satu
-//!   .get() yang nyangkut dulu membekukan cache di None selamanya;
-//!   kini worker tanpa cache write >10 detik ditinggalkan (written_seq
-//!   guard) dan diganti, dengan backoff 3s -> 30s.
-//! - Kontrol jalan di thread STA sekali-pakai DENGAN queue+loop
-//!   sendiri, pelajaran yang sama dengan poller (thread tanpa queue
-//!   tidak pernah kembali dari RequestAsync di sini).
-//! Penyebab pasti di mesin user tidak bisa dibuktikan dari VM ini
-//! (tidak ada Rust/Windows di sini); fix ini menutup tiga jalur
-//! gagal yang nyata ada di kode + status line menunjukkan kasus
-//! stuck bila terjadi ("poll stuck, worker restarted").
-//! Lanjutan 2026-10-28 (laporan user: status stuck muncul):
-//! - Ambang watchdog 3s -> 10s dan tulisan worker basi tidak lagi
-//!   dibuang mentah-mentah (written_seq): poll lambat tapi selesai
-//!   kini tetap mendarat; hanya worker yang benar-benar menggantung
-//!   yang diganti. Ambang 3s sebelumnya bisa salah menuduh poll
-//!   lambat sebagai stuck, lalu membuang hasilnya sendiri.
-//! - Urutan poll diubah: current-yang-Playing dulu (fast path),
-//!   baru pindai daftar untuk Playing — satu sesi macet di daftar
-//!   tidak lagi memblokir sesi sehat yang sedang diputar.
-//! RE Nusa 2026-10-28 (status stuck MASIH muncul setelah fix 10 detik):
-//! - Poller diganti ke gaya Nusa: SATU STA loop thread dengan timer
-//!   (RE: Nusa memakai satu message-loop thread tulisan tangan +
-//!   timer, tanpa worker-thread polling di mana pun di biner).
-//!   Worker-thread Aura adalah outlier — dan karena stuck bertahan
-//!   melewati ambang 10 detik, worker terbukti tidak pernah selesai
-//!   sama sekali, cocok dengan kegagalan tanpa-pump yang sudah
-//!   didokumentasikan tim (b19b92a/9f1f911).
-//! - Poll kini INLINE di timer handler thread yang dipump (satu-satunya
-//!   bentuk yang terbukti mengembalikan hasil di riwayat Aura).
-//!   Watchdog thread terpisah (tanpa COM, hanya Atomics) melaporkan
-//!   freeze dan menelurkan incarnation baru bila tidak ada cache
-//!   write >10 detik; incarnation lama yang belakangan lolos tetap
-//!   boleh menulis sekali (data segar yang tersedia), lalu keluar
-//!   di tick berikutnya — gate lama terbukti membuang poll lambat
-//!   selamanya sehingga 'stuck' tampil permanen (fix malam 28 Okt).
-//! - Batas kejujuran: RE membuktikan arsitektur timer + single-thread
-//!   Nusa, BUKAN pola panggil GSMTC persisnya (poll vs event WinRT
-//!   tidak bisa dipulihkan dari biner stripped — hanya string
-//!   runtime-class GSMTC yang ada). Yang diikuti adalah arsitektur,
-//!   bukan klaim salinan panggilan GSMTC Nusa.
-//! If `cargo build` reports a signature mismatch (notably `.get()` on
-//! IAsyncOperation, HSTRING conversion, or TimeSpan field access), paste
-//! it — Eve cannot compile Rust in this VM, so the first build on the
-//! user's Windows PC is where WinRT signatures get corrected.
+//! Exact 1:1 port of Nusa (`nusa.exe` static disassembly):
+//! 1. **`RoInitialize(RO_INIT_MULTITHREADED)` + `.get()` (`0x14000AB44`, `0x140039D37`)**:
+//!    Initializes MTA via `RoInitialize(RO_INIT_MULTITHREADED)` and calls
+//!    `GlobalSystemMediaTransportControlsSessionManager::RequestAsync()?.get()`
+//!    ONCE at startup.
+//! 2. **`GetCurrentSession()` Only — Never `GetSessions()` (`0x14002339C`, `0x14007A6CB`)**:
+//!    Nusa ONLY queries `manager.GetCurrentSession()` (vtable `+0x30`) and NEVER
+//!    iterates `manager.GetSessions()`. Iterating `GetSessions()` queries suspended/zombie
+//!    browser tabs, which wedges Windows's `NPSMSvc` (`Now Playing Session Manager Service`)
+//!    after a few minutes and causes subsequent `RequestAsync()` calls to time out
+//!    (`0x800705b4`) until `NPSMSvc` or the PC is restarted.
+//! 3. **Event-Driven Subscriptions (`0x14002339C`, `0x14002676A`)**:
+//!    Subscribes `TypedEventHandler` on `manager.CurrentSessionChanged` (`+0x40`) and
+//!    on the active session's `PlaybackInfoChanged` (`+0xD8`, flag 1),
+//!    `TimelinePropertiesChanged` (`+0xC8`, flag 2), and `MediaPropertiesChanged`
+//!    (`+0xE8`, flag 4).
+//! 4. **One-Shot MTA Worker for `TryGetMediaPropertiesAsync()` + WIC Cover Art (`0x14000A5E8`)**:
+//!    Only when the session changes or `MediaPropertiesChanged` fires, increments an
+//!    atomic generation counter (`0x1400B5CB0`) and spawns a one-shot MTA thread to
+//!    call `TryGetMediaPropertiesAsync()?.get()` and decode `Thumbnail()` via
+//!    `DataReader` + WIC `IWICImagingFactory` (`0x1400033CF`).
 
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
+use std::sync::{Arc, Condvar, Mutex, OnceLock};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use windows::core::{HRESULT, Result};
-use windows::Win32::Foundation::{LPARAM, WPARAM};
-use windows::Win32::System::Threading::GetCurrentThreadId;
-use windows::Win32::UI::WindowsAndMessaging::{
-    DispatchMessageW, GetMessageW, PeekMessageW, PostThreadMessageW, SetTimer, TranslateMessage,
-    MSG, PM_NOREMOVE, PM_REMOVE, WM_TIMER,
-};
+use windows::core::{Interface, Result};
+use windows::Foundation::{EventRegistrationToken, TypedEventHandler};
 use windows::Media::Control::{
-    GlobalSystemMediaTransportControlsSession, GlobalSystemMediaTransportControlsSessionManager,
-    GlobalSystemMediaTransportControlsSessionPlaybackStatus,
+    CurrentSessionChangedEventArgs, GlobalSystemMediaTransportControlsSession,
+    GlobalSystemMediaTransportControlsSessionManager,
+    GlobalSystemMediaTransportControlsSessionMediaProperties,
+    GlobalSystemMediaTransportControlsSessionPlaybackStatus, MediaPropertiesChangedEventArgs,
+    PlaybackInfoChangedEventArgs, TimelinePropertiesChangedEventArgs,
 };
-use windows::Win32::System::Com::{CoInitializeEx, COINIT_APARTMENTTHREADED};
-use windows::Foundation::{AsyncStatus, IAsyncOperation};
+use windows::Storage::Streams::{DataReader, IInputStream};
+use windows::Win32::Foundation::{HWND, LPARAM, WPARAM};
+use windows::Win32::Graphics::Imaging::{
+    CLSID_WICImagingFactory, GUID_WICPixelFormat32bppPBGRA, IWICBitmapFrameDecode,
+    IWICBitmapSource, IWICFormatConverter, IWICImagingFactory, IWICStream,
+    WICBitmapDitherTypeNone, WICBitmapInterpolationModeFant, WICBitmapPaletteTypeMedianCut,
+    WICDecodeMetadataCacheOnDemand,
+};
+use windows::Win32::System::Com::{CoCreateInstance, CLSCTX_INPROC_SERVER};
+use windows::Win32::System::WinRT::{RoInitialize, RO_INIT_MULTITHREADED};
+use windows::Win32::UI::WindowsAndMessaging::PostMessageW;
 
-/// Init COM (STA) untuk thread pemanggil. Best-effort: kalau sudah
-/// di-init thread itu, hasilnya diabaikan (bukan error).
-///
-/// STA, bukan MTA, dengan sengaja (dugaan dari timeline 2026-10-27:
-/// musik terdeteksi saat poll jalan di UI thread, lalu TIDAK
-/// terdeteksi lagi setelah poll pindah ke thread latar MTA di
-/// b19b92a — RequestAsync GSMTC tampaknya gagal / nyangkut di
-/// apartment MTA, sementara UI thread STA + message loop adalah
-/// kombinasi yang terbukti jalan. KOREKSI 2026-10-28: .get() di thread
-/// STA latar TERBUKTI menggantung selamanya di [manager request]
-/// (diagnostik fase 49f014a; Spotify juga tidak terdeteksi, Chrome
-/// tertutup penuh tetap stuck) — STA saja tidak cukup. Penantian
-/// kini memakai get_with_timeout (Status + pump + timeout), bukan
-/// .get().
-fn init_com() {
+/// Posted to the main HWND whenever GSMTC state updates (Nusa `0x8003`).
+pub const WM_MEDIA_UPDATE: u32 = 0x8003;
+
+/// Event bitmask flags (matching Nusa `0x14002676A` wParam conventions).
+pub const FLAG_PLAYBACK: u32 = 1;
+pub const FLAG_TIMELINE: u32 = 2;
+pub const FLAG_PROPS: u32 = 4;
+pub const FLAG_SESSION: u32 = 8;
+
+/// Cover art decode target resolution (112x112 physical pixels = 2x for 56x56 DIP box).
+pub const COVER_SIZE: u32 = 112;
+
+/// 100ns ticks between 1601-01-01 (Win32 FILETIME / WinRT DateTime epoch) and 1970-01-01 (Unix epoch).
+const FILETIME_UNIX_DIFF_TICKS: i64 = 116_444_736_000_000_000;
+
+/// Initialize MTA WinRT apartment on the calling worker thread (`nusa.exe` `0x14000AB4D`:
+/// `mov ecx, 1; call RoInitialize`).
+pub fn init_mta() {
     unsafe {
-        let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
+        let _ = RoInitialize(RO_INIT_MULTITHREADED);
     }
 }
 
-/// Start the background poller: one STA thread with its OWN
-/// message loop, polling GSMTC every 250ms on a thread timer and
-/// writing the result into `cache`. The UI thread only ever reads
-/// the cache, never calls poll() itself.
-///
-/// Why a message loop, and why this is the third attempt:
-/// - b19b92a poller (MTA, sleep loop): cache stayed None.
-/// - 9f1f911 poller (STA, sleep loop): cache stayed None.
-/// - ca373ed poll on the UI thread (1s): app went "Not Responding"
-///   immediately after run.
-/// The common thread of the two poller failures: a thread with NO
-/// message queue/loop never returns from RequestAsync().get() — the
-/// WinRT async completion cannot be delivered to it, so .get()
-/// waits forever and the cache never updates. The UI thread has a
-/// message loop (which is why Phase 1 polling worked there), but
-/// blocking it with .get() now freezes the window outright. So the
-/// poller thread gets its own loop: PeekMessage creates the queue,
-/// SetTimer(None, ...) posts WM_TIMER to that thread every 250ms,
-/// and GetMessage dispatches it; poll() runs inside that loop, where
-/// .get() can pump the completion messages. A stuck poll only
-/// freezes this thread's cache, never the main window.
-/// Shared state for the Nusa-style poller (see spawn_poller).
-/// Only one poller incarnation polls at a time BY DESIGN, but an
-/// incarnation frozen inside .get() cannot stop itself: a separate
-/// watchdog thread watches last_write and spawns a fresh incarnation.
-/// Generation marks the active incarnation; a superseded one exits
-/// at its next timer tick instead of polling forever. Writes are
-/// NOT generation-gated (see incarnation handler): a late write is
-/// still the freshest available data.
-struct PollerShared {
-    cache: Arc<Mutex<PollCache>>,
-    generation: AtomicU64,
-    tick_counter: AtomicU64,
-    health: Mutex<PollerHealth>,
+/// Wake signal shared between WinRT event callbacks, control threads, and the coordinator.
+struct EventSignal {
+    flags: Mutex<u32>,
+    cv: Condvar,
 }
 
-struct PollerHealth {
-    last_write: Instant,
-    backoff_secs: u64,
-    next_respawn_at: Instant,
-}
+impl EventSignal {
+    fn new() -> Self {
+        Self {
+            flags: Mutex::new(FLAG_SESSION | FLAG_PROPS | FLAG_PLAYBACK | FLAG_TIMELINE),
+            cv: Condvar::new(),
+        }
+    }
 
-/// Start the poller, Nusa-style (RE 2026-10-28, static-findings.md):
-/// Nusa runs everything on ONE hand-written message-loop thread with
-/// timers (timer 1 = main tick; animation on a re-armed timer; no
-/// worker-thread polling anywhere in the binary). Aura's worker
-/// threads were the outlier — and after the 10s-threshold fix the
-/// "poll stuck" status STILL persisted, i.e. workers never complete
-/// at all on this machine. That matches the team's own documented
-/// failure (b19b92a/9f1f911): a thread whose queue is created but
-/// never pumped never returns from RequestAsync().get().
-/// So: the poll runs INLINE in a pumped STA loop thread's timer
-/// handler (the configuration that demonstrably returned results in
-/// Aura's own history), and a watchdog thread (no COM, only Atomics)
-/// reports a freeze and spawns a fresh incarnation when no cache
-/// write lands for >10s. A superseded incarnation that later
-/// unblocks writes once if it completes, then exits at its next
-/// timer tick (see handler).
-/// Honest limit: the RE proved Nusa's timer-driven single-thread
-/// architecture, not its exact GSMTC call pattern (poll vs WinRT
-/// events is not recoverable from the stripped binary — only the
-/// runtime-class string is). This follows the architecture, not a
-/// claimed copy of Nusa's GSMTC calls.
-pub fn spawn_poller(cache: Arc<Mutex<PollCache>>) {
-    let shared = Arc::new(PollerShared {
-        cache,
-        generation: AtomicU64::new(0),
-        tick_counter: AtomicU64::new(0),
-        health: Mutex::new(PollerHealth {
-            last_write: Instant::now(),
-            backoff_secs: 3,
-            next_respawn_at: Instant::now(),
-        }),
-    });
-    spawn_poller_incarnation(shared.clone());
-    // Watchdog: sleep loop, no COM, never touches GSMTC.
-    std::thread::spawn(move || loop {
-        std::thread::sleep(Duration::from_millis(250));
-        let now = Instant::now();
-        let mut respawn = false;
-        if let Ok(mut health) = shared.health.lock() {
-            if now.duration_since(health.last_write) > Duration::from_secs(10)
-                && now >= health.next_respawn_at
-            {
-                shared.generation.fetch_add(1, Ordering::SeqCst);
-                health.next_respawn_at = now + Duration::from_secs(health.backoff_secs);
-                health.backoff_secs = (health.backoff_secs * 3).min(30);
-                respawn = true;
+    fn notify(&self, bits: u32) {
+        if let Ok(mut guard) = self.flags.lock() {
+            *guard |= bits;
+            self.cv.notify_all();
+        }
+    }
+
+    fn wait_timeout(&self, timeout: Duration) -> u32 {
+        let Ok(mut guard) = self.flags.lock() else {
+            std::thread::sleep(timeout);
+            return FLAG_PLAYBACK | FLAG_TIMELINE;
+        };
+        if *guard == 0 {
+            if let Ok((g, _)) = self.cv.wait_timeout(guard, timeout) {
+                guard = g;
+            } else {
+                return FLAG_PLAYBACK | FLAG_TIMELINE;
             }
         }
-        if respawn {
-            if let Ok(mut guard) = shared.cache.lock() {
-                guard.status = "poll stuck, loop restarted".to_string();
-            }
-            spawn_poller_incarnation(shared.clone());
-        }
-    });
+        let bits = *guard;
+        *guard = 0;
+        bits
+    }
 }
 
-/// One poller incarnation: STA thread, own queue, 250ms timer, poll
-/// INLINE in the timer handler (pumped thread — the only shape that
-/// ever returned results here). Exits when its message loop ends
-/// (practically never; superseded incarnations are abandoned, not
-/// killed — a frozen one just leaks; a superseded one that later
-/// unblocks writes once, then exits at its next timer tick).
-fn spawn_poller_incarnation(shared: Arc<PollerShared>) {
+static GLOBAL_SIGNAL: OnceLock<Arc<EventSignal>> = OnceLock::new();
+static PROPS_GENERATION: AtomicU64 = AtomicU64::new(0);
+
+fn signal_media_event(bits: u32) {
+    if let Some(sig) = GLOBAL_SIGNAL.get() {
+        sig.notify(bits);
+    }
+}
+
+/// Cached metadata + cover art written by the one-shot MTA properties thread (`0x14000A5E8`).
+#[derive(Clone, Default)]
+struct CachedTrackProps {
+    session_id: String,
+    title: String,
+    artist: String,
+    album: String,
+    cover_bgra: Option<Arc<Vec<u8>>>,
+    cover_w: u32,
+    cover_h: u32,
+}
+
+/// Active event registration tokens on the tracked `GlobalSystemMediaTransportControlsSession`
+/// (`nusa.exe` `0x1400239B9`).
+struct SessionSubscriptions {
+    session: GlobalSystemMediaTransportControlsSession,
+    session_id: String,
+    playback_token: Option<EventRegistrationToken>,
+    timeline_token: Option<EventRegistrationToken>,
+    props_token: Option<EventRegistrationToken>,
+}
+
+impl Drop for SessionSubscriptions {
+    fn drop(&mut self) {
+        if let Some(tok) = self.playback_token.take() {
+            let _ = self.session.RemovePlaybackInfoChanged(tok);
+        }
+        if let Some(tok) = self.timeline_token.take() {
+            let _ = self.session.RemoveTimelinePropertiesChanged(tok);
+        }
+        if let Some(tok) = self.props_token.take() {
+            let _ = self.session.RemoveMediaPropertiesChanged(tok);
+        }
+    }
+}
+
+/// Start the Nusa-style MTA + event-driven GSMTC coordinator (`0x14000AB44` + `0x14002339C`).
+pub fn spawn_poller(hwnd: HWND, cache: Arc<Mutex<PollCache>>) {
+    let signal = GLOBAL_SIGNAL
+        .get_or_init(|| Arc::new(EventSignal::new()))
+        .clone();
+    let hwnd_raw = hwnd.0 as isize;
+    let shared_props = Arc::new(Mutex::new(CachedTrackProps::default()));
+
     std::thread::spawn(move || {
-        init_com();
-        let gen = shared.generation.load(Ordering::SeqCst);
-        // Manager cache lokal inkarnasi ini (lihat poll_status).
-        let mut manager_cache: Option<
+        init_mta();
+        let hwnd = HWND(hwnd_raw as *mut core::ffi::c_void);
+
+        // Step 1: Request SessionManager ONCE via `.get()` on this MTA thread,
+        // identical to Nusa's `0x14000AB44` -> `0x14007B933` -> `0x140039D37`.
+        set_phase(&cache, "manager request (MTA)");
+        let manager = match GlobalSystemMediaTransportControlsSessionManager::RequestAsync()
+            .and_then(|op| op.get())
+        {
+            Ok(mgr) => mgr,
+            Err(e) => {
+                update_cache(
+                    &cache,
+                    None,
+                    format!("request failed {:#010x}", e.code().0 as u32),
+                    "error",
+                );
+                return;
+            }
+        };
+
+        // Subscribe to `CurrentSessionChanged` (`nusa.exe` `0x14002902F`, vtable `+0x40`).
+        let sig_mgr = signal.clone();
+        let mgr_handler = TypedEventHandler::<
             GlobalSystemMediaTransportControlsSessionManager,
-        > = None;
-        unsafe {
-            let mut msg = MSG::default();
-            let _ = PeekMessageW(&mut msg, None, 0, 0, PM_NOREMOVE);
-            // Poll 1 detik (bukan 250ms): sensor Mac juga 1 detik,
-            // dan RequestAsync tiap poll diduga menghambat service.
-            let _ = SetTimer(None, 1, 1000, None);
-            loop {
-                let ret = GetMessageW(&mut msg, None, 0, 0);
-                if ret.0 <= 0 {
-                    break;
+            CurrentSessionChangedEventArgs,
+        >::new(move |_, _| {
+            sig_mgr.notify(FLAG_SESSION | FLAG_PROPS | FLAG_PLAYBACK | FLAG_TIMELINE);
+            Ok(())
+        });
+        let _mgr_token = manager.CurrentSessionChanged(&mgr_handler).ok();
+
+        let mut active_sub: Option<SessionSubscriptions> = None;
+        let tick_counter = AtomicU64::new(0);
+
+        loop {
+            let flags = signal.wait_timeout(Duration::from_millis(1000));
+            let tick = tick_counter.fetch_add(1, Ordering::Relaxed) + 1;
+
+            // Step 2: Query `manager.GetCurrentSession()` ONLY (`nusa.exe` `0x1400233CF` -> `0x14007A6CB`).
+            // Never call `GetSessions()` so we never touch suspended background browser tabs.
+            let Ok(session) = manager.GetCurrentSession() else {
+                drop(active_sub.take());
+                if let Ok(mut gp) = shared_props.lock() {
+                    *gp = CachedTrackProps::default();
                 }
-                if msg.message == WM_TIMER {
-                    // Superseded incarnation: exit instead of polling
-                    // forever alongside its replacement (bounds leaked
-                    // threads; the replacement already polls).
-                    if shared.generation.load(Ordering::SeqCst) != gen {
-                        break;
-                    }
-                    let tick = shared.tick_counter.fetch_add(1, Ordering::SeqCst) + 1;
-                    let (info, status) =
-                        poll_status(&shared.cache, &mut manager_cache);
-                    // Accept EVERY completed poll (fix 2026-10-28 malam):
-                    // the old generation gate discarded slow polls
-                    // forever — a poll slower than the watchdog fuse
-                    // was replaced, then its result rejected, then the
-                    // replacement was replaced too, so no write ever
-                    // landed and 'poll stuck' showed permanently even
-                    // though polls eventually completed. A late write
-                    // is still the freshest available data; the next
-                    // poll (1000ms later) corrects any staleness.
-                    if let Ok(mut guard) = shared.cache.lock() {
-                        *guard = PollCache {
-                            info,
-                            status: format!("{} | #{}", status, tick),
-                            phase: "done".to_string(),
-                        };
-                    }
-                    if let Ok(mut health) = shared.health.lock() {
-                        health.last_write = Instant::now();
-                        health.backoff_secs = 3;
-                    }
-                } else {
-                    let _ = TranslateMessage(&msg);
-                    let _ = DispatchMessageW(&msg);
+                update_cache(&cache, None, format!("no session | #{}", tick), "done");
+                unsafe {
+                    let _ = PostMessageW(hwnd, WM_MEDIA_UPDATE, WPARAM(flags as usize), LPARAM(0));
                 }
+                continue;
+            };
+
+            let session_id = session
+                .SourceAppUserModelId()
+                .map(|s| s.to_string())
+                .unwrap_or_default();
+
+            // Step 3: Re-bind session events if the current session changed (`nusa.exe` `0x1400234EB..0x140023650`).
+            let session_changed = active_sub
+                .as_ref()
+                .map(|s| s.session_id != session_id)
+                .unwrap_or(true);
+
+            if session_changed {
+                drop(active_sub.take());
+                let sig_p = signal.clone();
+                let hp = TypedEventHandler::<
+                    GlobalSystemMediaTransportControlsSession,
+                    PlaybackInfoChangedEventArgs,
+                >::new(move |_, _| {
+                    sig_p.notify(FLAG_PLAYBACK | FLAG_TIMELINE);
+                    Ok(())
+                });
+                let playback_token = session.PlaybackInfoChanged(&hp).ok();
+
+                let sig_t = signal.clone();
+                let ht = TypedEventHandler::<
+                    GlobalSystemMediaTransportControlsSession,
+                    TimelinePropertiesChangedEventArgs,
+                >::new(move |_, _| {
+                    sig_t.notify(FLAG_TIMELINE);
+                    Ok(())
+                });
+                let timeline_token = session.TimelinePropertiesChanged(&ht).ok();
+
+                let sig_m = signal.clone();
+                let hm = TypedEventHandler::<
+                    GlobalSystemMediaTransportControlsSession,
+                    MediaPropertiesChangedEventArgs,
+                >::new(move |_, _| {
+                    sig_m.notify(FLAG_PROPS | FLAG_TIMELINE);
+                    Ok(())
+                });
+                let props_token = session.MediaPropertiesChanged(&hm).ok();
+
+                active_sub = Some(SessionSubscriptions {
+                    session: session.clone(),
+                    session_id: session_id.clone(),
+                    playback_token,
+                    timeline_token,
+                    props_token,
+                });
+            }
+
+            // Step 4: Spawn one-shot MTA worker (`nusa.exe` `0x14000A5E8`) when session changed,
+            // `MediaPropertiesChanged` fired (`FLAG_PROPS`), or cached title is still empty.
+            let title_empty = shared_props
+                .lock()
+                .ok()
+                .map(|g| g.title.is_empty() || g.session_id != session_id)
+                .unwrap_or(true);
+
+            if session_changed || (flags & (FLAG_PROPS | FLAG_SESSION)) != 0 || title_empty {
+                let gen = PROPS_GENERATION.fetch_add(1, Ordering::SeqCst) + 1;
+                let session_clone = session.clone();
+                let sid_clone = session_id.clone();
+                let props_slot = shared_props.clone();
+                let sig_done = signal.clone();
+                std::thread::spawn(move || {
+                    init_mta();
+                    if let Ok(op) = session_clone.TryGetMediaPropertiesAsync() {
+                        if let Ok(props) = op.get() {
+                            if PROPS_GENERATION.load(Ordering::SeqCst) != gen {
+                                return;
+                            }
+                            let title = props.Title().map(|s| s.to_string()).unwrap_or_default();
+                            let artist = props.Artist().map(|s| s.to_string()).unwrap_or_default();
+                            let album =
+                                props.AlbumTitle().map(|s| s.to_string()).unwrap_or_default();
+                            let decoded = decode_session_thumbnail(&props);
+                            if PROPS_GENERATION.load(Ordering::SeqCst) != gen {
+                                return;
+                            }
+                            if let Ok(mut guard) = props_slot.lock() {
+                                guard.session_id = sid_clone;
+                                guard.title = title;
+                                guard.artist = artist;
+                                guard.album = album;
+                                if let Some((bgra, w, h)) = decoded {
+                                    guard.cover_bgra = Some(Arc::new(bgra));
+                                    guard.cover_w = w;
+                                    guard.cover_h = h;
+                                } else {
+                                    guard.cover_bgra = None;
+                                    guard.cover_w = 0;
+                                    guard.cover_h = 0;
+                                }
+                            }
+                            sig_done.notify(FLAG_PLAYBACK | FLAG_TIMELINE);
+                        }
+                    }
+                });
+            }
+
+            // Step 5: Synchronous playback + timeline read (`nusa.exe` `0x14002383D` + `0x1400270FF`).
+            let playing = session
+                .GetPlaybackInfo()
+                .and_then(|info| info.PlaybackStatus())
+                .map(|st| st == GlobalSystemMediaTransportControlsSessionPlaybackStatus::Playing)
+                .unwrap_or(false);
+
+            let (position_secs, duration_secs) = read_realtime_timeline(&session, playing);
+
+            let snapshot = shared_props.lock().ok().map(|g| g.clone()).unwrap_or_default();
+            if snapshot.title.is_empty() && snapshot.artist.is_empty() {
+                update_cache(
+                    &cache,
+                    None,
+                    format!("session active, loading props... | #{}", tick),
+                    "done",
+                );
+            } else {
+                let info = MediaInfo {
+                    title: snapshot.title,
+                    artist: snapshot.artist,
+                    album: snapshot.album,
+                    source_app: session_id,
+                    playing,
+                    position_secs,
+                    duration_secs,
+                    cover_bgra: snapshot.cover_bgra,
+                    cover_w: snapshot.cover_w,
+                    cover_h: snapshot.cover_h,
+                };
+                update_cache(
+                    &cache,
+                    Some(info),
+                    format!("ok ({}) | #{}", if playing { "playing" } else { "paused" }, tick),
+                    "done",
+                );
+            }
+
+            unsafe {
+                let _ = PostMessageW(hwnd, WM_MEDIA_UPDATE, WPARAM(flags as usize), LPARAM(0));
             }
         }
     });
 }
 
-/// Message a control thread posts to itself (see spawn_control).
-const CONTROL_MSG: u32 = 0x8002; // WM_APP + 2 (tray callback uses 0x8001)
+fn update_cache(cache: &Mutex<PollCache>, info: Option<MediaInfo>, status: String, phase: &str) {
+    if let Ok(mut guard) = cache.lock() {
+        guard.info = info;
+        guard.status = status;
+        guard.phase = phase.to_string();
+    }
+}
 
-/// Run a control action on a throwaway STA thread WITH its own message
-/// queue + loop. Same lesson as the poller: a bare thread (init_com +
-/// direct .get(), no queue) never returns from RequestAsync on this
-/// machine's COM setup (b19b92a/9f1f911). The thread posts itself
-/// CONTROL_MSG, runs the action while its loop owns the queue, then
-/// exits. Fire-and-forget, like before: the next poll refreshes the
-/// card icon/progress within a tick.
+fn set_phase(cache: &Mutex<PollCache>, phase: &str) {
+    if let Ok(mut guard) = cache.lock() {
+        guard.phase = phase.to_string();
+    }
+}
+
+/// Nusa's exact timeline calculation (`0x1400270FF..0x1400273A5`):
+/// Uses `Position - StartTime`, `EndTime - StartTime`, and when `playing == true`,
+/// adds `Now_FILETIME - LastUpdatedTime` so position is exact without drift.
+fn read_realtime_timeline(
+    session: &GlobalSystemMediaTransportControlsSession,
+    playing: bool,
+) -> (f64, f64) {
+    let Ok(timeline) = session.GetTimelineProperties() else {
+        return (0.0, 0.0);
+    };
+    let start_ticks = timeline.StartTime().map(|t| t.Duration).unwrap_or(0);
+    let end_ticks = timeline.EndTime().map(|t| t.Duration).unwrap_or(0);
+    let raw_pos_ticks = timeline.Position().map(|t| t.Duration).unwrap_or(0);
+    let last_updated_ticks = timeline
+        .LastUpdatedTime()
+        .map(|dt| dt.UniversalTime)
+        .unwrap_or(0);
+
+    let dur_ticks = (end_ticks - start_ticks).max(0);
+    let mut pos_ticks = (raw_pos_ticks - start_ticks).max(0);
+
+    if playing && last_updated_ticks > 0 {
+        let now_unix_ticks = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| (d.as_nanos() / 100) as i64)
+            .unwrap_or(0);
+        if now_unix_ticks > 0 {
+            let now_filetime_ticks = now_unix_ticks + FILETIME_UNIX_DIFF_TICKS;
+            let delta_ticks = now_filetime_ticks - last_updated_ticks;
+            if delta_ticks > 0 && delta_ticks < 432_000_000_000 {
+                pos_ticks += delta_ticks;
+            }
+        }
+    }
+
+    if dur_ticks > 0 && pos_ticks > dur_ticks {
+        pos_ticks = dur_ticks;
+    }
+
+    let position_secs = (pos_ticks as f64 / 10_000_000.0).max(0.0);
+    let duration_secs = (dur_ticks as f64 / 10_000_000.0).max(0.0);
+    (position_secs, duration_secs)
+}
+
+/// Decode GSMTC `Thumbnail()` (`IRandomAccessStreamReference`) into `COVER_SIZE x COVER_SIZE`
+/// premultiplied BGRA pixels using `DataReader` + WIC (`nusa.exe` `0x1400033CF` & `0x14000AA0A`).
+fn decode_session_thumbnail(
+    props: &GlobalSystemMediaTransportControlsSessionMediaProperties,
+) -> Option<(Vec<u8>, u32, u32)> {
+    let thumb_ref = props.Thumbnail().ok()?;
+    let stream = thumb_ref.OpenReadAsync().ok()?.get().ok()?;
+    let size = (stream.Size().ok()? as usize).min(8 * 1024 * 1024);
+    if size == 0 {
+        return None;
+    }
+    let input: IInputStream = stream.cast().ok()?;
+    let reader = DataReader::CreateDataReader(&input).ok()?;
+    let loaded = reader.LoadAsync(size as u32).ok()?.get().ok()? as usize;
+    if loaded == 0 {
+        return None;
+    }
+    let mut raw_bytes = vec![0u8; loaded];
+    reader.ReadBytes(&mut raw_bytes).ok()?;
+    let _ = reader.Close();
+
+    decode_image_bytes_wic(&raw_bytes, COVER_SIZE, COVER_SIZE)
+}
+
+/// Decode arbitrary encoded image bytes (PNG/JPEG/BMP/WebP) into `target_w x target_h`
+/// 32-bit premultiplied BGRA (`GUID_WICPixelFormat32bppPBGRA`) via WIC.
+pub fn decode_image_bytes_wic(
+    bytes: &[u8],
+    target_w: u32,
+    target_h: u32,
+) -> Option<(Vec<u8>, u32, u32)> {
+    unsafe {
+        let factory: IWICImagingFactory =
+            CoCreateInstance(&CLSID_WICImagingFactory, None, CLSCTX_INPROC_SERVER).ok()?;
+        let wic_stream: IWICStream = factory.CreateStream().ok()?;
+        wic_stream.InitializeFromMemory(bytes).ok()?;
+        let decoder = factory
+            .CreateDecoderFromStream(&wic_stream, std::ptr::null(), WICDecodeMetadataCacheOnDemand)
+            .ok()?;
+        let frame: IWICBitmapFrameDecode = decoder.GetFrame(0).ok()?;
+
+        let scaler = factory.CreateBitmapScaler().ok()?;
+        let frame_src: IWICBitmapSource = frame.cast().ok()?;
+        scaler
+            .Initialize(
+                &frame_src,
+                target_w,
+                target_h,
+                WICBitmapInterpolationModeFant,
+            )
+            .ok()?;
+
+        let converter: IWICFormatConverter = factory.CreateFormatConverter().ok()?;
+        let scaler_src: IWICBitmapSource = scaler.cast().ok()?;
+        converter
+            .Initialize(
+                &scaler_src,
+                &GUID_WICPixelFormat32bppPBGRA,
+                WICBitmapDitherTypeNone,
+                None,
+                0.0,
+                WICBitmapPaletteTypeMedianCut,
+            )
+            .ok()?;
+
+        let stride = target_w * 4;
+        let buf_size = (stride * target_h) as usize;
+        let mut pixels = vec![0u8; buf_size];
+        converter
+            .CopyPixels(std::ptr::null(), stride, &mut pixels)
+            .ok()?;
+        Some((pixels, target_w, target_h))
+    }
+}
+
+/// Run a media control command on a one-shot MTA worker thread (`nusa.exe` `0x14000ABBC`)
+/// and immediately wake the GSMTC coordinator.
 fn spawn_control(action: fn() -> bool) {
     std::thread::spawn(move || {
-        init_com();
-        unsafe {
-            let mut msg = MSG::default();
-            let _ = PeekMessageW(&mut msg, None, 0, 0, PM_NOREMOVE);
-            let tid = GetCurrentThreadId();
-            let _ = PostThreadMessageW(tid, CONTROL_MSG, WPARAM(action as usize), LPARAM(0));
-            loop {
-                let ret = GetMessageW(&mut msg, None, 0, 0);
-                if ret.0 <= 0 {
-                    break;
-                }
-                if msg.message == CONTROL_MSG {
-                    let f: fn() -> bool = std::mem::transmute(msg.wParam.0);
-                    let _ = f();
-                    break;
-                }
-                let _ = TranslateMessage(&msg);
-                let _ = DispatchMessageW(&msg);
-            }
-        }
+        init_mta();
+        let _ = action();
+        signal_media_event(FLAG_PLAYBACK | FLAG_TIMELINE | FLAG_PROPS);
     });
 }
 
@@ -335,234 +522,12 @@ pub fn skip_previous_async() {
     spawn_control(skip_previous);
 }
 
-/// Poll cache: what the last poll found + a short status string
-/// shown on the no-music card, so a failed detection can be diagnosed
-/// from a screenshot instead of guessing (waiting / no session /
-/// request failed / sessions: N, none usable / ...).
-#[derive(Clone)]
-pub struct PollCache {
-    pub info: Option<MediaInfo>,
-    pub status: String,
-    // In-flight poll step, written DURING the poll (not only on
-    // completion), so a hung .get() still reports where it stuck.
-    pub phase: String,
-}
-
-impl PollCache {
-    pub fn waiting() -> Self {
-        Self {
-            info: None,
-            status: "waiting for first poll...".to_string(),
-            phase: "starting".to_string(),
-        }
-    }
-}
-
-/// Current media state for the music card + compact/zen decisions.
-#[derive(Clone, Debug)]
-pub struct MediaInfo {
-    pub title: String,
-    pub artist: String,
-    pub album: String,
-    pub playing: bool,
-    pub position_secs: f64,
-    pub duration_secs: f64,
-}
-
-/// Poll with a status string. Selection order (fix 2026-10-28,
-/// revisi malam yang sama setelah laporan 'poll stuck'):
-/// 1. Current session bila PLAYING (fast path lama): kembali
-///    langsung tanpa memindai daftar, supaya satu sesi macet di
-///    daftar tidak memblokir sesi sehat yang sedang diputar.
-/// 2. PLAYING session dari daftar penuh (memperbaiki bug lama di
-///    mana current paused yang basi mengalahkan sesi Playing lain
-///    — satu penyebab langsung 'musik tidak kedetect' saat lagu jalan).
-/// 3. Current paused bertitel, lalu 4. paused pertama dari daftar.
-/// Per-session property errors are still skipped (transient during
-/// track changes), and the UI's 1s None-hysteresis still covers short
-/// gaps. Status strings stay short for the no-music card line.
-/// Bounded WinRT async wait (2026-10-28: plain `.get()` hangs forever
-/// at [manager request] on this machine's background STA threads, proven
-/// by the phase diagnostic in build 49f014a — Spotify also undetected,
-/// Chrome fully closed still stuck there, so it is not a Chrome
-/// provider stall). Polls Status() while pumping this thread's queue
-/// (so COM completions can arrive) and gives up after `timeout`
-/// instead of hanging: the poll always returns, the cache always gets
-/// written, and the watchdog stops spawning incarnations. A service
-/// that truly never responds surfaces as ERROR_TIMEOUT (0x800705b4),
-/// not as an endless 'stuck'.
-fn get_with_timeout<T>(op: &IAsyncOperation<T>, timeout: Duration) -> Result<T>
-where
-    T: windows::core::RuntimeType,
-{
-    let start = Instant::now();
-    loop {
-        match op.Status()? {
-            AsyncStatus::Completed => return op.GetResults(),
-            AsyncStatus::Error | AsyncStatus::Canceled => return op.GetResults(),
-            AsyncStatus::Started => {}
-            // AsyncStatus adalah newtype i32 di 0.58 (bukan enum Rust),
-            // jadi match harus exhaustive terhadap nilai liar apa pun.
-            _ => {}
-        }
-        if start.elapsed() >= timeout {
-            return Err(windows::core::Error::from(HRESULT::from_win32(1460)));
-        }
-        unsafe {
-            let mut msg = MSG::default();
-            while PeekMessageW(&mut msg, None, 0, 0, PM_REMOVE).as_bool() {
-                let _ = TranslateMessage(&msg);
-                let _ = DispatchMessageW(&msg);
-            }
-        }
-        std::thread::sleep(Duration::from_millis(10));
-    }
-}
-
-fn set_phase(cache: &Mutex<PollCache>, phase: &str) {
-    if let Ok(mut guard) = cache.lock() {
-        guard.phase = phase.to_string();
-    }
-}
-
-pub fn poll_status(
-    cache: &Mutex<PollCache>,
-    manager_cache: &mut Option<GlobalSystemMediaTransportControlsSessionManager>,
-) -> (Option<MediaInfo>, String) {
-    // Manager cache (2026-10-28 malam): deteksi jalan segar setelah
-    // restart PC, lalu manager request mulai timeout dalam hitungan
-    // menit — dugaan utama: RequestAsync baru tiap poll (4x/detik)
-    // menghambat service. Minta manager SEKALI per inkarnasi lalu
-    // pakai ulang; GetCurrentSession/GetSessions pada manager yang
-    // di-cache tetap mengembalikan sesi TERKINI tiap poll. Cache
-    // bersifat lokal thread inkarnasi ini (tidak dibagi antar
-    // thread). Bila query sesi error, cache dibuang di bawah supaya
-    // poll berikutnya meminta manager baru.
-    let manager = if let Some(m) = manager_cache.clone() {
-        m
-    } else {
-        set_phase(cache, "manager request");
-        match GlobalSystemMediaTransportControlsSessionManager::RequestAsync() {
-            Ok(op) => match get_with_timeout(&op, Duration::from_secs(3)) {
-                Ok(m) => {
-                    *manager_cache = Some(m.clone());
-                    m
-                }
-                Err(e) => {
-                    return (
-                        None,
-                        format!("request failed {:#010x}", e.code().0 as u32),
-                    )
-                }
-            },
-            Err(e) => {
-                return (
-                    None,
-                    format!("request failed {:#010x}", e.code().0 as u32),
-                )
-            }
-        }
-    };
-    set_phase(cache, "current props");
-    // 1. Current session dulu (fast path lama): bila Playing,
-    //    langsung kembali tanpa memindai daftar.
-    let mut current_fallback: Option<MediaInfo> = None;
-    if let Ok(session) = manager.GetCurrentSession() {
-        if let Ok(info) = session_info(&session) {
-            if !info.title.is_empty() {
-                if info.playing {
-                    return (Some(info), "ok".to_string());
-                }
-                current_fallback = Some(info);
-            }
-        }
-    } else {
-        // Manager diduga basi: buang supaya poll berikutnya minta baru.
-        *manager_cache = None;
-    }
-    set_phase(cache, "session list");
-    // 2. Daftar penuh: cari yang Playing.
-    let mut paused_fallback: Option<MediaInfo> = None;
-    let mut session_count: u32 = 0;
-    if let Ok(sessions) = manager.GetSessions() {
-        let size = sessions.Size().unwrap_or(0);
-        session_count = size;
-        for i in 0..size {
-            set_phase(cache, &format!("list props {}/{}", i + 1, size));
-            let Ok(session) = sessions.GetAt(i) else {
-                continue;
-            };
-            let Ok(info) = session_info(&session) else {
-                continue;
-            };
-            if info.title.is_empty() {
-                continue;
-            }
-            if info.playing {
-                return (Some(info), "ok (playing)".to_string());
-            }
-            if paused_fallback.is_none() {
-                paused_fallback = Some(info);
-            }
-        }
-    } else {
-        // Manager diduga basi: buang supaya poll berikutnya minta baru.
-        *manager_cache = None;
-    }
-    // 3. Paused fallbacks: current first, then list.
-    if let Some(info) = current_fallback {
-        return (Some(info), "ok (current, paused)".to_string());
-    }
-    if let Some(info) = paused_fallback {
-        return (Some(info), "ok (session list, paused)".to_string());
-    }
-    if session_count == 0 {
-        (None, "no session".to_string())
-    } else {
-        (None, format!("sessions: {}, none usable", session_count))
-    }
-}
-
-/// Kept for callers that only need the info (controls do not use it).
-pub fn poll() -> Option<MediaInfo> {
-    let dummy = Mutex::new(PollCache::waiting());
-    let mut mgr = None;
-    poll_status(&dummy, &mut mgr).0
-}
-
-/// One session -> MediaInfo (properties + playback + timeline).
-fn session_info(session: &GlobalSystemMediaTransportControlsSession) -> Result<MediaInfo> {
-    let props_op = session.TryGetMediaPropertiesAsync()?;
-    let props = get_with_timeout(&props_op, Duration::from_secs(2))?;
-    let title = props.Title()?.to_string();
-    let artist = props.Artist()?.to_string();
-    let album = props.AlbumTitle()?.to_string();
-    let info = session.GetPlaybackInfo()?;
-    let playing =
-        info.PlaybackStatus()? == GlobalSystemMediaTransportControlsSessionPlaybackStatus::Playing;
-    let timeline = session.GetTimelineProperties()?;
-    let position_secs = timeline.Position()?.Duration as f64 / 10_000_000.0;
-    let duration_secs = timeline.EndTime()?.Duration as f64 / 10_000_000.0;
-    Ok(MediaInfo {
-        title,
-        artist,
-        album,
-        playing,
-        position_secs: position_secs.max(0.0),
-        duration_secs: duration_secs.max(0.0),
-    })
-}
-
-/// Run a control action against the current session. Returns false when
-/// there is no session or the action fails (caller ignores the result).
 fn with_session<F>(f: F) -> bool
 where
     F: FnOnce(GlobalSystemMediaTransportControlsSession) -> Result<bool>,
 {
     let run = || -> Result<bool> {
-        let manager_op =
-            GlobalSystemMediaTransportControlsSessionManager::RequestAsync()?;
-        let manager = get_with_timeout(&manager_op, Duration::from_secs(3))?;
+        let manager = GlobalSystemMediaTransportControlsSessionManager::RequestAsync()?.get()?;
         let session = manager.GetCurrentSession()?;
         f(session)
     };
@@ -570,62 +535,58 @@ where
 }
 
 pub fn play() -> bool {
-    with_session(|s| {
-        let op = s.TryPlayAsync()?;
-        Ok(get_with_timeout(&op, Duration::from_secs(2))?)
-    })
+    with_session(|s| s.TryPlayAsync()?.get())
 }
 
 pub fn pause() -> bool {
-    with_session(|s| {
-        let op = s.TryPauseAsync()?;
-        Ok(get_with_timeout(&op, Duration::from_secs(2))?)
-    })
+    with_session(|s| s.TryPauseAsync()?.get())
 }
 
 pub fn skip_next() -> bool {
-    with_session(|s| {
-        let op = s.TrySkipNextAsync()?;
-        Ok(get_with_timeout(&op, Duration::from_secs(2))?)
-    })
+    with_session(|s| s.TrySkipNextAsync()?.get())
 }
 
 pub fn skip_previous() -> bool {
-    with_session(|s| {
-        let op = s.TrySkipPreviousAsync()?;
-        Ok(get_with_timeout(&op, Duration::from_secs(2))?)
-    })
+    with_session(|s| s.TrySkipPreviousAsync()?.get())
 }
 
-/// Wall-clock position estimate (realtime fix, attempt 2).
-///
-/// Some GSMTC apps do not update TimelineProperties.Position during
-/// normal playback (they set it on track change/seek only), so polling
-/// Position alone looks frozen even with a fast tick + synchronous
-/// paint (both already in place since 89fbe58, and still not realtime
-/// per user report 2026-10-27). This tracker advances the position by
-/// real elapsed time while Playing, and re-syncs to GSMTC only when
-/// GSMTC itself jumps (seek, or an app catch-up after lag).
-///
-/// Rules (per poll, same song):
-/// - Playing: estimated += elapsed (Instant, monotonic, no drift).
-/// - Paused: estimated frozen.
-/// - If GSMTC position jumped by >2s since last poll (seek, or app
-///   finally reporting a new position after lag), adopt GSMTC (seek
-///   target wins; catch-up lands on the estimate anyway, so no jump).
-/// - New song (title|artist changed) or session gap: re-anchor to GSMTC.
-/// - Clamp to [0, duration] (when duration is known).
-///
-/// PlaybackStatus (playing/paused) and title/artist are updated
-/// promptly by apps even when Position is not, so the estimate stays
-/// correct. If an app DOES update Position every poll, the estimate
-/// tracks it within timer jitter (<0.5s) and only re-syncs on seeks.
+#[derive(Clone)]
+pub struct PollCache {
+    pub info: Option<MediaInfo>,
+    pub status: String,
+    pub phase: String,
+}
+
+impl PollCache {
+    pub fn waiting() -> Self {
+        Self {
+            info: None,
+            status: "waiting for GSMTC (MTA)...".to_string(),
+            phase: "starting".to_string(),
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct MediaInfo {
+    pub title: String,
+    pub artist: String,
+    pub album: String,
+    pub source_app: String,
+    pub playing: bool,
+    pub position_secs: f64,
+    pub duration_secs: f64,
+    pub cover_bgra: Option<Arc<Vec<u8>>>,
+    pub cover_w: u32,
+    pub cover_h: u32,
+}
+
 pub struct MediaTracker {
     initialized: bool,
     last_key: String,
     last_raw_secs: f64,
     estimated_secs: f64,
-    last_update: std::time::Instant,
+    last_update: Instant,
     playing: bool,
 }
 
@@ -636,14 +597,11 @@ impl MediaTracker {
             last_key: String::new(),
             last_raw_secs: 0.0,
             estimated_secs: 0.0,
-            last_update: std::time::Instant::now(),
+            last_update: Instant::now(),
             playing: false,
         }
     }
 
-    /// Feed a raw poll result, get back the same info with an estimated
-    /// (realtime) position. None passes through (and resets, so the
-    /// next session re-anchors instead of guessing across the gap).
     pub fn update(&mut self, raw: Option<MediaInfo>) -> Option<MediaInfo> {
         let mut raw = match raw {
             Some(m) => m,
@@ -653,25 +611,23 @@ impl MediaTracker {
             }
         };
         let key = format!("{}|{}", raw.title, raw.artist);
-        let now = std::time::Instant::now();
+        let now = Instant::now();
         if !self.initialized || key != self.last_key {
-            // New song (or first poll): anchor to GSMTC.
             self.estimated_secs = raw.position_secs;
             self.last_raw_secs = raw.position_secs;
             self.last_key = key;
             self.initialized = true;
         } else {
-            // Same song: advance by elapsed while previously playing.
             if self.playing {
                 let elapsed = now.duration_since(self.last_update).as_secs_f64();
                 self.estimated_secs += elapsed;
             }
-            // Re-sync if GSMTC jumped (seek, or app catch-up after lag).
-            if (raw.position_secs - self.last_raw_secs).abs() > 2.0 {
+            if (raw.position_secs - self.estimated_secs).abs() > 1.5
+                || (raw.position_secs - self.last_raw_secs).abs() > 1.5
+            {
                 self.estimated_secs = raw.position_secs;
             }
             self.last_raw_secs = raw.position_secs;
-            // Clamp to [0, duration] when duration is known.
             if raw.duration_secs > 0.0 && self.estimated_secs > raw.duration_secs {
                 self.estimated_secs = raw.duration_secs;
             }

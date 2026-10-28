@@ -1,17 +1,17 @@
 //! Pill/card state + logical sizes (Aura Mac points, scaled by DPI at runtime).
 //! Logical sizes are in Aura points (Mac). Physical pixels = logical * dpi_scale.
-//! Card sizes are exact Aura Mac values (verified from IslandView.expandedSize).
+//! Card sizes are exact Aura Mac values (`IslandView.expandedSize` / `closedSize`).
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum IslandState {
-    Zen,      // idle, 140x32
-    Compact,  // music pill, 180x32 (Phase 0 placeholder: clock + waveform)
+    Zen,      // idle, 140x32 (two cursor-tracking eyes)
+    Compact,  // closed pill: 180x32 (music), 160x32 (pomodoro active), 360x32 (lyrics mode or alert)
     Expanded, // music card, 520x180
-    Lyrics,   // lyrics panel, 700x180 (same height as music, wider)
+    Lyrics,   // lyrics panel, 700x180 (compressed music left + lyrics right)
     Pomodoro, // pomodoro card, 640x180
-    Todo, // todo card, 640x220
-    Water, // water card, 640x180
-    Tray, // tray shelf card, 640x280 (Phase 3a)
+    Todo,     // todo card, 640x220
+    Water,    // water card, 640x180
+    Tray,     // tray shelf card, 640x280
 }
 
 impl IslandState {
@@ -25,6 +25,32 @@ impl IslandState {
             IslandState::Todo => (640.0, 220.0),
             IslandState::Water => (640.0, 180.0),
             IslandState::Tray => (640.0, 280.0),
+        }
+    }
+
+    pub fn is_expanded(self) -> bool {
+        !matches!(self, IslandState::Zen | IslandState::Compact)
+    }
+
+    /// Section index for the right-edge vertical page dots (0..5).
+    /// Lyrics belongs to the Music section (0), matching `IslandView.sectionForDots`.
+    pub fn section_index(self) -> usize {
+        match self {
+            IslandState::Expanded | IslandState::Lyrics | IslandState::Zen | IslandState::Compact => 0,
+            IslandState::Pomodoro => 1,
+            IslandState::Todo => 2,
+            IslandState::Water => 3,
+            IslandState::Tray => 4,
+        }
+    }
+
+    pub fn from_section_index(idx: usize) -> Self {
+        match idx % 5 {
+            0 => IslandState::Expanded,
+            1 => IslandState::Pomodoro,
+            2 => IslandState::Todo,
+            3 => IslandState::Water,
+            _ => IslandState::Tray,
         }
     }
 }
@@ -45,9 +71,5 @@ impl PillState {
             width: w,
             height: h,
         }
-    }
-
-    pub fn target_size(&self) -> (f32, f32) {
-        self.state.logical_size()
     }
 }

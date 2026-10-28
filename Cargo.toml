@@ -19,6 +19,8 @@ windows = { version = "0.58", features = [
     "Win32_Graphics_Dxgi",
     "Win32_Graphics_Dxgi_Common",
     "Win32_Graphics_Gdi",
+    "Win32_Graphics_Imaging",
+    "Win32_Media_Audio",
     "Win32_System_LibraryLoader",
     "Win32_System_Threading",
     "Win32_System_Com",
@@ -26,12 +28,19 @@ windows = { version = "0.58", features = [
     "Win32_System_Com_StructuredStorage", # Phase 3b fix: STGMEDIUM + IDataObject_Impl live behind this feature
     "Win32_System_Ole", # Phase 3b: DoDragDrop, IDataObject, IDropSource, OleInitialize
     "Win32_System_Memory", # Phase 3b: GlobalAlloc for CF_HDROP
+    "Win32_System_Power", # Phase 4 / Nusa RE: GetSystemPowerStatus, RegisterPowerSettingNotification
+    "Win32_System_Registry", # Phase 4 / Nusa RE: Start with Windows (CurrentVersion\Run)
     "Win32_System_SystemServices", # MODIFIERKEYS_FLAGS (IDropSource QueryContinueDrag param type)
+    "Win32_System_WinRT", # RoInitialize / RO_INIT_MULTITHREADED
     "Win32_Security",
     "Media_Control",
     "Foundation",
     "Foundation_Collections",
+    "Storage_Streams",
     "Web_Http",
+    "Web_Http_Headers",
+    "Devices_Bluetooth",
+    "Devices_Enumeration",
 ] }
 windows-core = "0.58" # Phase 3b fix: #[implement] expands to windows_core paths; without a direct dep the macro fails with E0433
 chrono = "0.4"

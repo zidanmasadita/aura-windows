@@ -45,10 +45,32 @@ impl Pomodoro {
 
     /// Select a mode (resets to that mode's full duration, stopped).
     pub fn select_mode(&mut self, mode: PomodoroMode) {
+        if self.mode == mode {
+            return;
+        }
         self.mode = mode;
         self.running = false;
         self.ends_at = None;
         self.paused_remaining_secs = mode.duration_secs();
+    }
+
+    /// Reset current mode timer to its full duration, stopped.
+    pub fn reset(&mut self) {
+        self.running = false;
+        self.ends_at = None;
+        self.paused_remaining_secs = self.mode.duration_secs();
+    }
+
+    /// True when a countdown is live (running, or paused mid-countdown),
+    /// matching `IslandView.isPomodoroActive` on Aura Mac.
+    pub fn is_active(&self, now: DateTime<Local>) -> bool {
+        let rem = self.remaining(now);
+        let dur = self.mode.duration_secs();
+        self.running || (rem > 0 && rem < dur)
+    }
+
+    pub fn duration_secs(&self) -> i64 {
+        self.mode.duration_secs()
     }
 
     /// Start (or resume) / pause toggle.
@@ -81,15 +103,19 @@ impl Pomodoro {
         }
     }
 
-    /// If running and time is up, stop (shows 00:00, button back to Start).
-    pub fn check_finished(&mut self, now: DateTime<Local>) {
+    /// If running and time is up, stop (shows 00:00, button back to Start)
+    /// and return true so the caller can play Nusa's procedural WAV chime.
+    pub fn check_finished(&mut self, now: DateTime<Local>) -> bool {
         if self.running && self.remaining(now) <= 0 {
             self.running = false;
             self.ends_at = None;
             self.paused_remaining_secs = 0;
+            return true;
         }
+        false
     }
 
+    #[allow(dead_code)]
     pub fn button_label(&self) -> &'static str {
         if self.running {
             "Pause"
