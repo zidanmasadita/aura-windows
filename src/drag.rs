@@ -12,19 +12,23 @@
 //! STGMEDIUM/IDataObject_Impl need feature Win32_System_Com_StructuredStorage,
 //! #[implement] needs windows-core as a direct dependency, GlobalFree lives
 //! in Win32::Foundation (not System::Memory), and DV_E_* are literals above.
+//! _Impl traits live in the r#impl submodule (Com::r#impl, Ole::r#impl),
+//! not at the namespace root (proven by registry grep 2026-10-28).
 
 use std::mem::ManuallyDrop;
 
 use windows::core::{implement, HRESULT};
 use windows::Win32::Foundation::{BOOL, E_INVALIDARG, E_NOTIMPL, E_OUTOFMEMORY, GlobalFree, HGLOBAL, POINT};
+use windows::Win32::System::Com::r#impl::IDataObject_Impl;
 use windows::Win32::System::Com::{
     ADVF, DVASPECT_CONTENT, FORMATETC, IAdviseSink,
-    IDataObject, IDataObject_Impl, IEnumFORMATETC, IEnumSTATDATA, STGMEDIUM, STGMEDIUM_0,
+    IDataObject, IEnumFORMATETC, IEnumSTATDATA, STGMEDIUM, STGMEDIUM_0,
     TYMED_HGLOBAL,
 };
 use windows::Win32::System::Memory::{GlobalAlloc, GlobalLock, GlobalUnlock, GMEM_MOVEABLE};
+use windows::Win32::System::Ole::r#impl::IDropSource_Impl;
 use windows::Win32::System::Ole::{
-    DoDragDrop, CF_HDROP, DROPEFFECT, DROPEFFECT_COPY, IDropSource, IDropSource_Impl,
+    DoDragDrop, CF_HDROP, DROPEFFECT, DROPEFFECT_COPY, IDropSource,
 };
 use windows::Win32::System::SystemServices::MODIFIERKEYS_FLAGS;
 use windows::Win32::UI::Shell::DROPFILES;
