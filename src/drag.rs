@@ -21,6 +21,9 @@
 //! takes u32 + Option sink and returns Result<u32>; FORMATETC/STGMEDIUM
 //! fields are primitives (u16/u32), and GlobalAlloc returns Result.
 //! TYMED itself is i32-based in 0.58, so TYMED_HGLOBAL.0 is cast to u32.
+//! #[implement] pattern (proven by compiler 2026-10-28): implement the
+//! trait for the GENERATED <Name>_Impl struct, not the original struct
+//! (the generated struct derefs to the original, so field access works).
 
 use std::mem::ManuallyDrop;
 
@@ -108,7 +111,7 @@ struct FileDataObject {
     path: String,
 }
 
-impl IDataObject_Impl for FileDataObject {
+impl IDataObject_Impl for FileDataObject_Impl {
     fn GetData(
         &self,
         pformatetc: *const FORMATETC,
@@ -209,7 +212,7 @@ impl IDataObject_Impl for FileDataObject {
 #[implement(IDropSource)]
 struct DropSource;
 
-impl IDropSource_Impl for DropSource {
+impl IDropSource_Impl for DropSource_Impl {
     fn QueryContinueDrag(
         &self,
         fescapepressed: BOOL,
