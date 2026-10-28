@@ -1,0 +1,235 @@
+//! OLE drag-out for tray tiles (Phase 3b): drag a tile out of the pill
+//! into Explorer (or any CF_HDROP target) as a COPY.
+//!
+//! Minimal IDataObject (CF_HDROP only) + IDropSource, driven by
+//! DoDragDrop on the UI thread (STA after OleInitialize in app::run).
+//! The data object builds a FRESH DROPFILES HGLOBAL on every GetData,
+//! so the drop target owns the copy it receives and repeated drags
+//! never share one handle. No DropSource / IDataObject use beyond
+//! what DoDragDrop needs is implemented; the rest return E_NOTIMPL.
+
+use std::mem::ManuallyDrop;
+
+use windows::core::{implement, HRESULT};
+use windows::Win32::Foundation::{BOOL, E_INVALIDARG, E_NOTIMPL, E_OUTOFMEMORY, HGLOBAL, POINT};
+use windows::Win32::System::Com::{
+    ADVF, DV_E_DVASPECT, DV_E_FORMATETC, DV_E_TYMED, DVASPECT_CONTENT, FORMATETC, IAdviseSink,
+    IDataObject, IDataObject_Impl, IEnumFORMATETC, IEnumSTATDATA, STGMEDIUM, STGMEDIUM_0,
+    TYMED_HGLOBAL,
+};
+use windows::Win32::System::Memory::{
+    GlobalAlloc, GlobalFree, GlobalLock, GlobalUnlock, GMEM_MOVEABLE,
+};
+use windows::Win32::System::Ole::{
+    DoDragDrop, CF_HDROP, DROPEFFECT, DROPEFFECT_COPY, IDropSource, IDropSource_Impl,
+};
+use windows::Win32::System::SystemServices::MODIFIERKEYS_FLAGS;
+use windows::Win32::UI::Shell::DROPFILES;
+
+// DoDragDrop result codes (windows-rs 0.58 does not export these as
+// named constants, so they are spelled out as literals here).
+const DRAGDROP_S_DROP: HRESULT = HRESULT(0x00040100);
+const DRAGDROP_S_CANCEL: HRESULT = HRESULT(0x00040101);
+const DRAGDROP_S_USEDEFAULTCURSORS: HRESULT = HRESULT(0x00040102);
+// MK_LBUTTON bit in QueryContinueDrag's grfKeyState (Win32 docs).
+const MK_LBUTTON: u32 = 0x0001;
+
+/// Build the DROPFILES payload for one file: a DROPFILES header
+/// (pFiles = size of the header, fWide = TRUE) followed by the path
+/// as UTF-16, terminated by a double null (end of the file list).
+fn hdrop_bytes(path: &str) -> Vec<u8> {
+    let mut wide: Vec<u16> = path.encode_utf16().collect();
+    wide.push(0);
+    wide.push(0); // double-null terminator for the file list
+    let header = DROPFILES {
+        pFiles: std::mem::size_of::<DROPFILES>() as u32,
+        pt: POINT { x: 0, y: 0 },
+        fNC: BOOL(0),
+        fWide: BOOL(1),
+    };
+    let mut bytes = Vec::with_capacity(std::mem::size_of::<DROPFILES>() + wide.len() * 2);
+    unsafe {
+        let src = &header as *const DROPFILES as *const u8;
+        bytes.extend_from_slice(std::slice::from_raw_parts(
+            src,
+            std::mem::size_of::<DROPFILES>(),
+        ));
+    }
+    for unit in wide {
+        bytes.extend_from_slice(&unit.to_le_bytes());
+    }
+    bytes
+}
+
+/// Allocate a moveable global block holding the DROPFILES payload.
+/// Returns None on allocation/lock failure (caller reports E_OUTOFMEMORY).
+fn alloc_hdrop(path: &str) -> Option<HGLOBAL> {
+    let bytes = hdrop_bytes(path);
+    unsafe {
+        let hglobal = GlobalAlloc(GMEM_MOVEABLE, bytes.len());
+        if hglobal.is_invalid() {
+            return None;
+        }
+        let ptr = GlobalLock(hglobal);
+        if ptr.is_null() {
+            let _ = GlobalFree(hglobal);
+            return None;
+        }
+        std::ptr::copy_nonoverlapping(bytes.as_ptr(), ptr as *mut u8, bytes.len());
+        let _ = GlobalUnlock(hglobal);
+        Some(hglobal)
+    }
+}
+
+/// One file offered as CF_HDROP. The path is stored as a String;
+/// every GetData builds a fresh DROPFILES HGLOBAL from it.
+#[implement(IDataObject)]
+struct FileDataObject {
+    path: String,
+}
+
+impl IDataObject_Impl for FileDataObject {
+    fn GetData(
+        &self,
+        pformatetc: *const FORMATETC,
+        pmedium: *mut STGMEDIUM,
+    ) -> windows::core::Result<()> {
+        if pformatetc.is_null() || pmedium.is_null() {
+            return Err(windows::core::Error::from(E_INVALIDARG));
+        }
+        let fmt = unsafe { &*pformatetc };
+        if fmt.cfFormat != CF_HDROP {
+            return Err(windows::core::Error::from(DV_E_FORMATETC));
+        }
+        if fmt.tymed.0 & TYMED_HGLOBAL.0 == 0 {
+            return Err(windows::core::Error::from(DV_E_TYMED));
+        }
+        if fmt.dwAspect != DVASPECT_CONTENT {
+            return Err(windows::core::Error::from(DV_E_DVASPECT));
+        }
+        let hglobal = match alloc_hdrop(&self.path) {
+            Some(h) => h,
+            None => return Err(windows::core::Error::from(E_OUTOFMEMORY)),
+        };
+        unsafe {
+            *pmedium = STGMEDIUM {
+                tymed: TYMED_HGLOBAL,
+                u: STGMEDIUM_0 { hGlobal: hglobal },
+                pUnkForRelease: ManuallyDrop::new(None),
+            };
+        }
+        Ok(())
+    }
+
+    fn QueryGetData(&self, pformatetc: *const FORMATETC) -> windows::core::Result<()> {
+        if pformatetc.is_null() {
+            return Err(windows::core::Error::from(E_INVALIDARG));
+        }
+        let fmt = unsafe { &*pformatetc };
+        if fmt.cfFormat != CF_HDROP {
+            return Err(windows::core::Error::from(DV_E_FORMATETC));
+        }
+        if fmt.tymed.0 & TYMED_HGLOBAL.0 == 0 {
+            return Err(windows::core::Error::from(DV_E_TYMED));
+        }
+        if fmt.dwAspect != DVASPECT_CONTENT {
+            return Err(windows::core::Error::from(DV_E_DVASPECT));
+        }
+        Ok(())
+    }
+
+    fn GetDataHere(
+        &self,
+        _pformatetc: *const FORMATETC,
+        _pmedium: *mut STGMEDIUM,
+    ) -> windows::core::Result<()> {
+        Err(windows::core::Error::from(E_NOTIMPL))
+    }
+
+    fn GetCanonicalFormatEtc(
+        &self,
+        _pformatetcin: *const FORMATETC,
+        _pformatetcout: *mut FORMATETC,
+    ) -> windows::core::Result<()> {
+        Err(windows::core::Error::from(E_NOTIMPL))
+    }
+
+    fn SetData(
+        &self,
+        _pformatetc: *const FORMATETC,
+        _pmedium: *const STGMEDIUM,
+        _frelease: BOOL,
+    ) -> windows::core::Result<()> {
+        Err(windows::core::Error::from(E_NOTIMPL))
+    }
+
+    fn EnumFormatEtc(
+        &self,
+        _dwdirection: u32,
+        _ppenumformatetc: *mut Option<IEnumFORMATETC>,
+    ) -> windows::core::Result<()> {
+        Err(windows::core::Error::from(E_NOTIMPL))
+    }
+
+    fn DAdvise(
+        &self,
+        _pformatetc: *const FORMATETC,
+        _advf: ADVF,
+        _padvsink: &IAdviseSink,
+        _pdwconnection: *mut u32,
+    ) -> windows::core::Result<()> {
+        Err(windows::core::Error::from(E_NOTIMPL))
+    }
+
+    fn DUnadvise(&self, _dwconnection: u32) -> windows::core::Result<()> {
+        Err(windows::core::Error::from(E_NOTIMPL))
+    }
+
+    fn EnumDAdvise(
+        &self,
+        _ppenumadvise: *mut Option<IEnumSTATDATA>,
+    ) -> windows::core::Result<()> {
+        Err(windows::core::Error::from(E_NOTIMPL))
+    }
+}
+
+/// Minimal drag source: drop when the left button is released, cancel
+/// on Escape, keep dragging otherwise; always use default cursors.
+#[implement(IDropSource)]
+struct DropSource;
+
+impl IDropSource_Impl for DropSource {
+    fn QueryContinueDrag(
+        &self,
+        fescapepressed: BOOL,
+        grfkeystate: MODIFIERKEYS_FLAGS,
+    ) -> windows::core::Result<()> {
+        if fescapepressed.as_bool() {
+            return Err(windows::core::Error::from(DRAGDROP_S_CANCEL));
+        }
+        if grfkeystate.0 & MK_LBUTTON == 0 {
+            // Left button released: drop.
+            return Err(windows::core::Error::from(DRAGDROP_S_DROP));
+        }
+        Ok(())
+    }
+
+    fn GiveFeedback(&self, _dweffect: DROPEFFECT) -> windows::core::Result<()> {
+        Err(windows::core::Error::from(DRAGDROP_S_USEDEFAULTCURSORS))
+    }
+}
+
+/// Run a blocking OLE drag for one file on the calling (UI) thread.
+/// Returns true if the target accepted the drop, false if the drag
+/// was cancelled or the target refused it. Callers must have called
+/// OleInitialize on this thread first (app::run does).
+pub fn do_drag_file(path: &str) -> bool {
+    let data_object: IDataObject = FileDataObject {
+        path: path.to_string(),
+    }
+    .into();
+    let drop_source: IDropSource = DropSource.into();
+    let mut effect = DROPEFFECT(0);
+    let hr = unsafe { DoDragDrop(&data_object, &drop_source, DROPEFFECT_COPY, &mut effect) };
+    hr == DRAGDROP_S_DROP
+}

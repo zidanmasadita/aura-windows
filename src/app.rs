@@ -19,6 +19,7 @@ use windows::Win32::UI::Shell::{DragAcceptFiles, DragFinish, DragQueryFileW, HDR
 use windows::Win32::Foundation::*;
 use windows::Win32::Graphics::Gdi::{HBRUSH, InvalidateRect};
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
+use windows::Win32::System::Ole::{OleInitialize, OleUninitialize};
 use windows::Win32::System::Threading::{CreateMutexW, ReleaseMutex};
 use windows::Win32::UI::HiDpi::{
     SetProcessDpiAwarenessContext, DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2,
@@ -27,6 +28,8 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{TRACKMOUSEEVENT, TME_LEAVE, Tr
 use windows::Win32::UI::WindowsAndMessaging::*;
 
 use crate::animator;
+use crate::drag;
+use crate::lan;
 use crate::lyrics;
 use crate::media;
 use crate::pomodoro;
@@ -41,6 +44,12 @@ const TIMER_TICK: usize = 1; // 1s: clock + (Phase 1+) media poll
 const TIMER_ALERT: usize = 2; // 0.25s: alert placeholder (Phase 4)
 const TIMER_ANIM: usize = 3; // 16ms: size animation (only while animating)
 const TIMER_CLOSE: usize = 4; // 150ms: debounced mouse-leave close (hover-glitch fix)
+// Tray tile right-click menu ids (Phase 3b). Share submenu ids start
+// at MENU_TILE_SHARE_BASE, max 100 peers (never collides with the
+// two fixed ids).
+const MENU_TILE_OPEN: usize = 2001;
+const MENU_TILE_REMOVE: usize = 2002;
+const MENU_TILE_SHARE_BASE: usize = 2100;
 // Win32 WM_MOUSELEAVE (0x02A3), sent by TrackMouseEvent when the cursor
 // leaves the window. Defined locally because windows-rs 0.58 does not export
 // it from KeyboardAndMouse nor WindowsAndMessaging.
@@ -69,7 +78,11 @@ pub struct App {
     todo_editing: bool, // True while the user types a task in the pill.
     todo_input: String, // Text being typed (committed on Enter / click-outside).
     shelf: crate::shelf::Shelf, // Tray file references (Phase 3a).
-    tray_page: usize, // Current tray grid page (0-based).
+    tray_page: usize,
+    lan: Option<Arc<lan::LanShare>>, // LAN share handle (Phase 3b), set by run() after window creation.
+    dragging_out: bool, // True while a tray drag-out (DoDragDrop) is in flight: suppresses card close.
+    drag_arm: Option<(usize, i32, i32)>, // Armed tray drag: (shelf index, down x_px, down y_px).
+    swallow_next_click: bool, // Swallow the first LBUTTONUP after a drag-out (else the tile would open right after drop). // Current tray grid page (0-based).
     water: water::Water, // Daily intake (Phase 2).
     last_section: state::IslandState, // Last section card (music/pomodoro/todo/water); reopen shows this, not always music.
 }
@@ -103,6 +116,10 @@ impl App {
             todo_input: String::new(),
             shelf: crate::shelf::Shelf::load(),
             tray_page: 0,
+        lan: None,
+        dragging_out: false,
+        drag_arm: None,
+        swallow_next_click: false,
             water: water::Water::load(),
             last_section: state::IslandState::Expanded,
         });
@@ -112,6 +129,11 @@ impl App {
     }
 
     /// Apply current pill size to the window (resize + reposition top-center + region).
+    /// Attach the LAN share handle (called by run() after window creation).
+    fn set_lan(&mut self, share: Arc<lan::LanShare>) {
+        self.lan = Some(share);
+    }
+
     fn apply_size(&mut self) {
         let scale = window::dpi_scale(self.hwnd);
         let w_px = (self.pill.width * scale).round() as i32;
@@ -367,7 +389,7 @@ impl App {
                     // Also suppressed after a shrink (see set_state):
                     // the cursor may be outside only because the window
                     // shrank away from it, not because the user left.
-                    if !self.suppress_leave && !self.cursor_inside_window() {
+                    if !self.suppress_leave && !self.dragging_out && !self.cursor_inside_window() {
                         self.set_state(state::IslandState::Zen);
                     }
                 }
@@ -390,6 +412,11 @@ impl App {
                 // cursor may have re-entered during the 150ms window.
                 unsafe {
                     let _ = KillTimer(self.hwnd, TIMER_CLOSE);
+                }
+                // A drag-out in flight is not a leave: never close from
+                // the debounced timer while dragging.
+                if self.dragging_out {
+                    return;
                 }
                 if self.todo_editing {
                     return;
@@ -473,6 +500,12 @@ impl App {
 
     fn on_mouse_leave(&mut self) {
         self.tracking_mouse = false;
+        // While a drag-out is in flight the cursor leaving the window
+        // is part of the drag, not a real leave: ignore it (and do NOT
+        // start the debounced close) so the card stays open.
+        if self.dragging_out {
+            return;
+        }
         // While typing a todo, cursor exit must NOT close the card
         // (the user may move the mouse away mid-typing; Esc or a click
         // outside the input field ends editing, not mouse-leave).
@@ -507,9 +540,93 @@ impl App {
         }
     }
 
+    /// WM_LBUTTONDOWN on a tray tile arms a drag-out (Phase 3b). The
+    /// drag itself starts from WM_MOUSEMOVE once the cursor passes the
+    /// system drag threshold; a plain click (down + up, no drag) still
+    /// opens the file via on_click, unchanged.
+    fn on_mouse_down(&mut self, x_px: i32, y_px: i32) {
+        self.drag_arm = None;
+        if self.pill.state != state::IslandState::Tray {
+            return;
+        }
+        let scale = window::dpi_scale(self.hwnd);
+        let x = x_px as f32 / scale;
+        let y = y_px as f32 / scale;
+        let (gx, gy, tw, th, px, py) = (
+            renderer::TRAY_TILE_GEOM.0,
+            renderer::TRAY_TILE_GEOM.1,
+            renderer::TRAY_TILE_GEOM.2,
+            renderer::TRAY_TILE_GEOM.3,
+            renderer::TRAY_TILE_GEOM.4,
+            renderer::TRAY_TILE_GEOM.5,
+        );
+        let page_count = self.shelf.page_count(renderer::TRAY_PAGE_SIZE);
+        if self.tray_page >= page_count {
+            self.tray_page = page_count.saturating_sub(1);
+        }
+        let start = self.tray_page * renderer::TRAY_PAGE_SIZE;
+        let shown = self.shelf.files.len().saturating_sub(start).min(renderer::TRAY_PAGE_SIZE);
+        for i in 0..shown {
+            let col = (i % 4) as f32;
+            let row = (i / 4) as f32;
+            let left = gx + col * px;
+            let top = gy + row * py;
+            if x >= left && x <= left + tw && y >= top && y <= top + th {
+                let idx = start + i;
+                // Only arm when the file still exists (stale tiles do
+                // nothing on left-click, so they must not drag either).
+                if std::path::Path::new(&self.shelf.files[idx]).exists() {
+                    self.drag_arm = Some((idx, x_px, y_px));
+                }
+                return;
+            }
+        }
+    }
+
+    /// WM_MOUSEMOVE drag leg (Phase 3b): called after the hover leg.
+    /// If a tray drag is armed and the cursor passed the system drag
+    /// threshold, run the blocking OLE drag; afterwards the next
+    /// LBUTTONUP is swallowed so the tile does not open after drop.
+    fn on_mouse_move_drag(&mut self, x_px: i32, y_px: i32) {
+        let Some((idx, down_x, down_y)) = self.drag_arm else {
+            return;
+        };
+        if self.pill.state != state::IslandState::Tray {
+            self.drag_arm = None;
+            return;
+        }
+        let (threshold_x, threshold_y) =
+            unsafe { (GetSystemMetrics(SM_CXDRAG), GetSystemMetrics(SM_CYDRAG)) };
+        if (x_px - down_x).abs() < threshold_x && (y_px - down_y).abs() < threshold_y {
+            return;
+        }
+        // Threshold passed: start the drag (blocking until drop/cancel).
+        self.drag_arm = None;
+        let path = match self.shelf.files.get(idx) {
+            Some(p) => p.clone(),
+            None => return,
+        };
+        if !std::path::Path::new(&path).exists() {
+            return;
+        }
+        self.dragging_out = true;
+        let _dropped = drag::do_drag_file(&path);
+        self.dragging_out = false;
+        self.swallow_next_click = true;
+        unsafe {
+            let _ = InvalidateRect(self.hwnd, None, BOOL(0));
+        }
+    }
+
     fn on_click(&mut self, x_px: i32, y_px: i32) {
         unsafe {
             let _ = KillTimer(self.hwnd, TIMER_CLOSE);
+        }
+        // First click after a drag-out is swallowed: without this, the
+        // button-up that ends the drag would open the tile just dropped.
+        if self.swallow_next_click {
+            self.swallow_next_click = false;
+            return;
         }
         // Expanded music card: control buttons act (stay Expanded, refresh
         // media immediately so the play/pause icon updates without waiting
@@ -772,7 +889,7 @@ impl App {
         // Tray shelf card (Phase 3a): Clear clears references only
         // (never the real files), arrows page, dots switch, a tile
         // click opens the file/folder (existing only; stale tiles do
-        // nothing on left-click, right-click removes the reference),
+        // nothing on left-click, right-click opens the tile menu),
         // any other click closes to Compact.
         if self.pill.state == state::IslandState::Tray {
             let scale = window::dpi_scale(self.hwnd);
@@ -911,8 +1028,105 @@ impl App {
         }
     }
 
-    /// Right-click on a tray tile removes that reference only
-    /// (the real file is untouched). Elsewhere, right-click does nothing.
+    /// Right-click on a tray tile opens the tile menu (Phase 3b:
+    /// Open / Share / Remove). Elsewhere, right-click does nothing.
+    /// Tray tile right-click menu (Phase 3b): Open / Share (peer
+    /// submenu, or one disabled "No peers nearby") / Remove. Remove
+    /// deletes only the tray reference, never the real file (Phase 3a
+    /// rule, unchanged). Share runs on a worker thread so the 60s
+    /// approval wait never freezes the pill; only errors pop up.
+    fn show_tile_menu(&mut self, idx: usize) {
+        let path = match self.shelf.files.get(idx) {
+            Some(p) => p.clone(),
+            None => return,
+        };
+        unsafe {
+            let Ok(menu) = CreatePopupMenu() else {
+                return;
+            };
+            let Ok(share_menu) = CreatePopupMenu() else {
+                let _ = DestroyMenu(menu);
+                return;
+            };
+            let _ = AppendMenuW(menu, MF_STRING, MENU_TILE_OPEN, w!("Open"));
+            // Share submenu: live peers, sorted by name; empty list
+            // shows one disabled item instead of an empty submenu.
+            let peers = self.lan.as_ref().map(|l| l.peers()).unwrap_or_default();
+            let shown_peers: Vec<lan::LanPeer> = peers.into_iter().take(100).collect();
+            if shown_peers.is_empty() {
+                let _ = AppendMenuW(
+                    share_menu,
+                    MF_STRING | MF_GRAYED,
+                    0,
+                    w!("No peers nearby"),
+                );
+            } else {
+                for (i, peer) in shown_peers.iter().enumerate() {
+                    let mut wide: Vec<u16> = peer.name.encode_utf16().collect();
+                    wide.push(0);
+                    let _ = AppendMenuW(
+                        share_menu,
+                        MF_STRING,
+                        MENU_TILE_SHARE_BASE + i,
+                        PCWSTR::from_raw(wide.as_ptr()),
+                    );
+                }
+            }
+            let _ = AppendMenuW(menu, MF_POPUP, share_menu.0 as usize, w!("Share"));
+            let _ = AppendMenuW(menu, MF_SEPARATOR, 0, PCWSTR::null());
+            let _ = AppendMenuW(menu, MF_STRING, MENU_TILE_REMOVE, w!("Remove"));
+            let _ = SetForegroundWindow(self.hwnd);
+            let mut pt = POINT::default();
+            let _ = GetCursorPos(&mut pt);
+            let id = TrackPopupMenu(
+                menu,
+                TPM_RIGHTBUTTON | TPM_RETURNCMD,
+                pt.x,
+                pt.y,
+                0,
+                self.hwnd,
+                None,
+            );
+            let _ = DestroyMenu(share_menu);
+            let _ = DestroyMenu(menu);
+            let picked = id.0 as usize;
+            if picked == MENU_TILE_OPEN {
+                if std::path::Path::new(&path).exists() {
+                    let _ = std::process::Command::new("explorer.exe")
+                        .arg(&path)
+                        .spawn();
+                }
+            } else if picked == MENU_TILE_REMOVE {
+                self.shelf.remove(idx);
+                let new_count = self.shelf.page_count(renderer::TRAY_PAGE_SIZE);
+                if self.tray_page >= new_count {
+                    self.tray_page = new_count.saturating_sub(1);
+                }
+                let _ = InvalidateRect(self.hwnd, None, BOOL(0));
+            } else if picked >= MENU_TILE_SHARE_BASE
+                && picked < MENU_TILE_SHARE_BASE + shown_peers.len()
+            {
+                let peer = shown_peers[picked - MENU_TILE_SHARE_BASE].clone();
+                match &self.lan {
+                    Some(share) => {
+                        let share = share.clone();
+                        std::thread::spawn(move || {
+                            if let Err(msg) =
+                                share.send_file(&peer, std::path::Path::new(&path))
+                            {
+                                lan::show_error(&msg);
+                            }
+                        });
+                    }
+                    None => {
+                        lan::show_error("LAN share is not running.");
+                    }
+                }
+            }
+            // picked == 0 (dismissed) or a disabled item: nothing.
+        }
+    }
+
     fn on_right_click(&mut self, x_px: i32, y_px: i32) {
         if self.pill.state != state::IslandState::Tray {
             return;
@@ -940,14 +1154,7 @@ impl App {
             let left = gx + col * px;
             let top = gy + row * py;
             if x >= left && x <= left + tw && y >= top && y <= top + th {
-                self.shelf.remove(start + i);
-                let new_count = self.shelf.page_count(renderer::TRAY_PAGE_SIZE);
-                if self.tray_page >= new_count {
-                    self.tray_page = new_count.saturating_sub(1);
-                }
-                unsafe {
-                    let _ = InvalidateRect(self.hwnd, None, BOOL(0));
-                }
+                self.show_tile_menu(start + i);
                 return;
             }
         }
@@ -1055,10 +1262,19 @@ unsafe extern "system" fn wnd_proc(
         }
         WM_MOUSEMOVE => {
             app.on_mouse_move();
+            let x = ((lparam.0 as u32) & 0xFFFF) as u16 as i16 as i32;
+            let y = (((lparam.0 as u32) >> 16) & 0xFFFF) as u16 as i16 as i32;
+            app.on_mouse_move_drag(x, y);
             LRESULT(0)
         }
         WM_MOUSELEAVE => {
             app.on_mouse_leave();
+            LRESULT(0)
+        }
+        WM_LBUTTONDOWN => {
+            let x = ((lparam.0 as u32) & 0xFFFF) as u16 as i16 as i32;
+            let y = (((lparam.0 as u32) >> 16) & 0xFFFF) as u16 as i16 as i32;
+            app.on_mouse_down(x, y);
             LRESULT(0)
         }
         WM_LBUTTONUP => {
@@ -1070,7 +1286,7 @@ unsafe extern "system" fn wnd_proc(
             LRESULT(0)
         }
         WM_RBUTTONUP => {
-            // Right-click: tray tile remove (Phase 3a); elsewhere no-op.
+            // Right-click: tray tile menu (Phase 3b); elsewhere no-op.
             let x = ((lparam.0 as u32) & 0xFFFF) as u16 as i16 as i32;
             let y = (((lparam.0 as u32) >> 16) & 0xFFFF) as u16 as i16 as i32;
             app.on_right_click(x, y);
@@ -1138,6 +1354,10 @@ pub fn run() -> Result<()> {
         }
         // DPI awareness (PerMonitorV2) before window creation.
         let _ = SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
+        // OLE for drag-out (Phase 3b): DoDragDrop needs STA on this
+        // thread. Failure is non-fatal here (drag-out just will not
+        // work); everything else keeps running.
+        let _ = OleInitialize(None);
         let hmodule = GetModuleHandleW(None)?;
         let hinstance: HINSTANCE = hmodule.into();
         // Window class.
@@ -1187,7 +1407,10 @@ pub fn run() -> Result<()> {
         let media_cache = Arc::new(Mutex::new(media::PollCache::waiting()));
         media::spawn_poller(media_cache.clone());
         // App (owns renderer + state). Store in USERDATA for WndProc.
-        let app = App::new(hwnd, media_cache)?;
+        let mut app = App::new(hwnd, media_cache)?;
+        // LAN share (Phase 3b): start after the window exists, before
+        // the message loop; the handle lives in App for the tile menu.
+        app.set_lan(lan::LanShare::start());
         let app_ptr = Box::into_raw(app);
         SetWindowLongPtrW(hwnd, GWLP_USERDATA, app_ptr as isize);
         // Tray icon (must be after window creation; uses hwnd).
@@ -1209,6 +1432,7 @@ pub fn run() -> Result<()> {
         }
         // Cleanup: release mutex (OS would reclaim on exit anyway, but be tidy).
         let _ = ReleaseMutex(mutex);
+        OleUninitialize();
         Ok(())
     }
 }

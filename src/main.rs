@@ -7,6 +7,8 @@
 
 mod animator;
 mod app;
+mod drag;
+mod lan;
 mod lyrics;
 mod media;
 mod pomodoro;
