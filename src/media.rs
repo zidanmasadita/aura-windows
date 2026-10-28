@@ -240,7 +240,7 @@ fn spawn_poller_incarnation(shared: Arc<PollerShared>) {
                         break;
                     }
                     let tick = shared.tick_counter.fetch_add(1, Ordering::SeqCst) + 1;
-                    let (info, status) = poll_status();
+                    let (info, status) = poll_status(&shared.cache);
                     // Accept EVERY completed poll (fix 2026-10-28 malam):
                     // the old generation gate discarded slow polls
                     // forever — a poll slower than the watchdog fuse
@@ -254,6 +254,7 @@ fn spawn_poller_incarnation(shared: Arc<PollerShared>) {
                         *guard = PollCache {
                             info,
                             status: format!("{} | #{}", status, tick),
+                            phase: "done".to_string(),
                         };
                     }
                     if let Ok(mut health) = shared.health.lock() {
@@ -328,6 +329,9 @@ pub fn skip_previous_async() {
 pub struct PollCache {
     pub info: Option<MediaInfo>,
     pub status: String,
+    // In-flight poll step, written DURING the poll (not only on
+    // completion), so a hung .get() still reports where it stuck.
+    pub phase: String,
 }
 
 impl PollCache {
@@ -335,6 +339,7 @@ impl PollCache {
         Self {
             info: None,
             status: "waiting for first poll...".to_string(),
+            phase: "starting".to_string(),
         }
     }
 }
@@ -362,7 +367,14 @@ pub struct MediaInfo {
 /// Per-session property errors are still skipped (transient during
 /// track changes), and the UI's 1s None-hysteresis still covers short
 /// gaps. Status strings stay short for the no-music card line.
-pub fn poll_status() -> (Option<MediaInfo>, String) {
+fn set_phase(cache: &Mutex<PollCache>, phase: &str) {
+    if let Ok(mut guard) = cache.lock() {
+        guard.phase = phase.to_string();
+    }
+}
+
+pub fn poll_status(cache: &Mutex<PollCache>) -> (Option<MediaInfo>, String) {
+    set_phase(cache, "manager request");
     let manager = match GlobalSystemMediaTransportControlsSessionManager::RequestAsync() {
         Ok(op) => match op.get() {
             Ok(m) => m,
@@ -380,6 +392,7 @@ pub fn poll_status() -> (Option<MediaInfo>, String) {
             )
         }
     };
+    set_phase(cache, "current props");
     // 1. Current session dulu (fast path lama): bila Playing,
     //    langsung kembali tanpa memindai daftar.
     let mut current_fallback: Option<MediaInfo> = None;
@@ -393,6 +406,7 @@ pub fn poll_status() -> (Option<MediaInfo>, String) {
             }
         }
     }
+    set_phase(cache, "session list");
     // 2. Daftar penuh: cari yang Playing.
     let mut paused_fallback: Option<MediaInfo> = None;
     let mut session_count: u32 = 0;
@@ -400,6 +414,7 @@ pub fn poll_status() -> (Option<MediaInfo>, String) {
         let size = sessions.Size().unwrap_or(0);
         session_count = size;
         for i in 0..size {
+            set_phase(cache, &format!("list props {}/{}", i + 1, size));
             let Ok(session) = sessions.GetAt(i) else {
                 continue;
             };
@@ -433,7 +448,8 @@ pub fn poll_status() -> (Option<MediaInfo>, String) {
 
 /// Kept for callers that only need the info (controls do not use it).
 pub fn poll() -> Option<MediaInfo> {
-    poll_status().0
+    let dummy = Mutex::new(PollCache::waiting());
+    poll_status(&dummy).0
 }
 
 /// One session -> MediaInfo (properties + playback + timeline).

@@ -329,9 +329,17 @@ impl App {
                     .media_cache
                     .lock()
                     .ok()
-                    .map(|guard| (guard.info.clone(), guard.status.clone()))
-                    .unwrap_or((None, "cache locked".to_string()));
-                self.poll_status = cached.1;
+                    .map(|guard| (
+                        guard.info.clone(),
+                        guard.status.clone(),
+                        guard.phase.clone(),
+                    ))
+                    .unwrap_or((None, "cache locked".to_string(), String::new()));
+                self.poll_status = if cached.2.is_empty() {
+                    cached.1
+                } else {
+                    format!("{} [{}]", cached.1, cached.2)
+                };
                 let cached = cached.0;
                 // Transient-None hysteresis: a single failed/empty GSMTC
                 // poll must not close the card (that close + hover-reopen
