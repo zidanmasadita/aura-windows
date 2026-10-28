@@ -394,6 +394,9 @@ where
             AsyncStatus::Completed => return op.GetResults(),
             AsyncStatus::Error | AsyncStatus::Canceled => return op.GetResults(),
             AsyncStatus::Started => {}
+            # AsyncStatus adalah newtype i32 di 0.58 (bukan enum Rust),
+            # jadi match harus exhaustive terhadap nilai liar apa pun.
+            _ => {}
         }
         if start.elapsed() >= timeout {
             return Err(windows::core::Error::from(HRESULT::from_win32(1460)));
