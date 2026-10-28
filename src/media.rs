@@ -37,7 +37,7 @@
 //!   sudah basi sementara aplikasi lain sedang memutar lagu.
 //! - Poller kini loop thread + satu worker per poll + watchdog: satu
 //!   .get() yang nyangkut dulu membekukan cache di None selamanya;
-//!   kini worker tanpa cache write >3 detik ditinggalkan (generation
+//!   kini worker tanpa cache write >10 detik ditinggalkan (written_seq
 //!   guard) dan diganti, dengan backoff 3s -> 30s.
 //! - Kontrol jalan di thread STA sekali-pakai DENGAN queue+loop
 //!   sendiri, pelajaran yang sama dengan poller (thread tanpa queue
@@ -46,12 +46,21 @@
 //! (tidak ada Rust/Windows di sini); fix ini menutup tiga jalur
 //! gagal yang nyata ada di kode + status line menunjukkan kasus
 //! stuck bila terjadi ("poll stuck, worker restarted").
+//! Lanjutan 2026-10-28 (laporan user: status stuck muncul):
+//! - Ambang watchdog 3s -> 10s dan tulisan worker basi tidak lagi
+//!   dibuang mentah-mentah (written_seq): poll lambat tapi selesai
+//!   kini tetap mendarat; hanya worker yang benar-benar menggantung
+//!   yang diganti. Ambang 3s sebelumnya bisa salah menuduh poll
+//!   lambat sebagai stuck, lalu membuang hasilnya sendiri.
+//! - Urutan poll diubah: current-yang-Playing dulu (fast path),
+//!   baru pindai daftar untuk Playing — satu sesi macet di daftar
+//!   tidak lagi memblokir sesi sehat yang sedang diputar.
 //! If `cargo build` reports a signature mismatch (notably `.get()` on
 //! IAsyncOperation, HSTRING conversion, or TimeSpan field access), paste
 //! it — Eve cannot compile Rust in this VM, so the first build on the
 //! user's Windows PC is where WinRT signatures get corrected.
 
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -108,13 +117,16 @@ fn init_com() {
 /// Shared watchdog state. The loop thread never calls GSMTC itself;
 /// it only ticks and watches. A worker does one poll and exits. If a
 /// worker's .get() hangs (media app wedged mid-request), the loop
-/// abandons it after 3s without a cache write and spawns a replacement.
-/// Generation guards stale writes; backoff (3s -> 30s) bounds leaked
+/// abandons it after 10s without a cache write and spawns a replacement.
+/// Sequence-gated writes ignore stale workers; backoff (3s -> 30s) bounds leaked
 /// threads during a persistent hang. Lock order (never violated):
 /// cache and health are never held at the same time.
 struct PollerShared {
     cache: Arc<Mutex<PollCache>>,
-    generation: AtomicU64,
+    // Tick terakhir yang tulisannya diterima. Worker dengan tick
+    // lebih kecil dari ini adalah basi: tulisannya ditolak agar
+    // tidak menimpa data yang lebih segar.
+    written_seq: Mutex<u64>,
     busy: AtomicBool,
     health: Mutex<PollerHealth>,
 }
@@ -135,7 +147,7 @@ struct PollerHealth {
 pub fn spawn_poller(cache: Arc<Mutex<PollCache>>) {
     let shared = Arc::new(PollerShared {
         cache,
-        generation: AtomicU64::new(0),
+        written_seq: Mutex::new(0),
         busy: AtomicBool::new(false),
         health: Mutex::new(PollerHealth {
             last_write: Instant::now(),
@@ -159,15 +171,17 @@ pub fn spawn_poller(cache: Arc<Mutex<PollCache>>) {
                     count += 1;
                     let now = Instant::now();
                     // Watchdog: abandon a worker with no cache write
-                    // for >3s (and past backoff), then replace it.
+                    // for >10s (and past backoff), then replace it.
+                    // Ambang 10s (bukan 3s): poll lambat tapi selesai
+                    // harus tetap mendarat; yang diganti hanya
+                    // worker yang benar-benar menggantung.
                     let mut respawn = false;
                     if shared.busy.load(Ordering::SeqCst) {
                         if let Ok(mut health) = shared.health.lock() {
                             if now.duration_since(health.last_write)
-                                > Duration::from_secs(3)
+                                > Duration::from_secs(10)
                                 && now >= health.next_respawn_at
                             {
-                                shared.generation.fetch_add(1, Ordering::SeqCst);
                                 shared.busy.store(false, Ordering::SeqCst);
                                 health.next_respawn_at =
                                     now + Duration::from_secs(health.backoff_secs);
@@ -185,7 +199,6 @@ pub fn spawn_poller(cache: Arc<Mutex<PollCache>>) {
                     }
                     if !shared.busy.load(Ordering::SeqCst) {
                         let worker_shared = shared.clone();
-                        let gen = shared.generation.load(Ordering::SeqCst);
                         let tick = count;
                         shared.busy.store(true, Ordering::SeqCst);
                         std::thread::spawn(move || {
@@ -196,7 +209,19 @@ pub fn spawn_poller(cache: Arc<Mutex<PollCache>>) {
                             let mut wmsg = MSG::default();
                             let _ = PeekMessageW(&mut wmsg, None, 0, 0, PM_NOREMOVE);
                             let (info, status) = poll_status();
-                            if worker_shared.generation.load(Ordering::SeqCst) == gen {
+                            // Terima tulisan ini hanya bila belum ada
+                            // worker yang lebih baru menulis: worker
+                            // basi yang selesai belakangan tidak boleh
+                            // menimpa data yang lebih segar, tapi worker
+                            // lambat yang belum tergantikan tetap mendarat.
+                            let mut fresh = false;
+                            if let Ok(mut written) = worker_shared.written_seq.lock() {
+                                if tick >= *written {
+                                    *written = tick;
+                                    fresh = true;
+                                }
+                            }
+                            if fresh {
                                 if let Ok(mut guard) = worker_shared.cache.lock() {
                                     *guard = PollCache {
                                         info,
@@ -211,7 +236,7 @@ pub fn spawn_poller(cache: Arc<Mutex<PollCache>>) {
                             // Clearing busy after the write keeps the
                             // loop from spawning a duplicate mid-write;
                             // a duplicate from the tiny load/store race
-                            // is benign (idempotent polls, same gen).
+                            // is benign (idempotent polls, seq-gated writes).
                             worker_shared.busy.store(false, Ordering::SeqCst);
                         });
                     }
@@ -308,23 +333,15 @@ pub struct MediaInfo {
     pub duration_secs: f64,
 }
 
-/// Poll with a status string. Tries GetCurrentSession first, then
-/// falls back to GetSessions() (all sessions): GetCurrentSession can
-/// point at a different app than the one actually playing (e.g. a
-/// paused Spotify session outranking a playing Chrome YTM session),
-/// so only checking "current" can miss the real song entirely.
-/// Picks the first Playing session, else the first session with a
-/// non-empty title. Status strings are kept short for the no-music
-/// card line: "ok", "no session", "request failed 0x........",
-/// "sessions: N, none usable", etc.
-/// Poll with a status string. Selection order (fix 2026-10-28):
-/// 1. Any PLAYING session from the full session list (first with a
-///    title). The old code returned GetCurrentSession unread when it
-///    had a title, even if it was a stale paused app while another
-///    app was actually playing — one direct cause of "music not
-///    detected" while a song plays.
-/// 2. GetCurrentSession (covers managers whose list is empty).
-/// 3. First titled paused session from the list (paused fallback).
+/// Poll with a status string. Selection order (fix 2026-10-28,
+/// revisi malam yang sama setelah laporan 'poll stuck'):
+/// 1. Current session bila PLAYING (fast path lama): kembali
+///    langsung tanpa memindai daftar, supaya satu sesi macet di
+///    daftar tidak memblokir sesi sehat yang sedang diputar.
+/// 2. PLAYING session dari daftar penuh (memperbaiki bug lama di
+///    mana current paused yang basi mengalahkan sesi Playing lain
+///    — satu penyebab langsung 'musik tidak kedetect' saat lagu jalan).
+/// 3. Current paused bertitel, lalu 4. paused pertama dari daftar.
 /// Per-session property errors are still skipped (transient during
 /// track changes), and the UI's 1s None-hysteresis still covers short
 /// gaps. Status strings stay short for the no-music card line.
@@ -346,7 +363,20 @@ pub fn poll_status() -> (Option<MediaInfo>, String) {
             )
         }
     };
-    // 1. Full session list first: prefer a PLAYING session.
+    // 1. Current session dulu (fast path lama): bila Playing,
+    //    langsung kembali tanpa memindai daftar.
+    let mut current_fallback: Option<MediaInfo> = None;
+    if let Ok(session) = manager.GetCurrentSession() {
+        if let Ok(info) = session_info(&session) {
+            if !info.title.is_empty() {
+                if info.playing {
+                    return (Some(info), "ok".to_string());
+                }
+                current_fallback = Some(info);
+            }
+        }
+    }
+    // 2. Daftar penuh: cari yang Playing.
     let mut paused_fallback: Option<MediaInfo> = None;
     let mut session_count: u32 = 0;
     if let Ok(sessions) = manager.GetSessions() {
@@ -367,18 +397,6 @@ pub fn poll_status() -> (Option<MediaInfo>, String) {
             }
             if paused_fallback.is_none() {
                 paused_fallback = Some(info);
-            }
-        }
-    }
-    // 2. Current session (covers an empty list).
-    let mut current_fallback: Option<MediaInfo> = None;
-    if let Ok(session) = manager.GetCurrentSession() {
-        if let Ok(info) = session_info(&session) {
-            if !info.title.is_empty() {
-                if info.playing {
-                    return (Some(info), "ok".to_string());
-                }
-                current_fallback = Some(info);
             }
         }
     }
