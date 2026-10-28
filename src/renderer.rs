@@ -3294,8 +3294,8 @@ impl Renderer {
                 M12: 0.0,
                 M21: 0.0,
                 M22: s,
-                DX: tx,
-                DY: 0.0,
+                M31: tx,
+                M32: 0.0,
             };
             target.SetTransform(&base_xform);
 
