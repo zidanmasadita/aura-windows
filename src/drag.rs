@@ -20,6 +20,7 @@
 //! return raw HRESULT; Enum* return the enumerator by value; DAdvise
 //! takes u32 + Option sink and returns Result<u32>; FORMATETC/STGMEDIUM
 //! fields are primitives (u16/u32), and GlobalAlloc returns Result.
+//! TYMED itself is i32-based in 0.58, so TYMED_HGLOBAL.0 is cast to u32.
 
 use std::mem::ManuallyDrop;
 
@@ -119,7 +120,7 @@ impl IDataObject_Impl for FileDataObject {
         if fmt.cfFormat != CF_HDROP.0 {
             return Err(windows::core::Error::from(DV_E_FORMATETC));
         }
-        if fmt.tymed & TYMED_HGLOBAL.0 == 0 {
+        if fmt.tymed & TYMED_HGLOBAL.0 as u32 == 0 {
             return Err(windows::core::Error::from(DV_E_TYMED));
         }
         if fmt.dwAspect != DVASPECT_CONTENT.0 {
@@ -130,7 +131,7 @@ impl IDataObject_Impl for FileDataObject {
             None => return Err(windows::core::Error::from(E_OUTOFMEMORY)),
         };
         Ok(STGMEDIUM {
-            tymed: TYMED_HGLOBAL.0,
+            tymed: TYMED_HGLOBAL.0 as u32,
             u: STGMEDIUM_0 { hGlobal: hglobal },
             pUnkForRelease: ManuallyDrop::new(None),
         })
@@ -144,7 +145,7 @@ impl IDataObject_Impl for FileDataObject {
         if fmt.cfFormat != CF_HDROP.0 {
             return DV_E_FORMATETC;
         }
-        if fmt.tymed & TYMED_HGLOBAL.0 == 0 {
+        if fmt.tymed & TYMED_HGLOBAL.0 as u32 == 0 {
             return DV_E_TYMED;
         }
         if fmt.dwAspect != DVASPECT_CONTENT.0 {
