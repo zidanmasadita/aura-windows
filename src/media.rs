@@ -230,10 +230,16 @@ fn spawn_poller_incarnation(shared: Arc<PollerShared>) {
     std::thread::spawn(move || {
         init_com();
         let gen = shared.generation.load(Ordering::SeqCst);
+        // Manager cache lokal inkarnasi ini (lihat poll_status).
+        let mut manager_cache: Option<
+            GlobalSystemMediaTransportControlsSessionManager,
+        > = None;
         unsafe {
             let mut msg = MSG::default();
             let _ = PeekMessageW(&mut msg, None, 0, 0, PM_NOREMOVE);
-            let _ = SetTimer(None, 1, 250, None);
+            // Poll 1 detik (bukan 250ms): sensor Mac juga 1 detik,
+            // dan RequestAsync tiap poll diduga menghambat service.
+            let _ = SetTimer(None, 1, 1000, None);
             loop {
                 let ret = GetMessageW(&mut msg, None, 0, 0);
                 if ret.0 <= 0 {
@@ -247,7 +253,8 @@ fn spawn_poller_incarnation(shared: Arc<PollerShared>) {
                         break;
                     }
                     let tick = shared.tick_counter.fetch_add(1, Ordering::SeqCst) + 1;
-                    let (info, status) = poll_status(&shared.cache);
+                    let (info, status) =
+                        poll_status(&shared.cache, &mut manager_cache);
                     // Accept EVERY completed poll (fix 2026-10-28 malam):
                     // the old generation gate discarded slow polls
                     // forever — a poll slower than the watchdog fuse
@@ -256,7 +263,7 @@ fn spawn_poller_incarnation(shared: Arc<PollerShared>) {
                     // landed and 'poll stuck' showed permanently even
                     // though polls eventually completed. A late write
                     // is still the freshest available data; the next
-                    // poll (250ms later) corrects any staleness.
+                    // poll (1000ms later) corrects any staleness.
                     if let Ok(mut guard) = shared.cache.lock() {
                         *guard = PollCache {
                             info,
@@ -418,23 +425,42 @@ fn set_phase(cache: &Mutex<PollCache>, phase: &str) {
     }
 }
 
-pub fn poll_status(cache: &Mutex<PollCache>) -> (Option<MediaInfo>, String) {
-    set_phase(cache, "manager request");
-    let manager = match GlobalSystemMediaTransportControlsSessionManager::RequestAsync() {
-        Ok(op) => match get_with_timeout(&op, Duration::from_secs(3)) {
-            Ok(m) => m,
+pub fn poll_status(
+    cache: &Mutex<PollCache>,
+    manager_cache: &mut Option<GlobalSystemMediaTransportControlsSessionManager>,
+) -> (Option<MediaInfo>, String) {
+    // Manager cache (2026-10-28 malam): deteksi jalan segar setelah
+    // restart PC, lalu manager request mulai timeout dalam hitungan
+    // menit — dugaan utama: RequestAsync baru tiap poll (4x/detik)
+    // menghambat service. Minta manager SEKALI per inkarnasi lalu
+    // pakai ulang; GetCurrentSession/GetSessions pada manager yang
+    // di-cache tetap mengembalikan sesi TERKINI tiap poll. Cache
+    // bersifat lokal thread inkarnasi ini (tidak dibagi antar
+    // thread). Bila query sesi error, cache dibuang di bawah supaya
+    // poll berikutnya meminta manager baru.
+    let manager = if let Some(m) = manager_cache.clone() {
+        m
+    } else {
+        set_phase(cache, "manager request");
+        match GlobalSystemMediaTransportControlsSessionManager::RequestAsync() {
+            Ok(op) => match get_with_timeout(&op, Duration::from_secs(3)) {
+                Ok(m) => {
+                    *manager_cache = Some(m.clone());
+                    m
+                }
+                Err(e) => {
+                    return (
+                        None,
+                        format!("request failed {:#010x}", e.code().0 as u32),
+                    )
+                }
+            },
             Err(e) => {
                 return (
                     None,
                     format!("request failed {:#010x}", e.code().0 as u32),
                 )
             }
-        },
-        Err(e) => {
-            return (
-                None,
-                format!("request failed {:#010x}", e.code().0 as u32),
-            )
         }
     };
     set_phase(cache, "current props");
@@ -450,6 +476,9 @@ pub fn poll_status(cache: &Mutex<PollCache>) -> (Option<MediaInfo>, String) {
                 current_fallback = Some(info);
             }
         }
+    } else {
+        // Manager diduga basi: buang supaya poll berikutnya minta baru.
+        *manager_cache = None;
     }
     set_phase(cache, "session list");
     // 2. Daftar penuh: cari yang Playing.
@@ -476,6 +505,9 @@ pub fn poll_status(cache: &Mutex<PollCache>) -> (Option<MediaInfo>, String) {
                 paused_fallback = Some(info);
             }
         }
+    } else {
+        // Manager diduga basi: buang supaya poll berikutnya minta baru.
+        *manager_cache = None;
     }
     // 3. Paused fallbacks: current first, then list.
     if let Some(info) = current_fallback {
@@ -494,7 +526,8 @@ pub fn poll_status(cache: &Mutex<PollCache>) -> (Option<MediaInfo>, String) {
 /// Kept for callers that only need the info (controls do not use it).
 pub fn poll() -> Option<MediaInfo> {
     let dummy = Mutex::new(PollCache::waiting());
-    poll_status(&dummy).0
+    let mut mgr = None;
+    poll_status(&dummy, &mut mgr).0
 }
 
 /// One session -> MediaInfo (properties + playback + timeline).
