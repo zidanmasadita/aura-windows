@@ -87,8 +87,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use windows::core::Result;
-use windows::Win32::Foundation::{HRESULT, LPARAM, WPARAM};
+use windows::core::{HRESULT, Result};
+use windows::Win32::Foundation::{LPARAM, WPARAM};
 use windows::Win32::System::Threading::GetCurrentThreadId;
 use windows::Win32::UI::WindowsAndMessaging::{
     DispatchMessageW, GetMessageW, PeekMessageW, PostThreadMessageW, SetTimer, TranslateMessage,
