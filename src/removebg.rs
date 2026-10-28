@@ -321,14 +321,14 @@ fn upload(bytes: &[u8], filename: &str, model_param: &str) -> Result<Vec<u8>, St
     let content = werr(HttpBufferContent::CreateFromBuffer(&buffer))?;
     let headers = werr(content.Headers())?;
     werr(headers.Append(
-        HSTRING::from("Content-Type"),
-        HSTRING::from(format!("multipart/form-data; boundary={}", boundary)),
+        &HSTRING::from("Content-Type"),
+        &HSTRING::from(format!("multipart/form-data; boundary={}", boundary)),
     ))?;
     let client = werr(HttpClient::new())?;
     if let Ok(req_headers) = client.DefaultRequestHeaders() {
         let _ = req_headers.Append(
-            HSTRING::from("User-Agent"),
-            HSTRING::from("Aura-Notch/1.0 (Windows)"),
+            &HSTRING::from("User-Agent"),
+            &HSTRING::from("Aura-Notch/1.0 (Windows)"),
         );
     }
     let url = format!(
