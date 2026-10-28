@@ -15,13 +15,18 @@
 //! _Impl traits need the windows feature "implement" (it gates the
 //! Com/Ole impl.rs include); they live at the namespace root, NOT
 //! in an r#impl submodule (that guess failed 2026-10-28).
+//! 0.58 _Impl shapes (proven by compiler 2026-10-28): GetData returns
+//! STGMEDIUM by value; QueryGetData/Canonical/QueryContinue/GiveFeedback
+//! return raw HRESULT; Enum* return the enumerator by value; DAdvise
+//! takes u32 + Option sink and returns Result<u32>; FORMATETC/STGMEDIUM
+//! fields are primitives (u16/u32), and GlobalAlloc returns Result.
 
 use std::mem::ManuallyDrop;
 
 use windows::core::{implement, HRESULT};
 use windows::Win32::Foundation::{BOOL, E_INVALIDARG, E_NOTIMPL, E_OUTOFMEMORY, GlobalFree, HGLOBAL, POINT};
 use windows::Win32::System::Com::{
-    ADVF, DVASPECT_CONTENT, FORMATETC, IAdviseSink,
+    DVASPECT_CONTENT, FORMATETC, IAdviseSink,
     IDataObject, IDataObject_Impl, IEnumFORMATETC, IEnumSTATDATA, STGMEDIUM, STGMEDIUM_0,
     TYMED_HGLOBAL,
 };
@@ -77,7 +82,10 @@ fn hdrop_bytes(path: &str) -> Vec<u8> {
 fn alloc_hdrop(path: &str) -> Option<HGLOBAL> {
     let bytes = hdrop_bytes(path);
     unsafe {
-        let hglobal = GlobalAlloc(GMEM_MOVEABLE, bytes.len());
+        let hglobal = match GlobalAlloc(GMEM_MOVEABLE, bytes.len()) {
+            Ok(h) => h,
+            Err(_) => return None,
+        };
         if hglobal.is_invalid() {
             return None;
         }
@@ -103,50 +111,46 @@ impl IDataObject_Impl for FileDataObject {
     fn GetData(
         &self,
         pformatetc: *const FORMATETC,
-        pmedium: *mut STGMEDIUM,
-    ) -> windows::core::Result<()> {
-        if pformatetc.is_null() || pmedium.is_null() {
+    ) -> windows::core::Result<STGMEDIUM> {
+        if pformatetc.is_null() {
             return Err(windows::core::Error::from(E_INVALIDARG));
         }
         let fmt = unsafe { &*pformatetc };
-        if fmt.cfFormat != CF_HDROP {
+        if fmt.cfFormat != CF_HDROP.0 {
             return Err(windows::core::Error::from(DV_E_FORMATETC));
         }
-        if fmt.tymed.0 & TYMED_HGLOBAL.0 == 0 {
+        if fmt.tymed & TYMED_HGLOBAL.0 == 0 {
             return Err(windows::core::Error::from(DV_E_TYMED));
         }
-        if fmt.dwAspect != DVASPECT_CONTENT {
+        if fmt.dwAspect != DVASPECT_CONTENT.0 {
             return Err(windows::core::Error::from(DV_E_DVASPECT));
         }
         let hglobal = match alloc_hdrop(&self.path) {
             Some(h) => h,
             None => return Err(windows::core::Error::from(E_OUTOFMEMORY)),
         };
-        unsafe {
-            *pmedium = STGMEDIUM {
-                tymed: TYMED_HGLOBAL,
-                u: STGMEDIUM_0 { hGlobal: hglobal },
-                pUnkForRelease: ManuallyDrop::new(None),
-            };
-        }
-        Ok(())
+        Ok(STGMEDIUM {
+            tymed: TYMED_HGLOBAL.0,
+            u: STGMEDIUM_0 { hGlobal: hglobal },
+            pUnkForRelease: ManuallyDrop::new(None),
+        })
     }
 
-    fn QueryGetData(&self, pformatetc: *const FORMATETC) -> windows::core::Result<()> {
+    fn QueryGetData(&self, pformatetc: *const FORMATETC) -> HRESULT {
         if pformatetc.is_null() {
-            return Err(windows::core::Error::from(E_INVALIDARG));
+            return E_INVALIDARG;
         }
         let fmt = unsafe { &*pformatetc };
-        if fmt.cfFormat != CF_HDROP {
-            return Err(windows::core::Error::from(DV_E_FORMATETC));
+        if fmt.cfFormat != CF_HDROP.0 {
+            return DV_E_FORMATETC;
         }
-        if fmt.tymed.0 & TYMED_HGLOBAL.0 == 0 {
-            return Err(windows::core::Error::from(DV_E_TYMED));
+        if fmt.tymed & TYMED_HGLOBAL.0 == 0 {
+            return DV_E_TYMED;
         }
-        if fmt.dwAspect != DVASPECT_CONTENT {
-            return Err(windows::core::Error::from(DV_E_DVASPECT));
+        if fmt.dwAspect != DVASPECT_CONTENT.0 {
+            return DV_E_DVASPECT;
         }
-        Ok(())
+        HRESULT(0)
     }
 
     fn GetDataHere(
@@ -161,8 +165,8 @@ impl IDataObject_Impl for FileDataObject {
         &self,
         _pformatetcin: *const FORMATETC,
         _pformatetcout: *mut FORMATETC,
-    ) -> windows::core::Result<()> {
-        Err(windows::core::Error::from(E_NOTIMPL))
+    ) -> HRESULT {
+        E_NOTIMPL
     }
 
     fn SetData(
@@ -177,18 +181,16 @@ impl IDataObject_Impl for FileDataObject {
     fn EnumFormatEtc(
         &self,
         _dwdirection: u32,
-        _ppenumformatetc: *mut Option<IEnumFORMATETC>,
-    ) -> windows::core::Result<()> {
+    ) -> windows::core::Result<IEnumFORMATETC> {
         Err(windows::core::Error::from(E_NOTIMPL))
     }
 
     fn DAdvise(
         &self,
         _pformatetc: *const FORMATETC,
-        _advf: ADVF,
-        _padvsink: &IAdviseSink,
-        _pdwconnection: *mut u32,
-    ) -> windows::core::Result<()> {
+        _advf: u32,
+        _padvsink: Option<&IAdviseSink>,
+    ) -> windows::core::Result<u32> {
         Err(windows::core::Error::from(E_NOTIMPL))
     }
 
@@ -196,10 +198,7 @@ impl IDataObject_Impl for FileDataObject {
         Err(windows::core::Error::from(E_NOTIMPL))
     }
 
-    fn EnumDAdvise(
-        &self,
-        _ppenumadvise: *mut Option<IEnumSTATDATA>,
-    ) -> windows::core::Result<()> {
+    fn EnumDAdvise(&self) -> windows::core::Result<IEnumSTATDATA> {
         Err(windows::core::Error::from(E_NOTIMPL))
     }
 }
@@ -214,19 +213,19 @@ impl IDropSource_Impl for DropSource {
         &self,
         fescapepressed: BOOL,
         grfkeystate: MODIFIERKEYS_FLAGS,
-    ) -> windows::core::Result<()> {
+    ) -> HRESULT {
         if fescapepressed.as_bool() {
-            return Err(windows::core::Error::from(DRAGDROP_S_CANCEL));
+            return DRAGDROP_S_CANCEL;
         }
         if grfkeystate.0 & MK_LBUTTON == 0 {
             // Left button released: drop.
-            return Err(windows::core::Error::from(DRAGDROP_S_DROP));
+            return DRAGDROP_S_DROP;
         }
-        Ok(())
+        HRESULT(0)
     }
 
-    fn GiveFeedback(&self, _dweffect: DROPEFFECT) -> windows::core::Result<()> {
-        Err(windows::core::Error::from(DRAGDROP_S_USEDEFAULTCURSORS))
+    fn GiveFeedback(&self, _dweffect: DROPEFFECT) -> HRESULT {
+        DRAGDROP_S_USEDEFAULTCURSORS
     }
 }
 

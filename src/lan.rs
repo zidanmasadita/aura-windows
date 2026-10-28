@@ -397,7 +397,7 @@ impl LanShare {
     }
 
     fn handle_share_request(&self, stream: &mut TcpStream, body: &[u8]) {
-        let bad = || {
+        let mut bad = || {
             let b = serde_json::json!({"ok": false, "error": "bad request"}).to_string();
             send_json(stream, 400, &b);
         };
@@ -442,7 +442,7 @@ impl LanShare {
     }
 
     fn handle_share_file(&self, stream: &mut TcpStream, req: &HttpRequest) {
-        let forbidden = |err: &str| {
+        let mut forbidden = |err: &str| {
             let b = serde_json::json!({"ok": false, "error": err}).to_string();
             send_json(stream, 403, &b);
         };
