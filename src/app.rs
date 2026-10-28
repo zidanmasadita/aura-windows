@@ -6,7 +6,7 @@
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use windows::core::{w, Result, PCWSTR};
+use windows::core::{w, GUID, Result, PCWSTR};
 use windows::Win32::Foundation::*;
 use windows::Win32::Graphics::Gdi::HBRUSH;
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
@@ -17,7 +17,7 @@ use windows::Win32::UI::HiDpi::{
     SetProcessDpiAwarenessContext, DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2,
 };
 use windows::Win32::UI::Input::KeyboardAndMouse::{TrackMouseEvent, TME_LEAVE, TRACKMOUSEEVENT};
-use windows::Win32::UI::Shell::{CLSID_FileOpenDialog, DragAcceptFiles, DragFinish, DragQueryFileW, HDROP, IFileOpenDialog, SIGDN_FILESYSPATH};
+use windows::Win32::UI::Shell::{DragAcceptFiles, DragFinish, DragQueryFileW, HDROP, IFileOpenDialog, SIGDN_FILESYSPATH};
 use windows::Win32::UI::WindowsAndMessaging::*;
 
 use crate::animator;
@@ -1634,8 +1634,16 @@ impl App {
     /// Single-file picker (IFileOpenDialog; no new Cargo feature needed).
     fn pick_image_file(hwnd: HWND) -> Option<String> {
         unsafe {
+            // CLSID_FileOpenDialog (ShObjIdl_core.h; not exported by the
+            // windows 0.58 Shell bindings, so the documented value is used).
+            let clsid = GUID::from_values(
+                0xDC1C5A9C,
+                0xE88A,
+                0x4DDE,
+                [0xA5, 0xA1, 0x60, 0xF8, 0x2A, 0x20, 0xAE, 0xF7],
+            );
             let dialog: IFileOpenDialog =
-                CoCreateInstance(&CLSID_FileOpenDialog, None, CLSCTX_INPROC_SERVER).ok()?;
+                CoCreateInstance(&clsid, None, CLSCTX_INPROC_SERVER).ok()?;
             dialog.Show(hwnd).ok()?;
             let item = dialog.GetResult().ok()?;
             let name = item.GetDisplayName(SIGDN_FILESYSPATH).ok()?;
