@@ -55,12 +55,31 @@
 //! - Urutan poll diubah: current-yang-Playing dulu (fast path),
 //!   baru pindai daftar untuk Playing — satu sesi macet di daftar
 //!   tidak lagi memblokir sesi sehat yang sedang diputar.
+//! RE Nusa 2026-10-28 (status stuck MASIH muncul setelah fix 10 detik):
+//! - Poller diganti ke gaya Nusa: SATU STA loop thread dengan timer
+//!   (RE: Nusa memakai satu message-loop thread tulisan tangan +
+//!   timer, tanpa worker-thread polling di mana pun di biner).
+//!   Worker-thread Aura adalah outlier — dan karena stuck bertahan
+//!   melewati ambang 10 detik, worker terbukti tidak pernah selesai
+//!   sama sekali, cocok dengan kegagalan tanpa-pump yang sudah
+//!   didokumentasikan tim (b19b92a/9f1f911).
+//! - Poll kini INLINE di timer handler thread yang dipump (satu-satunya
+//!   bentuk yang terbukti mengembalikan hasil di riwayat Aura).
+//!   Watchdog thread terpisah (tanpa COM, hanya Atomics) melaporkan
+//!   freeze dan menelurkan incarnation baru bila tidak ada cache
+//!   write >10 detik; incarnation lama yang belakangan lolos gagal
+//!   cek generation dan tidak bisa menimpa data yang lebih baru.
+//! - Batas kejujuran: RE membuktikan arsitektur timer + single-thread
+//!   Nusa, BUKAN pola panggil GSMTC persisnya (poll vs event WinRT
+//!   tidak bisa dipulihkan dari biner stripped — hanya string
+//!   runtime-class GSMTC yang ada). Yang diikuti adalah arsitektur,
+//!   bukan klaim salinan panggilan GSMTC Nusa.
 //! If `cargo build` reports a signature mismatch (notably `.get()` on
 //! IAsyncOperation, HSTRING conversion, or TimeSpan field access), paste
 //! it — Eve cannot compile Rust in this VM, so the first build on the
 //! user's Windows PC is where WinRT signatures get corrected.
 
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -114,20 +133,15 @@ fn init_com() {
 /// and GetMessage dispatches it; poll() runs inside that loop, where
 /// .get() can pump the completion messages. A stuck poll only
 /// freezes this thread's cache, never the main window.
-/// Shared watchdog state. The loop thread never calls GSMTC itself;
-/// it only ticks and watches. A worker does one poll and exits. If a
-/// worker's .get() hangs (media app wedged mid-request), the loop
-/// abandons it after 10s without a cache write and spawns a replacement.
-/// Sequence-gated writes ignore stale workers; backoff (3s -> 30s) bounds leaked
-/// threads during a persistent hang. Lock order (never violated):
-/// cache and health are never held at the same time.
+/// Shared state for the Nusa-style poller (see spawn_poller).
+/// Only one poller incarnation polls at a time BY DESIGN, but an
+/// incarnation frozen inside .get() cannot stop itself: a separate
+/// watchdog thread watches last_write and spawns a fresh incarnation.
+/// Generation guards late writes from a superseded incarnation.
 struct PollerShared {
     cache: Arc<Mutex<PollCache>>,
-    // Tick terakhir yang tulisannya diterima. Worker dengan tick
-    // lebih kecil dari ini adalah basi: tulisannya ditolak agar
-    // tidak menimpa data yang lebih segar.
-    written_seq: Mutex<u64>,
-    busy: AtomicBool,
+    generation: AtomicU64,
+    tick_counter: AtomicU64,
     health: Mutex<PollerHealth>,
 }
 
@@ -137,108 +151,94 @@ struct PollerHealth {
     next_respawn_at: Instant,
 }
 
-/// Start the poller: one STA loop thread (timer + watchdog) plus one
-/// short-lived STA worker per poll. The loop thread owns the 250ms
-/// timer and never blocks on GSMTC, so one hung poll can no longer
-/// freeze detection at None forever — the failure mode behind
-/// "sometimes detected, mostly not". Workers create their own message
-/// queue (PeekMessage) before polling, the same precondition the old
-/// loop-thread design relied on for .get() completion delivery.
+/// Start the poller, Nusa-style (RE 2026-10-28, static-findings.md):
+/// Nusa runs everything on ONE hand-written message-loop thread with
+/// timers (timer 1 = main tick; animation on a re-armed timer; no
+/// worker-thread polling anywhere in the binary). Aura's worker
+/// threads were the outlier — and after the 10s-threshold fix the
+/// "poll stuck" status STILL persisted, i.e. workers never complete
+/// at all on this machine. That matches the team's own documented
+/// failure (b19b92a/9f1f911): a thread whose queue is created but
+/// never pumped never returns from RequestAsync().get().
+/// So: the poll runs INLINE in a pumped STA loop thread's timer
+/// handler (the configuration that demonstrably returned results in
+/// Aura's own history), and a watchdog thread (no COM, only Atomics)
+/// reports a freeze and spawns a fresh incarnation when no cache
+/// write lands for >10s. A frozen incarnation that later unblocks
+/// fails its generation check and cannot overwrite newer data.
+/// Honest limit: the RE proved Nusa's timer-driven single-thread
+/// architecture, not its exact GSMTC call pattern (poll vs WinRT
+/// events is not recoverable from the stripped binary — only the
+/// runtime-class string is). This follows the architecture, not a
+/// claimed copy of Nusa's GSMTC calls.
 pub fn spawn_poller(cache: Arc<Mutex<PollCache>>) {
     let shared = Arc::new(PollerShared {
         cache,
-        written_seq: Mutex::new(0),
-        busy: AtomicBool::new(false),
+        generation: AtomicU64::new(0),
+        tick_counter: AtomicU64::new(0),
         health: Mutex::new(PollerHealth {
             last_write: Instant::now(),
             backoff_secs: 3,
             next_respawn_at: Instant::now(),
         }),
     });
+    spawn_poller_incarnation(shared.clone());
+    // Watchdog: sleep loop, no COM, never touches GSMTC.
+    std::thread::spawn(move || loop {
+        std::thread::sleep(Duration::from_millis(250));
+        let now = Instant::now();
+        let mut respawn = false;
+        if let Ok(mut health) = shared.health.lock() {
+            if now.duration_since(health.last_write) > Duration::from_secs(10)
+                && now >= health.next_respawn_at
+            {
+                shared.generation.fetch_add(1, Ordering::SeqCst);
+                health.next_respawn_at = now + Duration::from_secs(health.backoff_secs);
+                health.backoff_secs = (health.backoff_secs * 3).min(30);
+                respawn = true;
+            }
+        }
+        if respawn {
+            if let Ok(mut guard) = shared.cache.lock() {
+                guard.status = "poll stuck, loop restarted".to_string();
+            }
+            spawn_poller_incarnation(shared.clone());
+        }
+    });
+}
+
+/// One poller incarnation: STA thread, own queue, 250ms timer, poll
+/// INLINE in the timer handler (pumped thread — the only shape that
+/// ever returned results here). Exits when its message loop ends
+/// (practically never; superseded incarnations are abandoned, not
+/// killed — a frozen one just leaks, its writes generation-gated).
+fn spawn_poller_incarnation(shared: Arc<PollerShared>) {
     std::thread::spawn(move || {
         init_com();
+        let gen = shared.generation.load(Ordering::SeqCst);
         unsafe {
             let mut msg = MSG::default();
             let _ = PeekMessageW(&mut msg, None, 0, 0, PM_NOREMOVE);
             let _ = SetTimer(None, 1, 250, None);
-            let mut count: u64 = 0;
             loop {
                 let ret = GetMessageW(&mut msg, None, 0, 0);
                 if ret.0 <= 0 {
                     break;
                 }
                 if msg.message == WM_TIMER {
-                    count += 1;
-                    let now = Instant::now();
-                    // Watchdog: abandon a worker with no cache write
-                    // for >10s (and past backoff), then replace it.
-                    // Ambang 10s (bukan 3s): poll lambat tapi selesai
-                    // harus tetap mendarat; yang diganti hanya
-                    // worker yang benar-benar menggantung.
-                    let mut respawn = false;
-                    if shared.busy.load(Ordering::SeqCst) {
-                        if let Ok(mut health) = shared.health.lock() {
-                            if now.duration_since(health.last_write)
-                                > Duration::from_secs(10)
-                                && now >= health.next_respawn_at
-                            {
-                                shared.busy.store(false, Ordering::SeqCst);
-                                health.next_respawn_at =
-                                    now + Duration::from_secs(health.backoff_secs);
-                                health.backoff_secs = (health.backoff_secs * 3).min(30);
-                                respawn = true;
-                            }
-                        }
-                    }
-                    if respawn {
-                        // Best-effort status note (cache lock taken
-                        // alone, never together with the health lock).
+                    let tick = shared.tick_counter.fetch_add(1, Ordering::SeqCst) + 1;
+                    let (info, status) = poll_status();
+                    if shared.generation.load(Ordering::SeqCst) == gen {
                         if let Ok(mut guard) = shared.cache.lock() {
-                            guard.status = "poll stuck, worker restarted".to_string();
+                            *guard = PollCache {
+                                info,
+                                status: format!("{} | #{}", status, tick),
+                            };
                         }
-                    }
-                    if !shared.busy.load(Ordering::SeqCst) {
-                        let worker_shared = shared.clone();
-                        let tick = count;
-                        shared.busy.store(true, Ordering::SeqCst);
-                        std::thread::spawn(move || {
-                            init_com();
-                            // Tanpa blok unsafe dalam: compiler menyatakan
-                            // closure ini sudah berada dalam unsafe context
-                            // thread loop (warning unused_unsafe).
-                            let mut wmsg = MSG::default();
-                            let _ = PeekMessageW(&mut wmsg, None, 0, 0, PM_NOREMOVE);
-                            let (info, status) = poll_status();
-                            // Terima tulisan ini hanya bila belum ada
-                            // worker yang lebih baru menulis: worker
-                            // basi yang selesai belakangan tidak boleh
-                            // menimpa data yang lebih segar, tapi worker
-                            // lambat yang belum tergantikan tetap mendarat.
-                            let mut fresh = false;
-                            if let Ok(mut written) = worker_shared.written_seq.lock() {
-                                if tick >= *written {
-                                    *written = tick;
-                                    fresh = true;
-                                }
-                            }
-                            if fresh {
-                                if let Ok(mut guard) = worker_shared.cache.lock() {
-                                    *guard = PollCache {
-                                        info,
-                                        status: format!("{} | #{}", status, tick),
-                                    };
-                                }
-                                if let Ok(mut health) = worker_shared.health.lock() {
-                                    health.last_write = Instant::now();
-                                    health.backoff_secs = 3;
-                                }
-                            }
-                            // Clearing busy after the write keeps the
-                            // loop from spawning a duplicate mid-write;
-                            // a duplicate from the tiny load/store race
-                            // is benign (idempotent polls, seq-gated writes).
-                            worker_shared.busy.store(false, Ordering::SeqCst);
-                        });
+                        if let Ok(mut health) = shared.health.lock() {
+                            health.last_write = Instant::now();
+                            health.backoff_secs = 3;
+                        }
                     }
                 } else {
                     let _ = TranslateMessage(&msg);
@@ -249,9 +249,6 @@ pub fn spawn_poller(cache: Arc<Mutex<PollCache>>) {
     });
 }
 
-/// Run a control action on a throwaway thread (never the UI thread).
-/// The caller does not wait: the next poller cycle (<=250ms) refreshes
-/// the card icon/progress, so the play/pause icon flips within a tick.
 /// Message a control thread posts to itself (see spawn_control).
 const CONTROL_MSG: u32 = 0x8002; // WM_APP + 2 (tray callback uses 0x8001)
 
