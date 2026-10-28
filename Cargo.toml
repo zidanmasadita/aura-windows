@@ -22,6 +22,7 @@ windows = { version = "0.58", features = [
     "Win32_System_LibraryLoader",
     "Win32_System_Threading",
     "Win32_System_Com",
+    "Win32_System_Com_StructuredStorage", # Phase 3b fix: STGMEDIUM + IDataObject_Impl live behind this feature
     "Win32_System_Ole", # Phase 3b: DoDragDrop, IDataObject, IDropSource, OleInitialize
     "Win32_System_Memory", # Phase 3b: GlobalAlloc for CF_HDROP
     "Win32_System_SystemServices", # MODIFIERKEYS_FLAGS (IDropSource QueryContinueDrag param type)
@@ -31,6 +32,7 @@ windows = { version = "0.58", features = [
     "Foundation_Collections",
     "Web_Http",
 ] }
+windows-core = "0.58" # Phase 3b fix: #[implement] expands to windows_core paths; without a direct dep the macro fails with E0433
 chrono = "0.4"
 serde_json = "1.0"
 

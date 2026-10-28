@@ -7,19 +7,22 @@
 //! so the drop target owns the copy it receives and repeated drags
 //! never share one handle. No DropSource / IDataObject use beyond
 //! what DoDragDrop needs is implemented; the rest return E_NOTIMPL.
+//!
+//! windows-rs 0.58 import quirks (fixed from the first build errors):
+//! STGMEDIUM/IDataObject_Impl need feature Win32_System_Com_StructuredStorage,
+//! #[implement] needs windows-core as a direct dependency, GlobalFree lives
+//! in Win32::Foundation (not System::Memory), and DV_E_* are literals above.
 
 use std::mem::ManuallyDrop;
 
 use windows::core::{implement, HRESULT};
-use windows::Win32::Foundation::{BOOL, E_INVALIDARG, E_NOTIMPL, E_OUTOFMEMORY, HGLOBAL, POINT};
+use windows::Win32::Foundation::{BOOL, E_INVALIDARG, E_NOTIMPL, E_OUTOFMEMORY, GlobalFree, HGLOBAL, POINT};
 use windows::Win32::System::Com::{
-    ADVF, DV_E_DVASPECT, DV_E_FORMATETC, DV_E_TYMED, DVASPECT_CONTENT, FORMATETC, IAdviseSink,
+    ADVF, DVASPECT_CONTENT, FORMATETC, IAdviseSink,
     IDataObject, IDataObject_Impl, IEnumFORMATETC, IEnumSTATDATA, STGMEDIUM, STGMEDIUM_0,
     TYMED_HGLOBAL,
 };
-use windows::Win32::System::Memory::{
-    GlobalAlloc, GlobalFree, GlobalLock, GlobalUnlock, GMEM_MOVEABLE,
-};
+use windows::Win32::System::Memory::{GlobalAlloc, GlobalLock, GlobalUnlock, GMEM_MOVEABLE};
 use windows::Win32::System::Ole::{
     DoDragDrop, CF_HDROP, DROPEFFECT, DROPEFFECT_COPY, IDropSource, IDropSource_Impl,
 };
@@ -31,6 +34,11 @@ use windows::Win32::UI::Shell::DROPFILES;
 const DRAGDROP_S_DROP: HRESULT = HRESULT(0x00040100);
 const DRAGDROP_S_CANCEL: HRESULT = HRESULT(0x00040101);
 const DRAGDROP_S_USEDEFAULTCURSORS: HRESULT = HRESULT(0x00040102);
+// DV_E_* error codes (objidl): windows-rs 0.58 does not export them
+// from System::Com, so they are spelled out as literals here.
+const DV_E_FORMATETC: HRESULT = HRESULT(0x80040064u32 as i32);
+const DV_E_DVASPECT: HRESULT = HRESULT(0x80040066u32 as i32);
+const DV_E_TYMED: HRESULT = HRESULT(0x80040069u32 as i32);
 // MK_LBUTTON bit in QueryContinueDrag's grfKeyState (Win32 docs).
 const MK_LBUTTON: u32 = 0x0001;
 
