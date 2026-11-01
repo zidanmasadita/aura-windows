@@ -693,8 +693,9 @@ impl App {
         let h = self.pill.height.max(1.0);
         let idle = !self.pill.state.is_expanded() && self.current_alert().is_none();
         let hovered = self.pill_hovered && !self.hide_fs && !self.pill_covered && !self.dodging;
-        // Peek: slide up leaving a 10px tip visible (never hide fully).
-        let peek = -((window::CANVAS_H - h) / 2.0 + h - 10.0);
+        // Peek: the pill is drawn at the top of the canvas (y=0..h), so slide
+        // the window up by (h-10), leaving a 10px tip visible. Never hide fully.
+        let peek = 10.0 - h;
         let hide = idle
             && (self.hide_fs
                 || (self.settings.hide_when_covered && self.pill_covered)
