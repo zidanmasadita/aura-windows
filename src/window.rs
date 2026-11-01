@@ -111,7 +111,12 @@ pub fn foreground_is_fullscreen() -> bool {
             return false;
         }
         let mr = mi.rcMonitor;
-        rc.left == mr.left && rc.top == mr.top && rc.right == mr.right && rc.bottom == mr.bottom
+        // Allow a 2px tolerance: some games (borderless) leave a 1px border.
+        const TOL: i32 = 2;
+        (rc.left - mr.left).abs() <= TOL
+            && (rc.top - mr.top).abs() <= TOL
+            && (rc.right - mr.right).abs() <= TOL
+            && (rc.bottom - mr.bottom).abs() <= TOL
     }
 }
 
