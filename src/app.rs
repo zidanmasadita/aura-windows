@@ -1283,6 +1283,49 @@ impl App {
                         self.pill_covered = false;
                     }
                 }
+
+                // Robust hover polling for fullscreen games/videos and peeking states:
+                let mut cursor_pt = POINT::default();
+                if unsafe { GetCursorPos(&mut cursor_pt).is_ok() } {
+                    let dpi = window::dpi_scale(self.hwnd);
+                    let (target_w, _) = self.target_size_for(self.pill.state);
+                    let active_w = self.pill.width.max(target_w).max(120.0);
+                    let half_w = (active_w * dpi * 0.5).round() as i32;
+                    let mon_cx = self.main_base.0 + ((window::CANVAS_W * dpi) * 0.5).round() as i32;
+                    let mon_top = self.main_base.1;
+                    let in_x = cursor_pt.x >= mon_cx - half_w - 12 && cursor_pt.x <= mon_cx + half_w + 12;
+                    let is_peeking = self.pill_y_offset < -1.0;
+                    let max_hover_y = if is_peeking {
+                        mon_top + (14.0 * dpi).round() as i32
+                    } else {
+                        mon_top + ((self.pill.height + 8.0) * dpi).round() as i32
+                    };
+                    let in_y = cursor_pt.y >= mon_top && cursor_pt.y <= max_hover_y;
+
+                    if in_x && in_y {
+                        if !self.pill_hovered {
+                            self.pill_hovered = true;
+                            self.ensure_anim_timer();
+                        }
+                        if !self.pill.state.is_expanded()
+                            && !self.hover_expand_timer_active
+                            && !self.suppress_hover_open_after_click_close
+                        {
+                            self.hover_expand_timer_active = true;
+                            self.hover_bulging = true;
+                            let delay = self.settings.hover_open_delay_ms.max(50) as u32;
+                            unsafe {
+                                let _ = SetTimer(self.hwnd, TIMER_HOVER_EXPAND, delay, None);
+                            }
+                            let (to_w, to_h) = self.target_size_for(self.pill.state);
+                            self.spring.set_target(to_w, to_h, animator::SpringPreset::Bulge);
+                            self.ensure_anim_timer();
+                        }
+                    } else if !self.manual_hold && self.pill_hovered && !self.cursor_inside_window() {
+                        self.apply_mouse_leave();
+                    }
+                }
+
                 // If dodge / covered / fullscreen changed the slide target while
                 // the animation timer was stopped, restart it so the slide is smooth.
                 if (self.pill_y_offset - self.pill_offset_target()).abs() > 0.5 {
@@ -1387,13 +1430,19 @@ impl App {
         self.tracking_mouse = true;
     }
 
-    /// Convert window client pixel coordinates `(x_px, y_px)` into pill-local logical points `(x, y)`.
+    pub fn base_pill_size(&self) -> (f32, f32) {
+        let notch_scale = self.settings.notch_scale.clamp(0.8, 1.5);
+        (self.pill.width / notch_scale, self.pill.height / notch_scale)
+    }
+
+    /// Convert window client pixel coordinates `(x_px, y_px)` into pill-local base points `(x, y)`.
     fn client_px_to_pill_pt(&self, x_px: i32, y_px: i32) -> (f32, f32) {
         let scale = window::dpi_scale(self.hwnd);
         let canvas_x = (x_px as f32) / scale;
         let canvas_y = (y_px as f32) / scale;
         let offset_x = (window::CANVAS_W - self.pill.width) * 0.5;
-        (canvas_x - offset_x, canvas_y)
+        let notch_scale = self.settings.notch_scale.clamp(0.8, 1.5);
+        ((canvas_x - offset_x) / notch_scale, canvas_y / notch_scale)
     }
 
     fn cursor_inside_pill(&self, x_px: i32, y_px: i32) -> bool {
@@ -1405,7 +1454,12 @@ impl App {
         let canvas_y = (y_px as f32) / scale;
         let left = (window::CANVAS_W - max_w) * 0.5;
         let right = (window::CANVAS_W + max_w) * 0.5;
-        canvas_x >= left - 6.0 && canvas_x <= right + 6.0 && canvas_y >= 0.0 && canvas_y <= max_h + 6.0
+        let (min_y, max_y_allowed) = if self.pill_y_offset < -1.0 {
+            (-self.pill_y_offset - 4.0, -self.pill_y_offset + 14.0)
+        } else {
+            (0.0, max_h + 8.0)
+        };
+        canvas_x >= left - 8.0 && canvas_x <= right + 8.0 && canvas_y >= min_y && canvas_y <= max_y_allowed
     }
 
     fn cursor_inside_window(&self) -> bool {
@@ -1429,10 +1483,15 @@ impl App {
         let offset_x_px = (((window::CANVAS_W - active_w) * 0.5) * scale).round() as i32;
         let pill_w_px = (active_w * scale).round() as i32;
         let pill_h_px = (active_h * scale).round() as i32;
-        let pill_left = rect.left + offset_x_px - 6;
-        let pill_right = rect.left + offset_x_px + pill_w_px + 6;
-        let pill_top = rect.top;
-        let pill_bottom = rect.top + pill_h_px + 6;
+        let pill_left = rect.left + offset_x_px - 8;
+        let pill_right = rect.left + offset_x_px + pill_w_px + 8;
+        let mon_top = self.main_base.1;
+        let pill_top = rect.top.min(mon_top);
+        let pill_bottom = if self.pill_y_offset < -1.0 {
+            mon_top + (14.0 * scale).round() as i32
+        } else {
+            rect.top + pill_h_px + 8
+        };
         pt.x >= pill_left && pt.x <= pill_right && pt.y >= pill_top && pt.y <= pill_bottom
     }
 
@@ -1469,12 +1528,16 @@ impl App {
         self.suppress_leave = false;
         self.pill_hovered = true;
         self.arm_mouse_tracking();
+        if (self.pill_y_offset - self.pill_offset_target()).abs() > 0.5 {
+            self.ensure_anim_timer();
+        }
 
         let (pill_x, pill_y) = self.client_px_to_pill_pt(x_px, y_px);
         self.mouse_pt = Some((pill_x, pill_y));
+        let (base_w, base_h) = self.base_pill_size();
         let old_hovered_dot = self.hovered_dot;
         self.hovered_dot = if self.pill.state.is_expanded() {
-            renderer::dot_index_at(pill_x, pill_y, self.pill.width, self.pill.height)
+            renderer::dot_index_at(pill_x, pill_y, base_w, base_h)
         } else {
             None
         };
@@ -1513,8 +1576,8 @@ impl App {
 
         if self.pill.state == IslandState::Zen {
             let (x, y) = self.client_px_to_pill_pt(x_px, y_px);
-            let mid_x = self.pill.width * 0.5;
-            let mid_y = self.pill.height * 0.5;
+            let mid_x = base_w * 0.5;
+            let mid_y = base_h * 0.5;
             self.eye_look = (((x - mid_x) / 45.0).clamp(-1.0, 1.0), ((y - mid_y) / 25.0).clamp(-1.0, 1.0));
             if self.media.is_none() && !self.pomodoro.is_active(chrono::Local::now()) {
                 self.on_paint();
@@ -1535,7 +1598,7 @@ impl App {
         }
         if self.music_progress_dragging {
             let (x, _) = self.client_px_to_pill_pt(x_px, y_px);
-            let lyrics_t = ((self.pill.width - 540.0) / (700.0 - 540.0)).clamp(0.0, 1.0);
+            let lyrics_t = ((base_w - 540.0) / (700.0 - 540.0)).clamp(0.0, 1.0);
             let bar_w = 340.0 + (164.0 - 340.0) * lyrics_t;
             let bar_left = 98.0f32;
             let bar_right = bar_left + bar_w;
@@ -1550,7 +1613,7 @@ impl App {
         }
         if self.pill.state == IslandState::Expanded || self.pill.state == IslandState::Lyrics {
             let (x, y) = self.client_px_to_pill_pt(x_px, y_px);
-            let lyrics_t = ((self.pill.width - 540.0) / (700.0 - 540.0)).clamp(0.0, 1.0);
+            let lyrics_t = ((base_w - 540.0) / (700.0 - 540.0)).clamp(0.0, 1.0);
             let bar_w = 324.0 + (164.0 - 324.0) * lyrics_t;
             let bar_hover = x >= 90.0 && x <= (98.0 + bar_w + 4.0) && y >= 98.0 && y <= 122.0;
             if bar_hover != self.music_bar_hover {
@@ -1856,7 +1919,8 @@ impl App {
         }
         if self.pill.state == IslandState::Expanded || self.pill.state == IslandState::Lyrics {
             let (x, y) = self.client_px_to_pill_pt(x_px, y_px);
-            let lyrics_t = ((self.pill.width - 540.0) / (700.0 - 540.0)).clamp(0.0, 1.0);
+            let (base_w, _) = self.base_pill_size();
+            let lyrics_t = ((base_w - 540.0) / (700.0 - 540.0)).clamp(0.0, 1.0);
             let bar_w = 340.0 + (164.0 - 340.0) * lyrics_t;
             let bar_left = 98.0f32;
             let bar_right = bar_left + bar_w;
@@ -2080,7 +2144,8 @@ impl App {
         }
 
         // 1. Bottom interactive section dots:
-        if let Some(dot_idx) = renderer::dot_index_at(x, y, self.pill.width, self.pill.height) {
+        let (base_w, base_h) = self.base_pill_size();
+        if let Some(dot_idx) = renderer::dot_index_at(x, y, base_w, base_h) {
             let target = IslandState::from_section_index(dot_idx);
             if target != self.pill.state
                 && !(target == IslandState::Expanded && self.pill.state == IslandState::Lyrics)
@@ -2131,7 +2196,7 @@ impl App {
                     }
 
                     if self.media.is_some() {
-                        let lyrics_t = ((self.pill.width - 540.0) / (700.0 - 540.0)).clamp(0.0, 1.0);
+                        let lyrics_t = ((base_w - 540.0) / (700.0 - 540.0)).clamp(0.0, 1.0);
                         let centers = [
                             renderer::MUSIC_CONTROL_CENTERS[0]
                                 + (renderer::LYRICS_CONTROL_CENTERS[0]
@@ -3865,7 +3930,11 @@ unsafe extern "system" fn wnd_proc(
             LRESULT(0)
         }
         crate::settings_window::WM_SETTINGS_UPDATED => {
-            app.settings = crate::settings::AuraSettings::load();
+            let new_settings = crate::settings_window::get_active_settings()
+                .unwrap_or_else(crate::settings::AuraSettings::load);
+            let monitor_changed = new_settings.pill_show_all_monitors != app.settings.pill_show_all_monitors
+                || new_settings.pill_monitor != app.settings.pill_monitor;
+            app.settings = new_settings;
             crate::tray::set_autorun(app.settings.start_with_windows);
             app.water.set_goal(app.settings.water_daily_goal as i64);
             app.pomodoro.focus_mins = app.settings.pomodoro_focus_mins;
@@ -3879,7 +3948,9 @@ unsafe extern "system" fn wnd_proc(
                 crate::convert::ConvertFormat::Webp,
                 crate::convert::ConvertFormat::Png,
             ][app.settings.convert_format_idx.min(2)];
-            app.rebuild_canvases();
+            if monitor_changed {
+                app.rebuild_canvases();
+            }
             app.refresh_anim_timer();
             let state = app.pill.state;
             let (tw, th) = app.target_size_for(state);

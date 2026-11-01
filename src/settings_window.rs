@@ -34,6 +34,16 @@ pub const WM_SETTINGS_PREVIEW: u32 = WM_USER + 56;
 pub const WM_SETTINGS_DRAG_END: u32 = WM_USER + 57;
 
 static SETTINGS_HWND: Mutex<Option<isize>> = Mutex::new(None);
+static ACTIVE_SETTINGS: Mutex<Option<AuraSettings>> = Mutex::new(None);
+
+pub fn update_active_settings(s: &AuraSettings) {
+    let mut guard = ACTIVE_SETTINGS.lock().unwrap();
+    *guard = Some(s.clone());
+}
+
+pub fn get_active_settings() -> Option<AuraSettings> {
+    ACTIVE_SETTINGS.lock().unwrap().clone()
+}
 static MAIN_HWND: Mutex<Option<isize>> = Mutex::new(None);
 
 pub fn open(main_hwnd: HWND) {
@@ -209,10 +219,11 @@ fn apply_slider(state: &mut State, kind: SliderKind, x: f32) {
         SliderKind::DodgeDelay => state.settings.dodge_delay_ms = v.round() as u64,
         SliderKind::HoverDelay => state.settings.hover_open_delay_ms = v.round() as u64,
     }
+    update_active_settings(&state.settings);
     // Throttle to ~30fps to avoid message flood causing flicker.
     // Don't hit disk on every mouse move; persisted on drag end.
     let now = std::time::Instant::now();
-    if now.duration_since(state.last_slider_notify).as_millis() >= 33 {
+    if now.duration_since(state.last_slider_notify).as_millis() >= 16 {
         state.last_slider_notify = now;
         notify_main();
     }
@@ -355,8 +366,11 @@ impl State {
             let target = dc_target.cast::<ID2D1RenderTarget>()?;
             target.SetAntialiasMode(D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
 
+            let settings = AuraSettings::load();
+            update_active_settings(&settings);
+
             Ok(Self {
-                settings: AuraSettings::load(),
+                settings,
                 selected_tab: 0,
                 hovered_tab: None,
                 hovered_close: false,
@@ -510,10 +524,12 @@ unsafe extern "system" fn settings_wnd_proc(
         }
         WM_LBUTTONUP => {
             if state.dragging_slider.take().is_some() {
+                update_active_settings(&state.settings);
                 state.settings.save();
                 unsafe {
                     let _ = ReleaseCapture();
                 }
+                notify_main();
                 notify_drag_end();
                 render_window(hwnd);
             }

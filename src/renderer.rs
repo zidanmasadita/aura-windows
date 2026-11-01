@@ -1384,7 +1384,7 @@ impl Renderer {
             }
             IslandState::Compact => {
                 if lh <= 32.0 {
-                    self.draw_closed(target, ctx);
+                    self.draw_closed(target, ctx, lw, lh);
                 }
             }
             IslandState::Expanded | IslandState::Lyrics => {
@@ -2046,12 +2046,14 @@ impl Renderer {
                     M31: cx * (1.0 - cos_a) + cy * sin_a,
                     M32: cy * (1.0 - cos_a) - cx * sin_a,
                 };
+                let mut old_xform = Matrix3x2::identity();
                 unsafe {
-                    target.SetTransform(&rot);
+                    target.GetTransform(&mut old_xform);
+                    target.SetTransform(&(rot * old_xform));
                 }
                 self.fill_rounded(target, cx - w * 0.5, cy - h * 0.5, w, h, r, white);
                 unsafe {
-                    target.SetTransform(&Matrix3x2::identity());
+                    target.SetTransform(&old_xform);
                 }
             } else {
                 self.fill_rounded(target, cx - w * 0.5, cy - h * 0.5, w, h, r, white);
@@ -2501,9 +2503,7 @@ impl Renderer {
         }
     }
 
-    fn draw_closed(&self, target: &ID2D1RenderTarget, ctx: &RenderContext) {
-        let lw = ctx.cur_w;
-        let lh = ctx.cur_h;
+    fn draw_closed(&self, target: &ID2D1RenderTarget, ctx: &RenderContext, lw: f32, lh: f32) {
         let mid_y = lh * 0.5;
         let now = chrono::Local::now();
 
@@ -2597,8 +2597,8 @@ impl Renderer {
         _bar_hover: bool,
         seek_pos: Option<f64>,
         base_xform: &Matrix3x2,
-        s: f32,
-        tx: f32,
+        _s: f32,
+        _tx: f32,
         music_bar_zoom: f32,
         master_volume: f32,
         volume_bar_zoom: f32,
@@ -2721,13 +2721,15 @@ impl Renderer {
         let ctrl_c = if m_opt.is_some() { color(1.0, 1.0, 1.0, 1.0) } else { color(1.0, 1.0, 1.0, 0.28) };
         let draw_scaled = |cx: f32, cy: f32, zoom: f32, f: &dyn Fn()| {
             if (zoom - 1.0).abs() > 0.005 {
+                let m11 = zoom * base_xform.M11;
+                let m22 = zoom * base_xform.M22;
                 let mat = Matrix3x2 {
-                    M11: zoom * s,
+                    M11: m11,
                     M12: 0.0,
                     M21: 0.0,
-                    M22: zoom * s,
-                    M31: cx * (1.0 - zoom) * s + tx,
-                    M32: cy * (1.0 - zoom) * s,
+                    M22: m22,
+                    M31: cx * (1.0 - zoom) * base_xform.M11 + base_xform.M31,
+                    M32: cy * (1.0 - zoom) * base_xform.M22 + base_xform.M32,
                 };
                 unsafe {
                     target.SetTransform(&mat);
@@ -5025,7 +5027,7 @@ impl Renderer {
             let info = shelf.get_info(path);
             let mut alpha = if info.exists { 1.0 } else { 0.40 };
 
-            let mut pop_xform = false;
+            let mut pop_xform: Option<Matrix3x2> = None;
             if let Some(p) = genie_progress {
                 let p_clamped = p.clamp(0.0, 1.0);
                 let (dest_x, dest_y) = (108.0f32, 24.0f32);
@@ -5042,10 +5044,12 @@ impl Renderer {
                     M31: cur_cx - cx * scale,
                     M32: cur_cy - cy * scale,
                 };
+                let mut old_mat = Matrix3x2::identity();
                 unsafe {
-                    target.SetTransform(&mat);
+                    target.GetTransform(&mut old_mat);
+                    target.SetTransform(&(mat * old_mat));
                 }
-                pop_xform = true;
+                pop_xform = Some(old_mat);
             }
 
             // Pure minimal: NO background box and NO border unless selected!
@@ -5124,9 +5128,9 @@ impl Renderer {
                 );
             }
 
-            if pop_xform {
+            if let Some(old_mat) = pop_xform {
                 unsafe {
-                    target.SetTransform(&Matrix3x2::identity());
+                    target.SetTransform(&old_mat);
                 }
             }
         }
@@ -5221,8 +5225,11 @@ impl Renderer {
             }
         }
         let (lw, lh) = (ctx.cur_w, ctx.cur_h);
+        let notch_scale = ctx.settings.notch_scale.clamp(0.8, 1.5);
+        let base_w = lw / notch_scale;
+        let base_h = lh / notch_scale;
         let lyrics_t = if ctx.state == IslandState::Expanded || ctx.state == IslandState::Lyrics {
-            ((lw - 520.0) / (700.0 - 520.0)).clamp(0.0, 1.0)
+            ((base_w - 520.0) / (700.0 - 520.0)).clamp(0.0, 1.0)
         } else {
             0.0
         };
@@ -5248,20 +5255,21 @@ impl Renderer {
             } else {
                 1.0
             };
+            let content_scale = s * notch_scale;
             let tx = window::CANVAS_W * 0.5 - (lw * 0.5) * s;
             let base_xform = Matrix3x2 {
-                M11: s,
+                M11: content_scale,
                 M12: 0.0,
                 M21: 0.0,
-                M22: s,
+                M22: content_scale,
                 M31: tx,
                 M32: 0.0,
             };
             target.SetTransform(&base_xform);
 
-            // Smoothly interpolate bottom corner radius between pill (`lh * 0.5`) and expanded card (`28.0`):
-            let expand_t = ((lh - 32.0) / (180.0 - 32.0)).clamp(0.0, 1.0);
-            let radius = (lh * 0.5) * (1.0 - expand_t) + 28.0 * expand_t;
+            // Smoothly interpolate bottom corner radius between pill (`base_h * 0.5`) and expanded card (`28.0`):
+            let expand_t = ((base_h - 32.0) / (180.0 - 32.0)).clamp(0.0, 1.0);
+            let base_radius = (base_h * 0.5) * (1.0 - expand_t) + 28.0 * expand_t;
 
             let grad_alpha = if !ctx.state.is_expanded() && ctx.lyrics_mode && ctx.alert.is_none() {
                 0.98
@@ -5269,7 +5277,7 @@ impl Renderer {
                 0.98 * lyrics_t
             };
 
-            let geometry_opt = self.nusa_geometry(lw, lh, radius);
+            let geometry_opt = self.nusa_geometry(base_w, base_h, base_radius);
             if let Some(geometry) = &geometry_opt {
                 // Subtle dark ambient backdrop shadow around notch edges
                 if let Some(b_shadow) = self.brush(&target, color(0.0, 0.0, 0.0, 0.08)) {
@@ -5300,7 +5308,7 @@ impl Renderer {
                         ) {
                             let gprops = D2D1_LINEAR_GRADIENT_BRUSH_PROPERTIES {
                                 startPoint: D2D_POINT_2F { x: 0.0, y: 0.0 },
-                                endPoint: D2D_POINT_2F { x: 0.0, y: lh },
+                                endPoint: D2D_POINT_2F { x: 0.0, y: base_h },
                             };
                             if let Ok(gbrush) =
                                 target.CreateLinearGradientBrush(&gprops, None, &stop_col)
@@ -5316,15 +5324,15 @@ impl Renderer {
             let clip_bounds = D2D_RECT_F {
                 left: 0.0,
                 top: 0.0,
-                right: lw,
-                bottom: lh,
+                right: base_w,
+                bottom: base_h,
             };
             target.PushAxisAlignedClip(&clip_bounds, D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
 
             let playing = ctx.media.map(|m| m.playing).unwrap_or(false);
 
             if !ctx.state.is_expanded() && ctx.alert.is_some() {
-                self.draw_pill_alert(&target, lw, lh, ctx.alert.unwrap());
+                self.draw_pill_alert(&target, base_w, base_h, ctx.alert.unwrap());
             } else if ctx.transition_active && ctx.state.is_expanded() {
                 let p = ctx.transition_progress.clamp(0.0, 1.0);
                 let ease = 1.0 - (1.0 - p).powi(3);
@@ -5334,8 +5342,8 @@ impl Renderer {
                 let clip_rect = D2D_RECT_F {
                     left: 14.0,
                     top: 0.0,
-                    right: lw - 14.0,
-                    bottom: lh,
+                    right: base_w - 14.0,
+                    bottom: base_h,
                 };
                 target.PushAxisAlignedClip(&clip_rect, D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
 
@@ -5347,11 +5355,11 @@ impl Renderer {
                     if from_alpha > 0.01 {
                         let from_offset = -dir * ease * max_drift;
                         let trans_from = Matrix3x2 {
-                            M11: s,
+                            M11: content_scale,
                             M12: 0.0,
                             M21: 0.0,
-                            M22: s,
-                            M31: tx + from_offset,
+                            M22: content_scale,
+                            M31: tx + from_offset * content_scale,
                             M32: 0.0,
                         };
                         let layer_params = D2D1_LAYER_PARAMETERS {
@@ -5365,7 +5373,7 @@ impl Renderer {
                         };
                         target.PushLayer(&layer_params, None);
                         target.SetTransform(&trans_from);
-                        self.draw_card_content(&target, ctx.transition_from, ctx, playing, &base_xform, s, tx, lw, lh, lyrics_t);
+                        self.draw_card_content(&target, ctx.transition_from, ctx, playing, &base_xform, s, tx, base_w, base_h, lyrics_t);
                         target.PopLayer();
                     }
                 }
@@ -5374,11 +5382,11 @@ impl Renderer {
                 let to_alpha = p.powf(0.8).clamp(0.0, 1.0);
                 let to_offset = dir * (1.0 - ease) * max_drift;
                 let trans_to = Matrix3x2 {
-                    M11: s,
+                    M11: content_scale,
                     M12: 0.0,
                     M21: 0.0,
-                    M22: s,
-                    M31: tx + to_offset,
+                    M22: content_scale,
+                    M31: tx + to_offset * content_scale,
                     M32: 0.0,
                 };
                 let layer_params = D2D1_LAYER_PARAMETERS {
@@ -5392,25 +5400,25 @@ impl Renderer {
                 };
                 target.PushLayer(&layer_params, None);
                 target.SetTransform(&trans_to);
-                self.draw_card_content(&target, ctx.state, ctx, playing, &base_xform, s, tx, lw, lh, lyrics_t);
+                self.draw_card_content(&target, ctx.state, ctx, playing, &base_xform, s, tx, base_w, base_h, lyrics_t);
                 target.PopLayer();
 
                 target.PopAxisAlignedClip();
             } else {
                 target.SetTransform(&base_xform);
-                self.draw_card_content(&target, ctx.state, ctx, playing, &base_xform, s, tx, lw, lh, lyrics_t);
+                self.draw_card_content(&target, ctx.state, ctx, playing, &base_xform, s, tx, base_w, base_h, lyrics_t);
             }
 
             let has_header = ctx.header_active;
 
-            let expand_t = ((lh - 30.0) / (184.0 - 30.0)).clamp(0.0, 1.0);
+            let expand_t = ((base_h - 30.0) / (184.0 - 30.0)).clamp(0.0, 1.0);
 
-            if (ctx.state.is_expanded() || lh > 32.0) && ctx.state != IslandState::Zen {
+            if (ctx.state.is_expanded() || base_h > 32.0) && ctx.state != IslandState::Zen {
                 target.SetTransform(&base_xform);
                 self.draw_morphing_header(
                     &target,
-                    lw,
-                    lh,
+                    base_w,
+                    base_h,
                     expand_t,
                     playing,
                     ctx.battery_percent,
@@ -5419,8 +5427,9 @@ impl Renderer {
                 );
             }
 
-            if ctx.state.is_expanded() && ctx.state != IslandState::Settings && lh > 60.0 {
-                self.draw_page_dots(&target, ctx.state, lw, lh, ctx.dot_indicator_bounds, ctx.hovered_dot, lyrics_t);
+            if ctx.state.is_expanded() && ctx.state != IslandState::Settings && base_h > 60.0 {
+                target.SetTransform(&base_xform);
+                self.draw_page_dots(&target, ctx.state, base_w, base_h, ctx.dot_indicator_bounds, ctx.hovered_dot, lyrics_t);
             }
 
             target.PopAxisAlignedClip();
