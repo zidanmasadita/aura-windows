@@ -98,7 +98,7 @@ pub fn foreground_is_fullscreen() -> bool {
             return false;
         }
         let mut rc = RECT::default();
-        if !GetWindowRect(fg, &mut rc).as_bool() {
+        if GetWindowRect(fg, &mut rc).is_err() {
             return false;
         }
         let hmon = MonitorFromWindow(fg, MONITOR_DEFAULTTONEAREST);
