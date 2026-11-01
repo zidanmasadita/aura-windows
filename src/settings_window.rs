@@ -26,7 +26,7 @@ use crate::settings::AuraSettings;
 use crate::window;
 
 pub const WIN_W: f32 = 740.0;
-pub const WIN_H: f32 = 700.0;
+pub const WIN_H: f32 = 780.0;
 pub const SIDEBAR_W: f32 = 210.0;
 
 pub const WM_SETTINGS_UPDATED: u32 = WM_USER + 55;

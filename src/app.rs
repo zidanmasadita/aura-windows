@@ -124,6 +124,7 @@ pub struct App {
     pill_hovered: bool,
     preview_close_at: Option<Instant>,
     manual_hold: bool,
+    was_hide_fs: bool,
     renderer: renderer::Renderer,
     pill: state::PillState,
     spring: animator::Spring2D,
@@ -351,6 +352,7 @@ impl App {
             pill_hovered: false,
             preview_close_at: None,
             manual_hold: false,
+            was_hide_fs: false,
         });
         app.water.set_goal(app.settings.water_daily_goal as i64);
         app.pomodoro.focus_mins = app.settings.pomodoro_focus_mins;
@@ -699,11 +701,17 @@ impl App {
         // Peek: the pill is drawn at the top of the canvas (y=0..h), so slide
         // the window up by (h-5), leaving a 5px tip visible. Never hide fully.
         let peek = 5.0 - h;
-        // If the user is hovering the pill (even just the peek tip), reveal it.
         // Once opened (not idle), never hide until the user closes it.
         // If the user manually clicked to open, hold it visible (no auto-hide).
-        // This prevents flicker: hide must not fight an active hover/open.
-        if self.pill_hovered || !idle || self.manual_hold {
+        if !idle || self.manual_hold {
+            return 0.0;
+        }
+        // If hovering a visible (non-peeked) pill, don't hide.
+        // If the pill is peeked, don't reveal on hover alone: the hover-expand
+        // timer will open it directly (avoids flicker from slide/mouse-leave
+        // fighting during the reveal animation).
+        let is_peeked = self.pill_y_offset < -1.0;
+        if self.pill_hovered && !is_peeked {
             return 0.0;
         }
         let hide = self.hide_fs
@@ -1287,10 +1295,13 @@ impl App {
                 if (self.pill_y_offset - self.pill_offset_target()).abs() > 0.5 {
                     self.ensure_anim_timer();
                 }
-                // Release the manual hold when leaving fullscreen.
-                if !self.hide_fs && self.manual_hold {
+                // Release the manual hold only on fullscreen EXIT transition
+                // (was fullscreen, now not). Don't clear when hide_fs is simply
+                // false (e.g. hide_when_covered without fullscreen).
+                if self.was_hide_fs && !self.hide_fs && self.manual_hold {
                     self.manual_hold = false;
                 }
+                self.was_hide_fs = self.hide_fs;
                 // Auto-close the pill 0.5s after the user stops dragging a slider.
                 if let Some(deadline) = self.preview_close_at {
                     if Instant::now() >= deadline {
