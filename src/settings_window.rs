@@ -6,7 +6,7 @@ use std::mem::ManuallyDrop;
 use std::sync::Mutex;
 use windows::core::{w, Interface, PCWSTR, Result};
 use windows::Foundation::Numerics::Matrix3x2;
-use windows::Win32::Foundation::{BOOL, COLORREF, HWND, LPARAM, LRESULT, POINT, RECT, SIZE, WPARAM};
+use windows::Win32::Foundation::{COLORREF, HWND, LPARAM, LRESULT, POINT, RECT, SIZE, WPARAM};
 use windows::Win32::Graphics::Direct2D::Common::*;
 use windows::Win32::Graphics::Direct2D::*;
 use windows::Win32::Graphics::DirectWrite::*;
@@ -525,7 +525,7 @@ fn render_window(hwnd: HWND) {
         target.Clear(Some(&color(0.0, 0.0, 0.0, 0.0)));
 
         // Window capsule background with 18.0 rounded corners
-        let win_rect = D2D1_ROUNDED_RECT {
+        let _win_rect = D2D1_ROUNDED_RECT {
             rect: D2D_RECT_F {
                 left: 0.0,
                 top: 0.0,

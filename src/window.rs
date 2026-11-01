@@ -7,10 +7,10 @@
 //! automatically transparent and click-through in Win32 (`ULW_ALPHA`), eliminating all
 //! `SetWindowPos`, `SetWindowRgn`, and swapchain `Resize` stutter.
 
-use windows::Win32::Foundation::{BOOL, HMONITOR, HWND, LPARAM, RECT, TRUE};
+use windows::Win32::Foundation::{BOOL, HWND, LPARAM, RECT, TRUE};
 use windows::Win32::Graphics::Gdi::{
-    EnumDisplayMonitors, GetMonitorInfoW, HDC, MONITORINFO, MONITORINFOEXW, MONITORINFOF_PRIMARY,
-    MONITOR_DEFAULTTONEAREST, MONITORENUMPROC, MonitorFromWindow,
+    EnumDisplayMonitors, GetMonitorInfoW, HDC, HMONITOR, MONITORINFO, MONITORINFOEXW,
+    MONITOR_DEFAULTTONEAREST, MonitorFromWindow,
 };
 use windows::Win32::UI::HiDpi::GetDpiForWindow;
 use windows::Win32::UI::WindowsAndMessaging::{
@@ -69,11 +69,11 @@ pub fn list_monitors() -> Vec<MonitorInfo> {
             let mut mi = MONITORINFOEXW::default();
             mi.monitorInfo.cbSize = std::mem::size_of::<MONITORINFOEXW>() as u32;
             if GetMonitorInfoW(hmon, &mut mi as *mut _ as *mut MONITORINFO).as_bool() {
-                let name_len = mi.szDeviceName.iter().position(|&c| c == 0).unwrap_or(32);
-                let device = String::from_utf16_lossy(&mi.szDeviceName[..name_len]);
+                let name_len = mi.szDevice.iter().position(|&c| c == 0).unwrap_or(32);
+                let device = String::from_utf16_lossy(&mi.szDevice[..name_len]);
                 Some(MonitorInfo {
                     index: 0,
-                    primary: (mi.monitorInfo.dwFlags & MONITORINFOF_PRIMARY) != 0,
+                    primary: (mi.monitorInfo.dwFlags & 1) != 0, // MONITORINFOF_PRIMARY
                     device,
                     work: mi.monitorInfo.rcWork,
                 })
@@ -98,13 +98,13 @@ pub fn foreground_is_fullscreen() -> bool {
             return false;
         }
         let mut rc = RECT::default();
-        if GetWindowRect(fg, &mut rc).is_err() {
+        if !GetWindowRect(fg, &mut rc).as_bool() {
             return false;
         }
         let hmon = MonitorFromWindow(fg, MONITOR_DEFAULTTONEAREST);
         let mut mi = MONITORINFO::default();
         mi.cbSize = std::mem::size_of::<MONITORINFO>() as u32;
-        if GetMonitorInfoW(hmon, &mut mi).is_err() {
+        if !GetMonitorInfoW(hmon, &mut mi).as_bool() {
             return false;
         }
         let mr = mi.rcMonitor;
