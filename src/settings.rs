@@ -17,8 +17,20 @@ fn default_pomodoro_mins() -> u32 {
     25
 }
 
-fn default_size_idx() -> usize {
-    1 // 100%
+fn default_convert_format() -> usize {
+    1 // WebP
+}
+
+fn default_one_f32() -> f32 {
+    1.0
+}
+
+fn default_dodge_radius() -> f32 {
+    140.0
+}
+
+fn default_dodge_delay() -> u64 {
+    350
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -51,10 +63,10 @@ pub struct AuraSettings {
     pub pomodoro_focus_mins: u32,
 
     // Standalone Settings Page additions:
-    #[serde(default = "default_size_idx")]
-    pub notch_size_idx: usize, // 0=Auto, 1=100%, 2=115%, 3=130%, 4=150%
+    #[serde(default = "default_one_f32")]
+    pub notch_scale: f32, // pill size multiplier, 0.8..=1.5 (slider, default 1.0)
     #[serde(default)]
-    pub minimal_notch: bool, // A smaller pill when nothing is playing
+    pub minimal_notch: bool, // peek mode: hide the pill, leaving only its tip visible when idle
     #[serde(default = "default_true")]
     pub hide_in_fullscreen: bool, // Games, videos and slides that fill the screen
     #[serde(default = "default_true")]
@@ -65,8 +77,22 @@ pub struct AuraSettings {
     pub sound_on_complete: bool,
     #[serde(default)]
     pub pill_monitor: i32, // 0-based index into window::list_monitors() (primary first)
+    #[serde(default = "default_one_f32")]
+    pub pill_opacity: f32, // 0.4..=1.0 (slider, default 1.0)
     #[serde(default)]
-    pub pill_opacity_idx: usize, // 0=100%, 1=85%, 2=70%, 3=55%
+    pub pill_show_all_monitors: bool, // show the pill on every monitor
+    #[serde(default)]
+    pub hide_when_covered: bool, // auto-hide when a window covers the pill
+    #[serde(default)]
+    pub dodge_enabled: bool, // hide when the cursor comes close
+    #[serde(default = "default_dodge_radius")]
+    pub dodge_radius: f32, // px around the pill that triggers dodge
+    #[serde(default = "default_dodge_delay")]
+    pub dodge_delay_ms: u64, // how long the cursor must stay inside the radius
+    #[serde(default)]
+    pub removebg_model_idx: usize, // 0=Fast, 1=Balanced, 2=Quality
+    #[serde(default = "default_convert_format")]
+    pub convert_format_idx: usize, // 0=AVIF, 1=WebP, 2=PNG
     #[serde(default = "default_true")]
     pub pill_alerts_enabled: bool,
     #[serde(default = "default_true")]
@@ -91,14 +117,21 @@ impl Default for AuraSettings {
             eye_expressions: true,
             water_daily_goal: 2000,
             pomodoro_focus_mins: 25,
-            notch_size_idx: 1, // 100%
+            notch_scale: 1.0,
             minimal_notch: false,
             hide_in_fullscreen: true,
             lyrics_sync: true,
             master_volume_control: true,
             sound_on_complete: true,
             pill_monitor: 0,
-            pill_opacity_idx: 0,
+            pill_opacity: 1.0,
+            pill_show_all_monitors: false,
+            hide_when_covered: false,
+            dodge_enabled: false,
+            dodge_radius: 140.0,
+            dodge_delay_ms: 350,
+            removebg_model_idx: 0,
+            convert_format_idx: 1,
             pill_alerts_enabled: true,
             alert_battery: true,
             alert_capslock: true,

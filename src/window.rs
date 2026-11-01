@@ -7,15 +7,18 @@
 //! automatically transparent and click-through in Win32 (`ULW_ALPHA`), eliminating all
 //! `SetWindowPos`, `SetWindowRgn`, and swapchain `Resize` stutter.
 
-use windows::Win32::Foundation::{BOOL, HWND, LPARAM, RECT, TRUE};
+use windows::core::{w, PCWSTR};
+use windows::Win32::Foundation::{BOOL, FALSE, HINSTANCE, HWND, LPARAM, RECT, TRUE};
 use windows::Win32::Graphics::Gdi::{
     EnumDisplayMonitors, GetMonitorInfoW, HDC, HMONITOR, MONITORINFO, MONITORINFOEXW,
     MONITOR_DEFAULTTONEAREST, MonitorFromWindow,
 };
 use windows::Win32::UI::HiDpi::GetDpiForWindow;
 use windows::Win32::UI::WindowsAndMessaging::{
-    GetForegroundWindow, GetWindowRect, SetWindowPos, SystemParametersInfoW, HWND_TOPMOST,
-    SPI_GETWORKAREA, SWP_NOACTIVATE, SWP_SHOWWINDOW, SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS,
+    CreateWindowExW, EnumWindows, GetForegroundWindow, GetWindowRect, IsIconic, IsWindowVisible,
+    SetWindowPos, SystemParametersInfoW, HWND_TOPMOST, SPI_GETWORKAREA, SWP_NOACTIVATE,
+    SWP_SHOWWINDOW, SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS, WS_EX_LAYERED, WS_EX_NOACTIVATE,
+    WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP,
 };
 
 /// Logical width of the fixed transparent canvas (accommodates `700pt` Lyrics + `1.15x` Tray bounce headroom).
@@ -172,4 +175,82 @@ pub fn place_canvas_on_monitor(hwnd: HWND, monitor_idx: i32) -> (i32, i32, i32, 
 /// Called once at startup (and if DPI changes), never during animation frames.
 pub fn place_canvas_top_center(hwnd: HWND) -> (i32, i32, i32, i32) {
     place_canvas_on_monitor(hwnd, 0)
+}
+
+/// Create an additional pill canvas window (same layered/topmost style as the main one).
+/// The caller must set GWLP_USERDATA, position it and show it.
+pub fn create_canvas_window(
+    hinstance: HINSTANCE,
+    class_name: PCWSTR,
+) -> windows::core::Result<HWND> {
+    unsafe {
+        CreateWindowExW(
+            WS_EX_LAYERED | WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW | WS_EX_TOPMOST,
+            class_name,
+            w!("Aura"),
+            WS_POPUP,
+            0,
+            0,
+            760,
+            330,
+            None,
+            None,
+            hinstance,
+            None,
+        )
+    }
+}
+
+/// Top-left position for a canvas on the given work rect (top-center), at `dpi` scale.
+pub fn canvas_xy_for_work(work: &RECT, dpi: f32) -> (i32, i32) {
+    let width = (CANVAS_W * dpi).round() as i32;
+    let x = work.left + (work.right - work.left - width) / 2;
+    (x, work.top)
+}
+
+/// True when any visible, non-minimized top-level window (other than `exclude`)
+/// overlaps `pill` (screen pixels).
+pub fn is_rect_covered_by_window(pill: RECT, exclude: &[HWND]) -> bool {
+    struct Ctx {
+        pill: RECT,
+        exclude: Vec<isize>,
+        covered: bool,
+    }
+    unsafe extern "system" fn enum_proc(hwnd: HWND, lp: LPARAM) -> BOOL {
+        let ctx = &mut *(lp.0 as *mut Ctx);
+        if ctx.covered {
+            return FALSE;
+        }
+        if ctx.exclude.iter().any(|&e| e == hwnd.0 as isize) {
+            return TRUE;
+        }
+        if !IsWindowVisible(hwnd).as_bool() || IsIconic(hwnd).as_bool() {
+            return TRUE;
+        }
+        let mut rc = RECT::default();
+        if GetWindowRect(hwnd, &mut rc).is_err() {
+            return TRUE;
+        }
+        if rc.right <= rc.left || rc.bottom <= rc.top {
+            return TRUE;
+        }
+        if rc.left < ctx.pill.right
+            && rc.right > ctx.pill.left
+            && rc.top < ctx.pill.bottom
+            && rc.bottom > ctx.pill.top
+        {
+            ctx.covered = true;
+            return FALSE;
+        }
+        TRUE
+    }
+    let mut ctx = Ctx {
+        pill,
+        exclude: exclude.iter().map(|h| h.0 as isize).collect(),
+        covered: false,
+    };
+    unsafe {
+        let _ = EnumWindows(Some(enum_proc), LPARAM(&mut ctx as *mut Ctx as isize));
+    }
+    ctx.covered
 }

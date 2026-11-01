@@ -13,6 +13,12 @@ use windows::Win32::Graphics::DirectWrite::*;
 use windows::Win32::Graphics::Dxgi::Common::DXGI_FORMAT_B8G8R8A8_UNORM;
 use windows::Win32::Graphics::Gdi::*;
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
+use windows::Win32::System::Com::{CoCreateInstance, CLSCTX_INPROC_SERVER};
+use windows::Win32::Graphics::Imaging::{
+    CLSID_WICImagingFactory, GUID_WICPixelFormat32bppPBGRA, IWICImagingFactory,
+    WICBitmapDitherTypeNone, WICBitmapInterpolationModeFant, WICBitmapPaletteTypeMedianCut,
+    WICDecodeMetadataCacheOnDemand,
+};
 use windows::Win32::UI::Input::KeyboardAndMouse::{ReleaseCapture, TrackMouseEvent, TME_LEAVE, TRACKMOUSEEVENT};
 use windows::Win32::UI::WindowsAndMessaging::*;
 
@@ -24,6 +30,7 @@ pub const WIN_H: f32 = 540.0;
 pub const SIDEBAR_W: f32 = 210.0;
 
 pub const WM_SETTINGS_UPDATED: u32 = WM_USER + 55;
+pub const WM_SETTINGS_PREVIEW: u32 = WM_USER + 56;
 
 static SETTINGS_HWND: Mutex<Option<isize>> = Mutex::new(None);
 static MAIN_HWND: Mutex<Option<isize>> = Mutex::new(None);
@@ -60,6 +67,21 @@ pub fn notify_main() {
     }
 }
 
+/// Ask the main pill to open itself so the user can preview a size/opacity change live.
+/// HWND of the settings window, if open (used to exclude it from cover checks).
+pub fn settings_hwnd() -> Option<HWND> {
+    (*SETTINGS_HWND.lock().unwrap()).map(|raw| HWND(raw as *mut core::ffi::c_void))
+}
+
+pub fn notify_preview() {
+    if let Some(raw) = *MAIN_HWND.lock().unwrap() {
+        let hwnd = HWND(raw as *mut core::ffi::c_void);
+        unsafe {
+            let _ = PostMessageW(hwnd, WM_SETTINGS_PREVIEW, WPARAM(0), LPARAM(0));
+        }
+    }
+}
+
 struct State {
     settings: AuraSettings,
     selected_tab: usize,
@@ -77,8 +99,115 @@ struct State {
     fmt_row_title: Option<IDWriteTextFormat>,
     fmt_row_sub: Option<IDWriteTextFormat>,
     fmt_sidebar: Option<IDWriteTextFormat>,
-    fmt_badge: Option<IDWriteTextFormat>,
     fmt_seg: Option<IDWriteTextFormat>,
+    tab_icons: [Option<ID2D1Bitmap>; 12],
+    dragging_slider: Option<SliderKind>,
+    slider_hover: Option<SliderKind>,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum SliderKind {
+    Size,
+    Opacity,
+    DodgeRadius,
+    DodgeDelay,
+}
+
+fn slider_tab(kind: SliderKind) -> usize {
+    match kind {
+        SliderKind::Size => 0,
+        SliderKind::Opacity => 2,
+        SliderKind::DodgeRadius | SliderKind::DodgeDelay => 10,
+    }
+}
+
+fn slider_min_max(kind: SliderKind) -> (f32, f32) {
+    match kind {
+        SliderKind::Size => (0.8, 1.5),
+        SliderKind::Opacity => (0.4, 1.0),
+        SliderKind::DodgeRadius => (60.0, 300.0),
+        SliderKind::DodgeDelay => (0.0, 1000.0),
+    }
+}
+
+fn slider_tick(kind: SliderKind) -> Option<f32> {
+    match kind {
+        SliderKind::Size => Some(1.0),
+        SliderKind::Opacity => None,
+        SliderKind::DodgeRadius => Some(140.0),
+        SliderKind::DodgeDelay => Some(350.0),
+    }
+}
+
+/// (track_x, track_center_y, track_w) — fixed geometry per slider.
+fn slider_geom(kind: SliderKind) -> (f32, f32, f32) {
+    match kind {
+        SliderKind::Size => (250.0, 218.0, 432.0),
+        SliderKind::Opacity => (250.0, 148.0, 432.0),
+        SliderKind::DodgeRadius => (250.0, 350.0, 432.0),
+        SliderKind::DodgeDelay => (250.0, 410.0, 432.0),
+    }
+}
+
+fn slider_value(s: &State, kind: SliderKind) -> f32 {
+    match kind {
+        SliderKind::Size => s.settings.notch_scale,
+        SliderKind::Opacity => s.settings.pill_opacity,
+        SliderKind::DodgeRadius => s.settings.dodge_radius,
+        SliderKind::DodgeDelay => s.settings.dodge_delay_ms as f32,
+    }
+}
+
+fn slider_format(kind: SliderKind, v: f32) -> String {
+    match kind {
+        SliderKind::Size | SliderKind::Opacity => format!("{:.0}%", v * 100.0),
+        SliderKind::DodgeRadius => format!("{:.0} px", v),
+        SliderKind::DodgeDelay => format!("{:.0} ms", v),
+    }
+}
+
+fn slider_snap(kind: SliderKind, v: f32) -> f32 {
+    if let Some(t) = slider_tick(kind) {
+        let tol = match kind {
+            SliderKind::Size => 0.025,
+            SliderKind::DodgeRadius => 8.0,
+            _ => 25.0,
+        };
+        if (v - t).abs() < tol {
+            return t;
+        }
+    }
+    v
+}
+
+fn apply_slider(state: &mut State, kind: SliderKind, x: f32) {
+    let (sx, _, w) = slider_geom(kind);
+    let (min, max) = slider_min_max(kind);
+    let t = ((x - sx) / w).clamp(0.0, 1.0);
+    let v = slider_snap(kind, min + t * (max - min));
+    match kind {
+        SliderKind::Size => state.settings.notch_scale = v,
+        SliderKind::Opacity => state.settings.pill_opacity = v,
+        SliderKind::DodgeRadius => state.settings.dodge_radius = v,
+        SliderKind::DodgeDelay => state.settings.dodge_delay_ms = v.round() as u64,
+    }
+    state.settings.save();
+    notify_main();
+}
+
+fn slider_hit(x: f32, y: f32) -> Option<SliderKind> {
+    for kind in [
+        SliderKind::Size,
+        SliderKind::Opacity,
+        SliderKind::DodgeRadius,
+        SliderKind::DodgeDelay,
+    ] {
+        let (sx, cy, w) = slider_geom(kind);
+        if x >= sx - 14.0 && x <= sx + w + 14.0 && y >= cy - 18.0 && y <= cy + 18.0 {
+            return Some(kind);
+        }
+    }
+    None
 }
 
 fn color(r: f32, g: f32, b: f32, a: f32) -> D2D1_COLOR_F {
@@ -165,7 +294,6 @@ impl State {
             let fmt_row_title = make_fmt(12.5, DWRITE_FONT_WEIGHT_MEDIUM);
             let fmt_row_sub = make_fmt(10.0, DWRITE_FONT_WEIGHT_NORMAL);
             let fmt_sidebar = make_fmt(11.5, DWRITE_FONT_WEIGHT_MEDIUM);
-            let fmt_badge = make_fmt(8.0, DWRITE_FONT_WEIGHT_BOLD);
             let fmt_seg = make_fmt(10.5, DWRITE_FONT_WEIGHT_MEDIUM);
 
             let mem_dc = CreateCompatibleDC(None);
@@ -220,8 +348,10 @@ impl State {
                 fmt_row_title,
                 fmt_row_sub,
                 fmt_sidebar,
-                fmt_badge,
                 fmt_seg,
+                tab_icons: Default::default(),
+                dragging_slider: None,
+                slider_hover: None,
             })
         }
     }
@@ -245,21 +375,32 @@ unsafe extern "system" fn settings_wnd_proc(
             let y = ((lparam.0 >> 16) & 0xffff) as i16 as f32;
             state.mouse_pt = Some((x, y));
 
+            // Active slider drag: live value update
+            if let Some(kind) = state.dragging_slider {
+                apply_slider(state, kind, x);
+                render_window(hwnd);
+                return LRESULT(0);
+            }
+
+            // Slider knob hover
+            let old_sh = state.slider_hover;
+            state.slider_hover = slider_hit(x, y).filter(|k| slider_tab(*k) == state.selected_tab);
+
             let old_close = state.hovered_close;
             state.hovered_close = x >= 10.0 && x <= 32.0 && y >= 10.0 && y <= 32.0;
 
             let old_tab = state.hovered_tab;
             state.hovered_tab = None;
-            if x < SIDEBAR_W && y >= 48.0 && y <= 450.0 {
-                let idx = ((y - 48.0) / 36.0) as usize;
-                if idx < 9 {
+            if x < SIDEBAR_W && y >= 48.0 && y <= 48.0 + 11.0 * 34.0 {
+                let idx = ((y - 48.0) / 34.0) as usize;
+                if idx < 11 {
                     state.hovered_tab = Some(idx);
                 }
-            } else if x < SIDEBAR_W && y >= 490.0 && y <= 526.0 {
-                state.hovered_tab = Some(9); // About
+            } else if x < SIDEBAR_W && y >= 490.0 && y <= 524.0 {
+                state.hovered_tab = Some(11); // About
             }
 
-            if old_close != state.hovered_close || old_tab != state.hovered_tab {
+            if old_close != state.hovered_close || old_tab != state.hovered_tab || old_sh != state.slider_hover {
                 render_window(hwnd);
             }
 
@@ -293,15 +434,15 @@ unsafe extern "system" fn settings_wnd_proc(
 
             // 2. Sidebar tab click:
             if x < SIDEBAR_W {
-                if y >= 48.0 && y <= 450.0 {
-                    let idx = ((y - 48.0) / 36.0) as usize;
-                    if idx < 9 {
+                if y >= 48.0 && y <= 48.0 + 11.0 * 34.0 {
+                    let idx = ((y - 48.0) / 34.0) as usize;
+                    if idx < 11 {
                         state.selected_tab = idx;
                         render_window(hwnd);
                         return LRESULT(0);
                     }
-                } else if y >= 490.0 && y <= 526.0 {
-                    state.selected_tab = 9; // About
+                } else if y >= 490.0 && y <= 524.0 {
+                    state.selected_tab = 11; // About
                     render_window(hwnd);
                     return LRESULT(0);
                 }
@@ -320,9 +461,35 @@ unsafe extern "system" fn settings_wnd_proc(
                 return LRESULT(0);
             }
 
-            // 4. Content Area Click based on active tab:
+            // 4. Slider drag start (before generic content click):
+            if let Some(kind) = slider_hit(x, y) {
+                if slider_tab(kind) == state.selected_tab {
+                    state.dragging_slider = Some(kind);
+                    unsafe {
+                        let _ = SetCapture(hwnd);
+                    }
+                    apply_slider(state, kind, x);
+                    // Open the pill so the user sees the size/opacity change live.
+                    if matches!(kind, SliderKind::Size | SliderKind::Opacity) {
+                        notify_preview();
+                    }
+                    render_window(hwnd);
+                    return LRESULT(0);
+                }
+            }
+
+            // 5. Content Area Click based on active tab:
             handle_content_click(hwnd, state, x, y);
 
+            LRESULT(0)
+        }
+        WM_LBUTTONUP => {
+            if state.dragging_slider.take().is_some() {
+                unsafe {
+                    let _ = ReleaseCapture();
+                }
+                render_window(hwnd);
+            }
             LRESULT(0)
         }
         WM_DESTROY => {
@@ -347,19 +514,6 @@ fn handle_content_click(hwnd: HWND, state: &mut State, x: f32, y: f32) {
             notify_main();
             render_window(hwnd);
             return;
-        }
-
-        // Notch Size Segmented Control: (y: 200..232, x: 250..682)
-        if y >= 200.0 && y <= 234.0 && x >= 250.0 && x <= 682.0 {
-            let seg_w = (682.0 - 250.0) / 5.0;
-            let idx = ((x - 250.0) / seg_w) as usize;
-            if idx < 5 {
-                state.settings.notch_size_idx = idx;
-                state.settings.save();
-                notify_main();
-                render_window(hwnd);
-                return;
-            }
         }
 
         // Minimal notch toggle: (y: 248..280)
@@ -398,26 +552,25 @@ fn handle_content_click(hwnd: HWND, state: &mut State, x: f32, y: f32) {
             return;
         }
     } else if state.selected_tab == 1 {
-        // Tab: Display — monitor rows at y = 84 + i*56, height 48
-        let mons = crate::window::list_monitors();
-        for (i, _) in mons.iter().enumerate() {
-            let ry = 84.0 + i as f32 * 56.0;
-            if y >= ry && y <= ry + 48.0 && x >= 236.0 && x <= 696.0 {
-                state.settings.pill_monitor = i as i32;
-                state.settings.save();
-                notify_main();
-                render_window(hwnd);
-                return;
-            }
+        // Tab: Display
+        // Show on all monitors toggle (y: 84..138)
+        if y >= 84.0 && y <= 138.0 && x >= 236.0 && x <= 696.0 {
+            state.settings.pill_show_all_monitors = !state.settings.pill_show_all_monitors;
+            state.settings.save();
+            notify_main();
+            render_window(hwnd);
+            return;
         }
-    } else if state.selected_tab == 2 {
-        // Tab: Appearance — opacity segmented (y: 132..162)
-        if y >= 132.0 && y <= 162.0 && x >= 250.0 && x <= 682.0 {
-            if let Some(idx) = segmented_hit(x, 250.0, 432.0, 4) {
-                state.settings.pill_opacity_idx = idx;
-                state.settings.save();
-                notify_main();
-                render_window(hwnd);
+        // Monitor map click
+        if !state.settings.pill_show_all_monitors {
+            for (i, (rx, ry, rw, rh)) in monitor_map_rects().iter().enumerate() {
+                if x >= *rx && x <= rx + rw && y >= *ry && y <= ry + rh {
+                    state.settings.pill_monitor = i as i32;
+                    state.settings.save();
+                    notify_main();
+                    render_window(hwnd);
+                    return;
+                }
             }
         }
     } else if state.selected_tab == 3 {
@@ -492,6 +645,26 @@ fn handle_content_click(hwnd: HWND, state: &mut State, x: f32, y: f32) {
             render_window(hwnd);
         }
     } else if state.selected_tab == 8 {
+        // Tab: Remove BG — model segmented (y: 132..162)
+        if y >= 132.0 && y <= 162.0 && x >= 250.0 && x <= 682.0 {
+            if let Some(idx) = segmented_hit(x, 250.0, 432.0, 3) {
+                state.settings.removebg_model_idx = idx;
+                state.settings.save();
+                notify_main();
+                render_window(hwnd);
+            }
+        }
+    } else if state.selected_tab == 9 {
+        // Tab: Convert — format segmented (y: 132..162)
+        if y >= 132.0 && y <= 162.0 && x >= 250.0 && x <= 682.0 {
+            if let Some(idx) = segmented_hit(x, 250.0, 432.0, 3) {
+                state.settings.convert_format_idx = idx;
+                state.settings.save();
+                notify_main();
+                render_window(hwnd);
+            }
+        }
+    } else if state.selected_tab == 10 {
         // Tab: HUD & popups
         if y >= 84.0 && y <= 132.0 && x >= 236.0 && x <= 696.0 {
             state.settings.pill_alerts_enabled = !state.settings.pill_alerts_enabled;
@@ -508,6 +681,16 @@ fn handle_content_click(hwnd: HWND, state: &mut State, x: f32, y: f32) {
             state.settings.save();
             notify_main();
             render_window(hwnd);
+        } else if y >= 262.0 && y <= 308.0 && x >= 236.0 && x <= 696.0 {
+            state.settings.dodge_enabled = !state.settings.dodge_enabled;
+            state.settings.save();
+            notify_main();
+            render_window(hwnd);
+        } else if y >= 460.0 && y <= 514.0 && x >= 236.0 && x <= 696.0 {
+            state.settings.hide_when_covered = !state.settings.hide_when_covered;
+            state.settings.save();
+            notify_main();
+            render_window(hwnd);
         }
     }
 }
@@ -518,6 +701,7 @@ fn render_window(hwnd: HWND) {
         return;
     }
     let s = unsafe { &mut *ptr };
+    ensure_tab_icons(s);
     let Some(target) = s.target.as_ref() else { return };
 
     unsafe {
@@ -605,54 +789,60 @@ fn render_window(hwnd: HWND) {
             draw_close_cross(target, 21.0, 21.0, 3.5, color(0.3, 0.0, 0.0, 0.9));
         }
 
-        // Sidebar Menu Items:
+        // Sidebar Menu Items (PNG icons from assets/):
         let tabs = [
-            ("General", color(0.35, 0.35, 0.38, 1.0), '⚙'),
-            ("Display", color(0.04, 0.52, 1.0, 1.0), '🖥'),
-            ("Appearance", color(0.37, 0.36, 0.90, 1.0), '◑'),
-            ("Music and lyrics", color(1.0, 0.18, 0.33, 1.0), '♫'),
-            ("To-do", color(0.20, 0.78, 0.35, 1.0), '✓'),
-            ("Pomodoro", color(1.0, 0.58, 0.0, 1.0), '⏱'),
-            ("Water", color(0.20, 0.68, 0.90, 1.0), '💧'),
-            ("Shelf", color(1.0, 0.80, 0.0, 1.0), '🗂'),
-            ("HUD & popups", color(0.35, 0.78, 0.98, 1.0), '🔔'),
+            "General",
+            "Display",
+            "Appearance",
+            "Music and lyrics",
+            "To-do",
+            "Pomodoro",
+            "Water",
+            "Shelf",
+            "Remove BG",
+            "Convert",
+            "HUD & popups",
         ];
 
         let mut item_y = 48.0f32;
-        for (i, &(title, icon_bg, sym)) in tabs.iter().enumerate() {
+        for (i, title) in tabs.iter().enumerate() {
             let is_sel = s.selected_tab == i;
             let is_hov = s.hovered_tab == Some(i);
 
             let bg_a = if is_sel { 0.14 } else if is_hov { 0.06 } else { 0.0 };
             if bg_a > 0.0 {
-                fill_rounded(target, 10.0, item_y, 190.0, 32.0, 8.0, color(1.0, 1.0, 1.0, bg_a));
+                fill_rounded(target, 10.0, item_y, 190.0, 30.0, 8.0, color(1.0, 1.0, 1.0, bg_a));
             }
 
-            // Rounded square icon container
-            fill_rounded(target, 16.0, item_y + 5.0, 22.0, 22.0, 5.5, icon_bg);
-            draw_char_icon(target, sym, 27.0, item_y + 16.0, color(1.0, 1.0, 1.0, 0.95), s.fmt_badge.as_ref());
+            // PNG icon, 22x22
+            if let Some(bmp) = s.tab_icons[i].as_ref() {
+                let r = D2D_RECT_F { left: 16.0, top: item_y + 4.0, right: 38.0, bottom: item_y + 26.0 };
+                target.DrawBitmap(bmp, Some(&r), 1.0, D2D1_BITMAP_INTERPOLATION_MODE_LINEAR, None);
+            }
 
             // Label
             let tc = if is_sel { color(1.0, 1.0, 1.0, 1.0) } else { color(1.0, 1.0, 1.0, 0.80) };
             if let Some(fmt) = s.fmt_sidebar.as_ref() {
-                draw_text(target, title, fmt, 46.0, item_y + 6.0, tc);
+                draw_text(target, title, fmt, 46.0, item_y + 5.0, tc);
             }
 
-            item_y += 36.0;
+            item_y += 34.0;
         }
 
-        // Bottom item: About
-        let about_sel = s.selected_tab == 9;
-        let about_hov = s.hovered_tab == Some(9);
+        // Bottom item: About (index 11)
+        let about_sel = s.selected_tab == 11;
+        let about_hov = s.hovered_tab == Some(11);
         let about_bg = if about_sel { 0.14 } else if about_hov { 0.06 } else { 0.0 };
         if about_bg > 0.0 {
-            fill_rounded(target, 10.0, 492.0, 190.0, 32.0, 8.0, color(1.0, 1.0, 1.0, about_bg));
+            fill_rounded(target, 10.0, 492.0, 190.0, 30.0, 8.0, color(1.0, 1.0, 1.0, about_bg));
         }
-        fill_rounded(target, 16.0, 497.0, 22.0, 22.0, 5.5, color(0.35, 0.35, 0.38, 1.0));
-        draw_char_icon(target, 'ⓘ', 27.0, 508.0, color(1.0, 1.0, 1.0, 0.95), s.fmt_badge.as_ref());
+        if let Some(bmp) = s.tab_icons[11].as_ref() {
+            let r = D2D_RECT_F { left: 16.0, top: 496.0, right: 38.0, bottom: 518.0 };
+            target.DrawBitmap(bmp, Some(&r), 1.0, D2D1_BITMAP_INTERPOLATION_MODE_LINEAR, None);
+        }
         if let Some(fmt) = s.fmt_sidebar.as_ref() {
             let tc = if about_sel { color(1.0, 1.0, 1.0, 1.0) } else { color(1.0, 1.0, 1.0, 0.80) };
-            draw_text(target, "About", fmt, 46.0, 498.0, tc);
+            draw_text(target, "About", fmt, 46.0, 497.0, tc);
         }
 
         // --- Right Content Area ---
@@ -665,7 +855,9 @@ fn render_window(hwnd: HWND) {
             5 => draw_pomodoro_page(target, s),
             6 => draw_water_page(target, s),
             7 => draw_shelf_page(target, s),
-            8 => draw_hud_page(target, s),
+            8 => draw_removebg_page(target, s),
+            9 => draw_convert_page(target, s),
+            10 => draw_hud_page(target, s),
             _ => draw_about_page(target, s),
         }
 
@@ -725,30 +917,14 @@ fn draw_general_page(target: &ID2D1RenderTarget, s: &State) {
     let notch_h = 156.0;
     fill_rounded(target, cx0, 156.0, card_w, notch_h, 10.0, color(0.16, 0.16, 0.18, 0.95));
 
-    // Sub-item: Size
+    // Sub-item: Size (live slider)
     if let Some(fmt) = s.fmt_row_title.as_ref() {
         draw_text(target, "Size", fmt, cx0 + 16.0, 166.0, color(1.0, 1.0, 1.0, 0.95));
     }
     if let Some(fmt) = s.fmt_row_sub.as_ref() {
-        draw_text(target, "Aura restarts to apply the new size", fmt, cx0 + 16.0, 184.0, color(1.0, 1.0, 1.0, 0.45));
+        draw_text(target, "Drag to resize the pill live", fmt, cx0 + 16.0, 184.0, color(1.0, 1.0, 1.0, 0.45));
     }
-
-    // Segmented bar
-    let (sb_x, sb_y, sb_w, sb_h) = (cx0 + 14.0, 202.0, card_w - 28.0, 30.0);
-    fill_rounded(target, sb_x, sb_y, sb_w, sb_h, 6.0, color(0.11, 0.11, 0.12, 1.0));
-    let labels = ["Auto", "100%", "115%", "130%", "150%"];
-    let seg_w = sb_w / 5.0;
-    for (idx, &label) in labels.iter().enumerate() {
-        let is_sel = s.settings.notch_size_idx == idx;
-        let px = sb_x + (idx as f32) * seg_w;
-        if is_sel {
-            fill_rounded(target, px + 2.0, sb_y + 2.0, seg_w - 4.0, sb_h - 4.0, 5.0, color(0.24, 0.24, 0.27, 1.0));
-        }
-        if let Some(fmt) = s.fmt_seg.as_ref() {
-            let tc = if is_sel { color(1.0, 1.0, 1.0, 1.0) } else { color(1.0, 1.0, 1.0, 0.60) };
-            draw_centered_text(target, label, fmt, px + seg_w * 0.5, sb_y + 6.0, tc);
-        }
-    }
+    draw_slider(target, s, SliderKind::Size);
 
     // Divider
     fill_rect(target, cx0 + 14.0, 244.0, card_w - 28.0, 1.0, color(1.0, 1.0, 1.0, 0.05));
@@ -758,7 +934,7 @@ fn draw_general_page(target: &ID2D1RenderTarget, s: &State) {
         draw_text(target, "Minimal notch", fmt, cx0 + 16.0, 252.0, color(1.0, 1.0, 1.0, 0.95));
     }
     if let Some(fmt) = s.fmt_row_sub.as_ref() {
-        draw_text(target, "A smaller pill when nothing is playing", fmt, cx0 + 16.0, 270.0, color(1.0, 1.0, 1.0, 0.45));
+        draw_text(target, "Hide the pill, leaving only its tip when idle", fmt, cx0 + 16.0, 270.0, color(1.0, 1.0, 1.0, 0.45));
     }
     draw_toggle(target, cx1 - 56.0, 257.0, s.settings.minimal_notch);
 
@@ -999,36 +1175,92 @@ fn draw_display_page(target: &ID2D1RenderTarget, s: &State) {
     }
 
     if let Some(fmt) = s.fmt_sec_hdr.as_ref() {
-        draw_text(target, "Notch Monitor", fmt, cx0, 66.0, color(1.0, 1.0, 1.0, 0.45));
+        draw_text(target, "Monitors", fmt, cx0, 66.0, color(1.0, 1.0, 1.0, 0.45));
     }
+    fill_rounded(target, cx0, 84.0, card_w, 54.0, 10.0, color(0.16, 0.16, 0.18, 0.95));
+    if let Some(fmt) = s.fmt_row_title.as_ref() {
+        draw_text(target, "Show on all monitors", fmt, cx0 + 16.0, 92.0, color(1.0, 1.0, 1.0, 0.95));
+    }
+    if let Some(fmt) = s.fmt_row_sub.as_ref() {
+        draw_text(target, "Mirror the pill on every display", fmt, cx0 + 16.0, 110.0, color(1.0, 1.0, 1.0, 0.45));
+    }
+    draw_toggle(target, cx1 - 56.0, 98.0, s.settings.pill_show_all_monitors);
 
+    if let Some(fmt) = s.fmt_sec_hdr.as_ref() {
+        draw_text(target, "Layout", fmt, cx0, 150.0, color(1.0, 1.0, 1.0, 0.45));
+    }
+    draw_monitor_map(target, s);
+    if let Some(fmt) = s.fmt_row_sub.as_ref() {
+        let hint = if s.settings.pill_show_all_monitors {
+            "The pill is mirrored on every display"
+        } else {
+            "Click a display to move the pill there"
+        };
+        draw_text(target, hint, fmt, cx0, 384.0, color(1.0, 1.0, 1.0, 0.35));
+    }
+}
+
+/// Map-area rects (x, y, w, h) for each monitor — shared by draw + hit-test.
+fn monitor_map_rects() -> Vec<(f32, f32, f32, f32)> {
+    let (mx, my, mw, mh) = (236.0, 168.0, 460.0, 200.0);
     let mons = crate::window::list_monitors();
     if mons.is_empty() {
+        return Vec::new();
+    }
+    let mut l = i32::MAX;
+    let mut t = i32::MAX;
+    let mut r = i32::MIN;
+    let mut b = i32::MIN;
+    for m in &mons {
+        l = l.min(m.work.left);
+        t = t.min(m.work.top);
+        r = r.max(m.work.right);
+        b = b.max(m.work.bottom);
+    }
+    let bw = (r - l).max(1) as f32;
+    let bh = (b - t).max(1) as f32;
+    let scale = (mw / bw).min(mh / bh);
+    let ox = mx + (mw - bw * scale) / 2.0;
+    let oy = my + (mh - bh * scale) / 2.0;
+    mons.iter()
+        .map(|m| {
+            (
+                ox + (m.work.left - l) as f32 * scale,
+                oy + (m.work.top - t) as f32 * scale,
+                (m.work.right - m.work.left) as f32 * scale,
+                (m.work.bottom - m.work.top) as f32 * scale,
+            )
+        })
+        .collect()
+}
+
+fn draw_monitor_map(target: &ID2D1RenderTarget, s: &State) {
+    let mons = crate::window::list_monitors();
+    let rects = monitor_map_rects();
+    if mons.is_empty() {
         if let Some(fmt) = s.fmt_row_sub.as_ref() {
-            draw_text(target, "No displays detected", fmt, cx0, 92.0, color(1.0, 1.0, 1.0, 0.45));
+            draw_text(target, "No displays detected", fmt, 236.0, 220.0, color(1.0, 1.0, 1.0, 0.45));
         }
         return;
     }
     for (i, m) in mons.iter().enumerate() {
-        let ry = 84.0 + i as f32 * 56.0;
-        fill_rounded(target, cx0, ry, card_w, 48.0, 10.0, color(0.16, 0.16, 0.18, 0.95));
-        if let Some(fmt) = s.fmt_row_title.as_ref() {
-            draw_text(target, &format!("Display {}", i + 1), fmt, cx0 + 16.0, ry + 8.0, color(1.0, 1.0, 1.0, 0.95));
-        }
+        let (rx, ry, rw, rh) = rects[i];
+        let sel = !s.settings.pill_show_all_monitors && s.settings.pill_monitor as usize == i;
+        fill_rounded(target, rx, ry, rw, rh, 6.0, color(0.13, 0.13, 0.15, 1.0));
+        let sc = if sel {
+            color(0.30, 0.60, 1.0, 1.0)
+        } else {
+            color(1.0, 1.0, 1.0, 0.18)
+        };
+        stroke_rounded(target, rx, ry, rw, rh, 6.0, 2.0, sc);
+        // pill marker at top-center
+        let ma = if s.settings.pill_show_all_monitors || sel { 0.95 } else { 0.25 };
+        fill_rounded(target, rx + rw / 2.0 - 14.0, ry + 4.0, 28.0, 7.0, 3.5, color(1.0, 1.0, 1.0, ma));
         if let Some(fmt) = s.fmt_row_sub.as_ref() {
-            let sub = format!(
-                "{} x {}{}",
-                m.work.right - m.work.left,
-                m.work.bottom - m.work.top,
-                if m.primary { " - Primary" } else { "" }
-            );
-            draw_text(target, &sub, fmt, cx0 + 16.0, ry + 26.0, color(1.0, 1.0, 1.0, 0.45));
-        }
-        let rcx = cx1 - 40.0;
-        let rcy = ry + 24.0;
-        stroke_oval(target, rcx - 9.0, rcy - 9.0, 18.0, 18.0, 1.5, color(1.0, 1.0, 1.0, 0.35));
-        if s.settings.pill_monitor as usize == i {
-            fill_oval(target, rcx - 5.0, rcy - 5.0, 10.0, 10.0, color(0.20, 0.78, 0.35, 1.0));
+            let res = format!("{}x{}", m.work.right - m.work.left, m.work.bottom - m.work.top);
+            draw_centered_text(target, &res, fmt, rx + rw / 2.0, ry + rh / 2.0 - 7.0, color(1.0, 1.0, 1.0, 0.60));
+            let name = if m.primary { "Primary".to_string() } else { m.device.clone() };
+            draw_centered_text(target, &name, fmt, rx + rw / 2.0, ry + rh / 2.0 + 7.0, color(1.0, 1.0, 1.0, 0.40));
         }
     }
 }
@@ -1051,7 +1283,49 @@ fn draw_appearance_page(target: &ID2D1RenderTarget, s: &State) {
     if let Some(fmt) = s.fmt_row_sub.as_ref() {
         draw_text(target, "Transparency of the floating pill", fmt, cx0 + 16.0, 112.0, color(1.0, 1.0, 1.0, 0.45));
     }
-    draw_segmented(target, s, cx0 + 14.0, 132.0, card_w - 28.0, &["100%", "85%", "70%", "55%"], s.settings.pill_opacity_idx.min(3));
+    draw_slider(target, s, SliderKind::Opacity);
+}
+
+fn draw_removebg_page(target: &ID2D1RenderTarget, s: &State) {
+    let (cx0, cx1) = (236.0, 696.0);
+    let card_w = cx1 - cx0;
+
+    if let Some(fmt) = s.fmt_title.as_ref() {
+        draw_text(target, "Remove BG", fmt, cx0, 26.0, color(1.0, 1.0, 1.0, 1.0));
+    }
+
+    if let Some(fmt) = s.fmt_sec_hdr.as_ref() {
+        draw_text(target, "Model", fmt, cx0, 66.0, color(1.0, 1.0, 1.0, 0.45));
+    }
+    fill_rounded(target, cx0, 84.0, card_w, 100.0, 10.0, color(0.16, 0.16, 0.18, 0.95));
+    if let Some(fmt) = s.fmt_row_title.as_ref() {
+        draw_text(target, "Model", fmt, cx0 + 16.0, 94.0, color(1.0, 1.0, 1.0, 0.95));
+    }
+    if let Some(fmt) = s.fmt_row_sub.as_ref() {
+        draw_text(target, "Fast is instant, Quality is cleaner but slower", fmt, cx0 + 16.0, 112.0, color(1.0, 1.0, 1.0, 0.45));
+    }
+    draw_segmented(target, s, cx0 + 14.0, 132.0, card_w - 28.0, &["Fast", "Balanced", "Quality"], s.settings.removebg_model_idx.min(2));
+}
+
+fn draw_convert_page(target: &ID2D1RenderTarget, s: &State) {
+    let (cx0, cx1) = (236.0, 696.0);
+    let card_w = cx1 - cx0;
+
+    if let Some(fmt) = s.fmt_title.as_ref() {
+        draw_text(target, "Convert", fmt, cx0, 26.0, color(1.0, 1.0, 1.0, 1.0));
+    }
+
+    if let Some(fmt) = s.fmt_sec_hdr.as_ref() {
+        draw_text(target, "Photo", fmt, cx0, 66.0, color(1.0, 1.0, 1.0, 0.45));
+    }
+    fill_rounded(target, cx0, 84.0, card_w, 100.0, 10.0, color(0.16, 0.16, 0.18, 0.95));
+    if let Some(fmt) = s.fmt_row_title.as_ref() {
+        draw_text(target, "Default format", fmt, cx0 + 16.0, 94.0, color(1.0, 1.0, 1.0, 0.95));
+    }
+    if let Some(fmt) = s.fmt_row_sub.as_ref() {
+        draw_text(target, "Used when converting photos", fmt, cx0 + 16.0, 112.0, color(1.0, 1.0, 1.0, 0.45));
+    }
+    draw_segmented(target, s, cx0 + 14.0, 132.0, card_w - 28.0, &["AVIF", "WebP", "PNG"], s.settings.convert_format_idx.min(2));
 }
 
 fn draw_hud_page(target: &ID2D1RenderTarget, s: &State) {
@@ -1093,6 +1367,46 @@ fn draw_hud_page(target: &ID2D1RenderTarget, s: &State) {
         draw_text(target, "Show a popup when Caps Lock toggles", fmt, cx0 + 16.0, 208.0, color(1.0, 1.0, 1.0, 0.45));
     }
     draw_toggle(target, cx1 - 56.0, 194.0, s.settings.alert_capslock);
+
+    // --- Dodge ---
+    if let Some(fmt) = s.fmt_sec_hdr.as_ref() {
+        draw_text(target, "Dodge", fmt, cx0, 244.0, color(1.0, 1.0, 1.0, 0.45));
+    }
+    fill_rounded(target, cx0, 262.0, card_w, 168.0, 10.0, color(0.16, 0.16, 0.18, 0.95));
+    if let Some(fmt) = s.fmt_row_title.as_ref() {
+        draw_text(target, "Dodge", fmt, cx0 + 16.0, 272.0, color(1.0, 1.0, 1.0, 0.95));
+    }
+    if let Some(fmt) = s.fmt_row_sub.as_ref() {
+        draw_text(target, "Hide the pill when the cursor comes close", fmt, cx0 + 16.0, 290.0, color(1.0, 1.0, 1.0, 0.45));
+    }
+    draw_toggle(target, cx1 - 56.0, 276.0, s.settings.dodge_enabled);
+
+    fill_rect(target, cx0 + 14.0, 308.0, card_w - 28.0, 1.0, color(1.0, 1.0, 1.0, 0.05));
+
+    if let Some(fmt) = s.fmt_row_title.as_ref() {
+        draw_text(target, "Radius", fmt, cx0 + 16.0, 316.0, color(1.0, 1.0, 1.0, 0.95));
+    }
+    draw_slider(target, s, SliderKind::DodgeRadius);
+
+    fill_rect(target, cx0 + 14.0, 368.0, card_w - 28.0, 1.0, color(1.0, 1.0, 1.0, 0.05));
+
+    if let Some(fmt) = s.fmt_row_title.as_ref() {
+        draw_text(target, "Delay", fmt, cx0 + 16.0, 376.0, color(1.0, 1.0, 1.0, 0.95));
+    }
+    draw_slider(target, s, SliderKind::DodgeDelay);
+
+    // --- Overlap ---
+    if let Some(fmt) = s.fmt_sec_hdr.as_ref() {
+        draw_text(target, "Overlap", fmt, cx0, 442.0, color(1.0, 1.0, 1.0, 0.45));
+    }
+    fill_rounded(target, cx0, 460.0, card_w, 54.0, 10.0, color(0.16, 0.16, 0.18, 0.95));
+    if let Some(fmt) = s.fmt_row_title.as_ref() {
+        draw_text(target, "Hide when covered", fmt, cx0 + 16.0, 470.0, color(1.0, 1.0, 1.0, 0.95));
+    }
+    if let Some(fmt) = s.fmt_row_sub.as_ref() {
+        draw_text(target, "Auto-hide when a window is behind the pill", fmt, cx0 + 16.0, 488.0, color(1.0, 1.0, 1.0, 0.45));
+    }
+    draw_toggle(target, cx1 - 56.0, 474.0, s.settings.hide_when_covered);
 }
 
 fn draw_about_page(target: &ID2D1RenderTarget, s: &State) {
@@ -1117,6 +1431,125 @@ fn draw_about_page(target: &ID2D1RenderTarget, s: &State) {
     if let Some(fmt) = s.fmt_row_sub.as_ref() {
         draw_centered_text(target, "Version 1.0.0 (Release x86_64)", fmt, cx0 + card_w * 0.5, 218.0, color(1.0, 1.0, 1.0, 0.65));
         draw_centered_text(target, "Native Rust + Direct2D Dynamic Island", fmt, cx0 + card_w * 0.5, 238.0, color(1.0, 1.0, 1.0, 0.45));
+    }
+}
+
+fn draw_slider(target: &ID2D1RenderTarget, s: &State, kind: SliderKind) {
+    let (x, cy, w) = slider_geom(kind);
+    let (min, max) = slider_min_max(kind);
+    let v = slider_value(s, kind).clamp(min, max);
+    let t = (v - min) / (max - min);
+    let kx = x + t * w;
+    let active = s.dragging_slider == Some(kind);
+    let hover = s.slider_hover == Some(kind) || active;
+
+    // track
+    fill_rounded(target, x, cy - 3.0, w, 6.0, 3.0, color(0.10, 0.10, 0.11, 1.0));
+    // filled portion
+    if kx > x + 2.0 {
+        fill_rounded(target, x, cy - 3.0, kx - x, 6.0, 3.0, color(0.30, 0.60, 1.0, 0.90));
+    }
+    // default tick mark
+    if let Some(tick_v) = slider_tick(kind) {
+        let tx = x + (tick_v - min) / (max - min) * w;
+        fill_rect(target, tx - 1.0, cy - 9.0, 2.0, 18.0, color(1.0, 1.0, 1.0, 0.45));
+    }
+    // knob
+    let r = if active { 12.0 } else if hover { 11.0 } else { 10.0 };
+    if hover {
+        fill_oval(target, kx - r - 3.0, cy - r - 3.0, (r + 3.0) * 2.0, (r + 3.0) * 2.0, color(0.30, 0.60, 1.0, 0.25));
+    }
+    fill_oval(target, kx - r, cy - r, r * 2.0, r * 2.0, color(1.0, 1.0, 1.0, 1.0));
+    // value label, top-right
+    if let Some(fmt) = s.fmt_row_sub.as_ref() {
+        let label = slider_format(kind, v);
+        let tw = label.len() as f32 * 6.5;
+        draw_text(target, &label, fmt, x + w - tw, cy - 32.0, color(1.0, 1.0, 1.0, 0.65));
+    }
+}
+
+fn decode_png_bytes(
+    target: &ID2D1RenderTarget,
+    bytes: &[u8],
+    max_size: u32,
+) -> Option<ID2D1Bitmap> {
+    unsafe {
+        let factory: IWICImagingFactory =
+            CoCreateInstance(&CLSID_WICImagingFactory, None, CLSCTX_INPROC_SERVER).ok()?;
+        let stream = factory.CreateStream().ok()?;
+        stream.InitializeFromMemory(bytes).ok()?;
+        let decoder =
+            factory.CreateDecoderFromStream(&stream, std::ptr::null(), WICDecodeMetadataCacheOnDemand).ok()?;
+        let frame = decoder.GetFrame(0).ok()?;
+        let src: windows::Win32::Graphics::Imaging::IWICBitmapSource = frame.cast().ok()?;
+        let mut w = 0u32;
+        let mut h = 0u32;
+        src.GetSize(&mut w, &mut h).ok()?;
+        if w == 0 || h == 0 {
+            return None;
+        }
+        let scale = ((max_size as f32) / (w as f32))
+            .min((max_size as f32) / (h as f32))
+            .min(1.0);
+        let tw = ((w as f32) * scale).round().max(1.0) as u32;
+        let th = ((h as f32) * scale).round().max(1.0) as u32;
+        let scaler = factory.CreateBitmapScaler().ok()?;
+        scaler.Initialize(&src, tw, th, WICBitmapInterpolationModeFant).ok()?;
+        let converter = factory.CreateFormatConverter().ok()?;
+        let scaler_src: windows::Win32::Graphics::Imaging::IWICBitmapSource = scaler.cast().ok()?;
+        converter
+            .Initialize(
+                &scaler_src,
+                &GUID_WICPixelFormat32bppPBGRA,
+                WICBitmapDitherTypeNone,
+                None,
+                0.0,
+                WICBitmapPaletteTypeMedianCut,
+            )
+            .ok()?;
+        let conv_src: windows::Win32::Graphics::Imaging::IWICBitmapSource =
+            converter.cast().ok()?;
+        let mut pixels = vec![0u8; (tw * th * 4) as usize];
+        conv_src.CopyPixels(std::ptr::null(), tw * 4, &mut pixels).ok()?;
+        target
+            .CreateBitmap(
+                D2D_SIZE_U { width: tw, height: th },
+                Some(pixels.as_ptr() as *const core::ffi::c_void),
+                tw * 4,
+                &D2D1_BITMAP_PROPERTIES {
+                    pixelFormat: D2D1_PIXEL_FORMAT {
+                        format: DXGI_FORMAT_B8G8R8A8_UNORM,
+                        alphaMode: D2D1_ALPHA_MODE_PREMULTIPLIED,
+                    },
+                    dpiX: 96.0,
+                    dpiY: 96.0,
+                },
+            )
+            .ok()
+    }
+}
+
+const TAB_ICON_BYTES: [&[u8]; 12] = [
+    include_bytes!("../assets/general_icon.png"),
+    include_bytes!("../assets/display_icon.png"),
+    include_bytes!("../assets/appearance_icon.png"),
+    include_bytes!("../assets/music_icon.png"),
+    include_bytes!("../assets/todo_icon.png"),
+    include_bytes!("../assets/focus_icon.png"),
+    include_bytes!("../assets/water_icon.png"),
+    include_bytes!("../assets/shelf_icon.png"),
+    include_bytes!("../assets/removebg_icon.png"),
+    include_bytes!("../assets/convert_icon.png"),
+    include_bytes!("../assets/hud_icon.png"),
+    include_bytes!("../assets/about_icon.png"),
+];
+
+fn ensure_tab_icons(s: &mut State) {
+    let Some(target) = s.target.as_ref() else { return };
+    for i in 0..12 {
+        if s.tab_icons[i].is_none() {
+            s.tab_icons[i] = decode_png_bytes(target, TAB_ICON_BYTES[i], 64);
+        }
     }
 }
 
@@ -1217,12 +1650,6 @@ fn draw_close_cross(target: &ID2D1RenderTarget, cx: f32, cy: f32, r: f32, c: D2D
             );
         }
     }
-}
-
-fn draw_char_icon(target: &ID2D1RenderTarget, ch: char, cx: f32, cy: f32, c: D2D1_COLOR_F, fmt: Option<&IDWriteTextFormat>) {
-    let Some(fmt) = fmt else { return };
-    let s = ch.to_string();
-    draw_centered_text(target, &s, fmt, cx, cy - 6.0, c);
 }
 
 fn draw_text(target: &ID2D1RenderTarget, text: &str, fmt: &IDWriteTextFormat, x: f32, y: f32, c: D2D1_COLOR_F) {

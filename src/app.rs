@@ -100,8 +100,28 @@ const WM_POWERBROADCAST_MSG: u32 = 0x0218;
 const GWL_EXSTYLE_IDX: WINDOW_LONG_PTR_INDEX = WINDOW_LONG_PTR_INDEX(-20);
 const NOACTIVATE_BIT: isize = 0x0800_0000;
 
+/// An extra pill canvas on another monitor (mirrors the main pill).
+struct CanvasWin {
+    hwnd: HWND,
+    base_x: i32,
+    base_y: i32,
+}
+
 pub struct App {
     hwnd: HWND,
+    hinstance: HINSTANCE,
+    canvas_class: PCWSTR,
+    extra_canvases: Vec<CanvasWin>,
+    main_base: (i32, i32),
+    pill_y_offset: f32,
+    last_offset_applied: f32,
+    hide_fs: bool,
+    dodge_since: Option<Instant>,
+    dodging: bool,
+    pill_covered: bool,
+    cover_poll_at: Instant,
+    volume_hover_since: Option<Instant>,
+    pill_hovered: bool,
     renderer: renderer::Renderer,
     pill: state::PillState,
     spring: animator::Spring2D,
@@ -166,7 +186,6 @@ pub struct App {
     low_bat_warned: bool,
     crit_bat_warned: bool,
     caps_lock: bool,
-    hidden_for_fullscreen: bool,
     active_alert: Option<(PillAlert, Instant)>,
     hover_bulging: bool,
     hover_expand_timer_active: bool,
@@ -202,6 +221,8 @@ pub struct App {
 impl App {
     fn new(
         hwnd: HWND,
+        hinstance: HINSTANCE,
+        canvas_class: PCWSTR,
         media_cache: Arc<Mutex<media::PollCache>>,
         dropped_files: Arc<Mutex<Vec<String>>>,
     ) -> Result<Box<Self>> {
@@ -283,7 +304,6 @@ impl App {
             low_bat_warned: false,
             crit_bat_warned: false,
             caps_lock,
-            hidden_for_fullscreen: false,
             active_alert: None,
             hover_bulging: false,
             hover_expand_timer_active: false,
@@ -314,10 +334,35 @@ impl App {
             cv_btn_hover_targets: [0.0; 3],
             settings: crate::settings::AuraSettings::load(),
             pdf_md_drag: None,
+            hinstance,
+            canvas_class,
+            extra_canvases: Vec::new(),
+            main_base: (0, 0),
+            pill_y_offset: 0.0,
+            last_offset_applied: f32::NAN,
+            hide_fs: false,
+            dodge_since: None,
+            dodging: false,
+            pill_covered: false,
+            cover_poll_at: now,
+            volume_hover_since: None,
+            pill_hovered: false,
         });
         app.water.set_goal(app.settings.water_daily_goal as i64);
         app.pomodoro.focus_mins = app.settings.pomodoro_focus_mins;
-        window::place_canvas_on_monitor(hwnd, app.settings.pill_monitor);
+        app.removebg.model = [
+            removebg::RemoveBgModel::Fast,
+            removebg::RemoveBgModel::Balanced,
+            removebg::RemoveBgModel::Quality,
+        ][app.settings.removebg_model_idx.min(2)];
+        app.convert.photo_format = [
+            crate::convert::ConvertFormat::Avif,
+            crate::convert::ConvertFormat::WebP,
+            crate::convert::ConvertFormat::Png,
+        ][app.settings.convert_format_idx.min(2)];
+        let (bx, by, _, _) = window::place_canvas_on_monitor(hwnd, app.settings.pill_monitor);
+        app.main_base = (bx, by);
+        app.rebuild_canvases();
         app.on_paint();
         trim_working_set();
         Ok(app)
@@ -341,7 +386,7 @@ impl App {
     /// All expanded sections share the exact unified size (520x180), and can expand via button.
     fn target_size_for(&self, state: IslandState) -> (f32, f32) {
         let (w, h) = self.target_size_for_inner(state);
-        let scale = [1.0f32, 1.0, 1.15, 1.30, 1.50][self.settings.notch_size_idx.min(4)];
+        let scale = self.settings.notch_scale.clamp(0.8, 1.5);
         (w * scale, h * scale)
     }
 
@@ -351,7 +396,7 @@ impl App {
                 return (320.0, 26.0);
             }
             if state == IslandState::Zen {
-                let (w, h) = if self.settings.minimal_notch { (84.0, 24.0) } else { (104.0, 28.0) };
+                let (w, h) = (104.0, 28.0);
                 if self.hover_bulging {
                     return (w * 1.08, h * 1.08);
                 }
@@ -372,7 +417,7 @@ impl App {
                 }
                 return (w, h);
             }
-            let (w, h) = if self.settings.minimal_notch { (150.0, 28.0) } else { (180.0f32, 30.0f32) };
+            let (w, h) = (180.0f32, 30.0f32);
             if self.hover_bulging {
                 return ((w * 1.08).round(), (h * 1.08).round());
             }
@@ -640,6 +685,61 @@ impl App {
             || (self.eye_slant[1] - self.eye_slant_target[1]).abs() > 0.01
             || self.tray_genie_start.is_some()
             || self.dot_spring.active
+            || (self.pill_y_offset - self.pill_offset_target()).abs() > 0.5
+    }
+
+    /// Target vertical offset (logical px, negative = up) for peek/hide behaviors.
+    fn pill_offset_target(&self) -> f32 {
+        let h = self.pill.height.max(1.0);
+        let idle = !self.pill.state.is_expanded() && self.current_alert().is_none();
+        let hovered = self.pill_hovered && !self.hide_fs && !self.pill_covered && !self.dodging;
+        let hide_full = self.hide_fs
+            || (idle && self.settings.hide_when_covered && self.pill_covered)
+            || (idle && !hovered && self.dodging);
+        if hide_full {
+            // fully above the screen edge
+            -((window::CANVAS_H - h) / 2.0 + h + 4.0)
+        } else if self.settings.minimal_notch && idle && !hovered {
+            // peek: only the tip stays visible
+            -((window::CANVAS_H - h) / 2.0 + h - 10.0)
+        } else {
+            0.0
+        }
+    }
+
+    /// Smoothly move every canvas toward the offset target.
+    fn apply_pill_offset(&mut self) {
+        let target = self.pill_offset_target();
+        let diff = target - self.pill_y_offset;
+        if diff.abs() < 0.5 {
+            self.pill_y_offset = target;
+        } else {
+            self.pill_y_offset += diff * 0.22;
+        }
+        if (self.pill_y_offset - self.last_offset_applied).abs() < 0.01 {
+            return;
+        }
+        self.last_offset_applied = self.pill_y_offset;
+        let off = self.pill_y_offset;
+        unsafe {
+            let apply_one = |hwnd: HWND, bx: i32, by: i32| {
+                let dpi = window::dpi_scale(hwnd);
+                let y = (by as f32 + off * dpi).round() as i32;
+                let _ = SetWindowPos(
+                    hwnd,
+                    None,
+                    bx,
+                    y,
+                    0,
+                    0,
+                    SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE,
+                );
+            };
+            apply_one(self.hwnd, self.main_base.0, self.main_base.1);
+            for c in &self.extra_canvases {
+                apply_one(c.hwnd, c.base_x, c.base_y);
+            }
+        }
     }
 
     fn on_anim_tick(&mut self) {
@@ -675,6 +775,17 @@ impl App {
         } else {
             self.volume_bar_zoom = self.volume_bar_zoom_target;
         }
+        // Volume slider appears only after a short hover delay (it used to pop up instantly).
+        if self.volume_bar_hover && self.volume_bar_zoom_target < 1.0 {
+            if let Some(since) = self.volume_hover_since {
+                if since.elapsed().as_millis() >= 350 {
+                    self.volume_bar_zoom_target = 1.0;
+                }
+            }
+            zoom_anim = true; // keep ticking through the delay
+        }
+        // Peek / hide behaviors (minimal notch, dodge, covered, fullscreen).
+        self.apply_pill_offset();
         if let Some(start) = self.tray_genie_start {
             let elapsed = start.elapsed().as_secs_f32();
             if elapsed >= 0.35 {
@@ -1081,12 +1192,76 @@ impl App {
     fn on_timer(&mut self, id: usize) {
         match id {
             TIMER_TICK => {
-                // Hide the pill while a fullscreen app (game/video/slides) is in front.
-                let fs = self.settings.hide_in_fullscreen && window::foreground_is_fullscreen();
-                if fs != self.hidden_for_fullscreen {
-                    self.hidden_for_fullscreen = fs;
-                    unsafe {
-                        let _ = ShowWindow(self.hwnd, if fs { SW_HIDE } else { SW_SHOWNA });
+                // Fullscreen hide is now a smooth slide-up (see pill_offset_target).
+                self.hide_fs =
+                    self.settings.hide_in_fullscreen && window::foreground_is_fullscreen();
+
+                let idle =
+                    !self.pill.state.is_expanded() && self.current_alert().is_none();
+
+                // Dodge: hide when the cursor stays inside the radius around the pill.
+                // Measured against the pill's home position so it cannot oscillate.
+                if self.settings.dodge_enabled && idle && !self.pill_hovered {
+                    let mut pt = POINT::default();
+                    let mut dodge_now = false;
+                    if unsafe { GetCursorPos(&mut pt).is_ok() } {
+                        let dpi = window::dpi_scale(self.hwnd);
+                        let w = self.pill.width * dpi;
+                        let h = self.pill.height * dpi;
+                        let cx = self.main_base.0 as f32
+                            + (window::CANVAS_W * dpi - w) / 2.0;
+                        let cy = self.main_base.1 as f32
+                            + (window::CANVAS_H * dpi - h) / 2.0;
+                        let dx = (pt.x as f32 - (cx + w / 2.0)).abs() - w / 2.0;
+                        let dy = (pt.y as f32 - (cy + h / 2.0)).abs() - h / 2.0;
+                        let dist = dx.max(0.0).hypot(dy.max(0.0));
+                        let r = self.settings.dodge_radius;
+                        if dist < r {
+                            if self.dodge_since.is_none() {
+                                self.dodge_since = Some(Instant::now());
+                            }
+                            if self.dodge_since.unwrap().elapsed().as_millis() as u64
+                                >= self.settings.dodge_delay_ms
+                            {
+                                dodge_now = true;
+                            }
+                        } else if dist > r + 30.0 {
+                            self.dodge_since = None;
+                        }
+                    }
+                    self.dodging = dodge_now;
+                } else {
+                    self.dodging = false;
+                    self.dodge_since = None;
+                }
+
+                // Covered poll (every 500ms): hide when a window is behind the pill.
+                let now = Instant::now();
+                if now.duration_since(self.cover_poll_at).as_millis() >= 500 {
+                    self.cover_poll_at = now;
+                    if self.settings.hide_when_covered {
+                        let dpi = window::dpi_scale(self.hwnd);
+                        let w = (self.pill.width * dpi).round() as i32;
+                        let h = (self.pill.height * dpi).round() as i32;
+                        let cw = (window::CANVAS_W * dpi).round() as i32;
+                        let ch = (window::CANVAS_H * dpi).round() as i32;
+                        let pill_rect = RECT {
+                            left: self.main_base.0 + (cw - w) / 2,
+                            top: self.main_base.1 + (ch - h) / 2,
+                            right: self.main_base.0 + (cw + w) / 2,
+                            bottom: self.main_base.1 + (ch + h) / 2,
+                        };
+                        let mut exclude = vec![self.hwnd];
+                        for c in &self.extra_canvases {
+                            exclude.push(c.hwnd);
+                        }
+                        if let Some(sh) = crate::settings_window::settings_hwnd() {
+                            exclude.push(sh);
+                        }
+                        self.pill_covered =
+                            window::is_rect_covered_by_window(pill_rect, &exclude);
+                    } else {
+                        self.pill_covered = false;
                     }
                 }
                 self.update_eyes();
@@ -1244,6 +1419,7 @@ impl App {
         }
         self.card_expanded = false;
         self.mouse_pt = None;
+        self.pill_hovered = false;
         self.music_bar_hover = false;
         self.music_bar_zoom_target = 0.0;
         self.music_button_zoom_targets = [1.0, 1.0, 1.0, 1.0];
@@ -1254,6 +1430,7 @@ impl App {
 
     fn on_mouse_move(&mut self, x_px: i32, y_px: i32) {
         self.suppress_leave = false;
+        self.pill_hovered = true;
         self.arm_mouse_tracking();
 
         let (pill_x, pill_y) = self.client_px_to_pill_pt(x_px, y_px);
@@ -1353,7 +1530,13 @@ impl App {
                 && y <= renderer::MUSIC_VOLUME_BAR_RECT.3 + 4.0;
             if vol_hover != self.volume_bar_hover {
                 self.volume_bar_hover = vol_hover;
-                self.volume_bar_zoom_target = if vol_hover { 1.0 } else { 0.0 };
+                if vol_hover {
+                    // Wait a beat before showing the slider (no more instant popup).
+                    self.volume_hover_since = Some(Instant::now());
+                } else {
+                    self.volume_hover_since = None;
+                    self.volume_bar_zoom_target = 0.0;
+                }
                 self.ensure_anim_timer();
                 self.on_paint();
             }
@@ -1462,6 +1645,7 @@ impl App {
 
     fn on_mouse_leave(&mut self) {
         self.tracking_mouse = false;
+        self.pill_hovered = false;
         self.hovered_dot = None;
         self.mouse_pt = None;
         if self.hover_expand_timer_active {
@@ -3346,6 +3530,48 @@ impl App {
         }
     }
 
+    /// (Re)build the extra pill canvases for "show on all monitors".
+    /// The main canvas always stays on `pill_monitor`.
+    fn rebuild_canvases(&mut self) {
+        unsafe {
+            for c in self.extra_canvases.drain(..) {
+                let _ = DestroyWindow(c.hwnd);
+            }
+            if self.settings.pill_show_all_monitors {
+                let mons = window::list_monitors();
+                for (i, m) in mons.iter().enumerate() {
+                    if i as i32 == self.settings.pill_monitor {
+                        continue;
+                    }
+                    let Ok(hwnd) =
+                        window::create_canvas_window(self.hinstance, self.canvas_class)
+                    else {
+                        continue;
+                    };
+                    SetWindowLongPtrW(hwnd, GWLP_USERDATA, (self as *mut App) as isize);
+                    let dpi = window::dpi_scale(hwnd);
+                    let (x, y) = window::canvas_xy_for_work(&m.work, dpi);
+                    let _ = SetWindowPos(
+                        hwnd,
+                        None,
+                        x,
+                        y,
+                        0,
+                        0,
+                        SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE,
+                    );
+                    let _ = ShowWindow(hwnd, SW_SHOWNOACTIVATE);
+                    self.extra_canvases.push(CanvasWin { hwnd, base_x: x, base_y: y });
+                }
+            }
+            // main canvas may have moved to another monitor
+            let (bx, by, _, _) =
+                window::place_canvas_on_monitor(self.hwnd, self.settings.pill_monitor);
+            self.main_base = (bx, by);
+            self.last_offset_applied = f32::NAN; // force re-apply
+        }
+    }
+
     fn on_paint(&mut self) {
         let alert_clone = self.current_alert().cloned();
         let battery_percent = self.power_state.percent.map(|p| (p as f32) / 100.0);
@@ -3414,7 +3640,14 @@ impl App {
                 settings: &self.settings,
                 pdf_md_drag: self.pdf_md_drag,
             };
-            self.renderer.draw(self.hwnd, &ctx);
+            if self.renderer.draw(self.hwnd, &ctx) {
+                // Mirror the same frame onto every extra canvas.
+                let alpha =
+                    (self.settings.pill_opacity.clamp(0.4, 1.0) * 255.0).round() as u8;
+                for c in &self.extra_canvases {
+                    self.renderer.present_to(c.hwnd, alpha);
+                }
+            }
         }
         if self.renderer.is_lyric_rolling() || self.tray_bounce.is_active() || self.transition_active || self.dot_spring.active {
             self.ensure_anim_timer();
@@ -3557,12 +3790,29 @@ unsafe extern "system" fn wnd_proc(
             app.on_convert_ready();
             LRESULT(0)
         }
+        crate::settings_window::WM_SETTINGS_PREVIEW => {
+            let target = app.last_section;
+            app.set_state(target);
+            app.ensure_anim_timer();
+            app.on_paint();
+            LRESULT(0)
+        }
         crate::settings_window::WM_SETTINGS_UPDATED => {
             app.settings = crate::settings::AuraSettings::load();
             crate::tray::set_autorun(app.settings.start_with_windows);
             app.water.set_goal(app.settings.water_daily_goal as i64);
             app.pomodoro.focus_mins = app.settings.pomodoro_focus_mins;
-            window::place_canvas_on_monitor(app.hwnd, app.settings.pill_monitor);
+            app.removebg.model = [
+                removebg::RemoveBgModel::Fast,
+                removebg::RemoveBgModel::Balanced,
+                removebg::RemoveBgModel::Quality,
+            ][app.settings.removebg_model_idx.min(2)];
+            app.convert.photo_format = [
+                crate::convert::ConvertFormat::Avif,
+                crate::convert::ConvertFormat::WebP,
+                crate::convert::ConvertFormat::Png,
+            ][app.settings.convert_format_idx.min(2)];
+            app.rebuild_canvases();
             app.refresh_anim_timer();
             let state = app.pill.state;
             let (tw, th) = app.target_size_for(state);
@@ -3658,7 +3908,7 @@ pub fn run() -> Result<()> {
         let media_cache = Arc::new(Mutex::new(media::PollCache::waiting()));
         media::spawn_poller(hwnd, media_cache.clone());
 
-        let mut app = App::new(hwnd, media_cache, dropped_files)?;
+        let mut app = App::new(hwnd, hinstance, class_name, media_cache, dropped_files)?;
         app.set_lan(lan::LanShare::start());
         let app_ptr = Box::into_raw(app);
         SetWindowLongPtrW(hwnd, GWLP_USERDATA, app_ptr as isize);

@@ -1598,41 +1598,48 @@ impl Renderer {
 
     /// Speaker icon with sound waves or mute slash, centered at `(cx, cy)`.
     fn draw_icon_speaker(&self, target: &ID2D1RenderTarget, cx: f32, cy: f32, volume: f32, c: D2D1_COLOR_F) {
-        // Speaker box:
-        self.fill_rounded(target, cx - 7.5, cy - 3.0, 3.5, 6.0, 1.0, c);
+        // Speaker body (bolder, rounded):
+        self.fill_rounded(target, cx - 8.0, cy - 4.5, 5.0, 9.0, 2.0, c);
         // Speaker cone:
         let cone = [
-            D2D_POINT_2F { x: cx - 4.0, y: cy - 3.0 },
-            D2D_POINT_2F { x: cx + 1.5, y: cy - 6.5 },
-            D2D_POINT_2F { x: cx + 1.5, y: cy + 6.5 },
-            D2D_POINT_2F { x: cx - 4.0, y: cy + 3.0 },
+            D2D_POINT_2F { x: cx - 3.0, y: cy - 4.5 },
+            D2D_POINT_2F { x: cx + 3.5, y: cy - 8.0 },
+            D2D_POINT_2F { x: cx + 3.5, y: cy + 8.0 },
+            D2D_POINT_2F { x: cx - 3.0, y: cy + 4.5 },
         ];
         self.fill_polygon(target, &cone, c);
 
         if volume <= 0.01 {
-            // Mute "x"
-            let x0 = cx + 4.5;
-            let x1 = cx + 9.5;
-            let l1 = [D2D_POINT_2F { x: x0, y: cy - 2.5 }, D2D_POINT_2F { x: x1, y: cy + 2.5 }];
-            let l2 = [D2D_POINT_2F { x: x0, y: cy + 2.5 }, D2D_POINT_2F { x: x1, y: cy - 2.5 }];
-            self.stroke_polyline(target, &l1, 1.4, c);
-            self.stroke_polyline(target, &l2, 1.4, c);
+            // Mute "x" (bold):
+            let x0 = cx + 7.0;
+            let x1 = cx + 13.0;
+            let l1 = [D2D_POINT_2F { x: x0, y: cy - 3.5 }, D2D_POINT_2F { x: x1, y: cy + 3.5 }];
+            let l2 = [D2D_POINT_2F { x: x0, y: cy + 3.5 }, D2D_POINT_2F { x: x1, y: cy - 3.5 }];
+            self.stroke_polyline(target, &l1, 2.2, c);
+            self.stroke_polyline(target, &l2, 2.2, c);
         } else {
-            // Arc 1:
-            let a1 = [
-                D2D_POINT_2F { x: cx + 4.5, y: cy - 3.5 },
-                D2D_POINT_2F { x: cx + 6.5, y: cy },
-                D2D_POINT_2F { x: cx + 4.5, y: cy + 3.5 },
+            // Wave arcs grow with the volume:
+            let w1 = [
+                D2D_POINT_2F { x: cx + 6.5, y: cy - 4.5 },
+                D2D_POINT_2F { x: cx + 9.0, y: cy },
+                D2D_POINT_2F { x: cx + 6.5, y: cy + 4.5 },
             ];
-            self.stroke_polyline(target, &a1, 1.4, c);
-            if volume > 0.45 {
-                // Arc 2:
-                let a2 = [
-                    D2D_POINT_2F { x: cx + 8.0, y: cy - 5.5 },
-                    D2D_POINT_2F { x: cx + 10.5, y: cy },
-                    D2D_POINT_2F { x: cx + 8.0, y: cy + 5.5 },
+            self.stroke_polyline(target, &w1, 2.0, c);
+            if volume > 0.33 {
+                let w2 = [
+                    D2D_POINT_2F { x: cx + 10.0, y: cy - 6.5 },
+                    D2D_POINT_2F { x: cx + 13.5, y: cy },
+                    D2D_POINT_2F { x: cx + 10.0, y: cy + 6.5 },
                 ];
-                self.stroke_polyline(target, &a2, 1.4, c);
+                self.stroke_polyline(target, &w2, 2.0, c);
+            }
+            if volume > 0.66 {
+                let w3 = [
+                    D2D_POINT_2F { x: cx + 13.5, y: cy - 8.5 },
+                    D2D_POINT_2F { x: cx + 18.0, y: cy },
+                    D2D_POINT_2F { x: cx + 13.5, y: cy + 8.5 },
+                ];
+                self.stroke_polyline(target, &w3, 2.0, c);
             }
         }
     }
@@ -5190,7 +5197,7 @@ impl Renderer {
 
     // --- Main Draw Entrypoint ---
 
-    pub fn draw(&mut self, hwnd: HWND, ctx: &RenderContext) {
+    pub fn draw(&mut self, hwnd: HWND, ctx: &RenderContext) -> bool {
         let scale = window::dpi_scale(hwnd);
         let canvas_w_px = (window::CANVAS_W * scale).round() as i32;
         let canvas_h_px = (window::CANVAS_H * scale).round() as i32;
@@ -5198,7 +5205,7 @@ impl Renderer {
             unsafe {
                 let _ = ValidateRect(hwnd, None);
             }
-            return;
+            return false;
         }
         self.update_cover_bitmap(ctx.media);
         self.update_removebg_bitmaps(ctx.removebg);
@@ -5421,6 +5428,18 @@ impl Renderer {
             target.SetTransform(&Matrix3x2::identity());
             let _ = target.EndDraw(None, None);
 
+            let alpha = (ctx.settings.pill_opacity.clamp(0.4, 1.0) * 255.0).round() as u8;
+            self.present_to(hwnd, alpha);
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Present the last rendered frame onto another canvas HWND
+    /// (used to mirror the pill on every monitor).
+    pub fn present_to(&self, hwnd: HWND, alpha: u8) {
+        unsafe {
             let size = SIZE {
                 cx: self.canvas_w_px,
                 cy: self.canvas_h_px,
@@ -5429,7 +5448,7 @@ impl Renderer {
             let blend = BLENDFUNCTION {
                 BlendOp: AC_SRC_OVER as u8,
                 BlendFlags: 0,
-                SourceConstantAlpha: [255u8, 217, 179, 140][ctx.settings.pill_opacity_idx.min(3)],
+                SourceConstantAlpha: alpha,
                 AlphaFormat: AC_SRC_ALPHA as u8,
             };
             let _ = UpdateLayeredWindow(
