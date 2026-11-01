@@ -118,7 +118,7 @@ fn slider_tab(kind: SliderKind) -> usize {
     match kind {
         SliderKind::Size => 0,
         SliderKind::Opacity => 2,
-        SliderKind::DodgeRadius | SliderKind::DodgeDelay => 10,
+        SliderKind::DodgeRadius | SliderKind::DodgeDelay | SliderKind::HoverDelay => 10,
     }
 }
 
