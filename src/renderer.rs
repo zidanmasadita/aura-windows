@@ -1378,7 +1378,9 @@ impl Renderer {
         }
         match state {
             IslandState::Zen => {
-                self.draw_eyes(target, lw, lh, ctx.eye_look, ctx.eye_openness, ctx.eye_slant);
+                if ctx.settings.eye_expressions {
+                    self.draw_eyes(target, lw, lh, ctx.eye_look, ctx.eye_openness, ctx.eye_slant);
+                }
             }
             IslandState::Compact => {
                 if lh <= 32.0 {
@@ -1402,6 +1404,7 @@ impl Renderer {
                         ctx.music_bar_zoom,
                         ctx.master_volume,
                         ctx.volume_bar_zoom,
+                        ctx.settings.master_volume_control,
                     );
                     let panel_alpha = ((lyrics_t - 0.12) / 0.88).clamp(0.0, 1.0);
                     if panel_alpha > 0.01 {
@@ -2592,6 +2595,7 @@ impl Renderer {
         music_bar_zoom: f32,
         master_volume: f32,
         volume_bar_zoom: f32,
+        volume_enabled: bool,
     ) {
         // Cover art (`x: 54, y: 36, w: 60, h: 60, cornerRadius: 14`):
         let cover_rect = D2D_RECT_F {
@@ -2753,7 +2757,7 @@ impl Renderer {
 
         // Volume control (only speaker icon initially; expands bar to the left on hover):
         let vol_alpha = (1.0 - lyrics_t * 2.5).clamp(0.0, 1.0);
-        if vol_alpha > 0.01 {
+        if volume_enabled && vol_alpha > 0.01 {
             self.draw_icon_speaker(target, 472.0, 140.0, master_volume, color(1.0, 1.0, 1.0, 0.85 * vol_alpha));
             if volume_bar_zoom > 0.005 {
                 let max_w = 94.0f32;
@@ -5425,7 +5429,7 @@ impl Renderer {
             let blend = BLENDFUNCTION {
                 BlendOp: AC_SRC_OVER as u8,
                 BlendFlags: 0,
-                SourceConstantAlpha: 255,
+                SourceConstantAlpha: [255u8, 217, 179, 140][ctx.settings.pill_opacity_idx.min(3)],
                 AlphaFormat: AC_SRC_ALPHA as u8,
             };
             let _ = UpdateLayeredWindow(

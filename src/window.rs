@@ -10,12 +10,12 @@
 use windows::Win32::Foundation::{BOOL, HMONITOR, HWND, LPARAM, RECT, TRUE};
 use windows::Win32::Graphics::Gdi::{
     EnumDisplayMonitors, GetMonitorInfoW, HDC, MONITORINFO, MONITORINFOEXW, MONITORINFOF_PRIMARY,
-    MONITORENUMPROC,
+    MONITOR_DEFAULTTONEAREST, MONITORENUMPROC, MonitorFromWindow,
 };
 use windows::Win32::UI::HiDpi::GetDpiForWindow;
 use windows::Win32::UI::WindowsAndMessaging::{
-    SetWindowPos, SystemParametersInfoW, HWND_TOPMOST, SPI_GETWORKAREA, SWP_NOACTIVATE,
-    SWP_SHOWWINDOW, SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS,
+    GetForegroundWindow, GetWindowRect, SetWindowPos, SystemParametersInfoW, HWND_TOPMOST,
+    SPI_GETWORKAREA, SWP_NOACTIVATE, SWP_SHOWWINDOW, SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS,
 };
 
 /// Logical width of the fixed transparent canvas (accommodates `700pt` Lyrics + `1.15x` Tray bounce headroom).
@@ -87,6 +87,29 @@ pub fn list_monitors() -> Vec<MonitorInfo> {
         m.index = i;
     }
     infos
+}
+
+/// True when the foreground window covers its entire monitor (borderless
+/// fullscreen game, video or slideshow).
+pub fn foreground_is_fullscreen() -> bool {
+    unsafe {
+        let fg = GetForegroundWindow();
+        if fg.0.is_null() {
+            return false;
+        }
+        let mut rc = RECT::default();
+        if GetWindowRect(fg, &mut rc).is_err() {
+            return false;
+        }
+        let hmon = MonitorFromWindow(fg, MONITOR_DEFAULTTONEAREST);
+        let mut mi = MONITORINFO::default();
+        mi.cbSize = std::mem::size_of::<MONITORINFO>() as u32;
+        if GetMonitorInfoW(hmon, &mut mi).is_err() {
+            return false;
+        }
+        let mr = mi.rcMonitor;
+        rc.left == mr.left && rc.top == mr.top && rc.right == mr.right && rc.bottom == mr.bottom
+    }
 }
 
 /// Primary monitor work area (excludes taskbar). Falls back to full screen

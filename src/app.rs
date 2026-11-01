@@ -166,6 +166,7 @@ pub struct App {
     low_bat_warned: bool,
     crit_bat_warned: bool,
     caps_lock: bool,
+    hidden_for_fullscreen: bool,
     active_alert: Option<(PillAlert, Instant)>,
     hover_bulging: bool,
     hover_expand_timer_active: bool,
@@ -282,6 +283,7 @@ impl App {
             low_bat_warned: false,
             crit_bat_warned: false,
             caps_lock,
+            hidden_for_fullscreen: false,
             active_alert: None,
             hover_bulging: false,
             hover_expand_timer_active: false,
@@ -313,7 +315,9 @@ impl App {
             settings: crate::settings::AuraSettings::load(),
             pdf_md_drag: None,
         });
-        window::place_canvas_top_center(hwnd);
+        app.water.set_goal(app.settings.water_daily_goal as i64);
+        app.pomodoro.focus_mins = app.settings.pomodoro_focus_mins;
+        window::place_canvas_on_monitor(hwnd, app.settings.pill_monitor);
         app.on_paint();
         trim_working_set();
         Ok(app)
@@ -336,12 +340,18 @@ impl App {
     /// Compact/Zen are minimalist (146x26 / 100x26), with smooth hover-bulge (1.08x).
     /// All expanded sections share the exact unified size (520x180), and can expand via button.
     fn target_size_for(&self, state: IslandState) -> (f32, f32) {
+        let (w, h) = self.target_size_for_inner(state);
+        let scale = [1.0f32, 1.0, 1.15, 1.30, 1.50][self.settings.notch_size_idx.min(4)];
+        (w * scale, h * scale)
+    }
+
+    fn target_size_for_inner(&self, state: IslandState) -> (f32, f32) {
         if !state.is_expanded() {
             if self.current_alert().is_some() {
                 return (320.0, 26.0);
             }
             if state == IslandState::Zen {
-                let (w, h) = (104.0, 28.0);
+                let (w, h) = if self.settings.minimal_notch { (84.0, 24.0) } else { (104.0, 28.0) };
                 if self.hover_bulging {
                     return (w * 1.08, h * 1.08);
                 }
@@ -362,7 +372,7 @@ impl App {
                 }
                 return (w, h);
             }
-            let (w, h) = (180.0f32, 30.0f32);
+            let (w, h) = if self.settings.minimal_notch { (150.0, 28.0) } else { (180.0f32, 30.0f32) };
             if self.hover_bulging {
                 return ((w * 1.08).round(), (h * 1.08).round());
             }
@@ -379,11 +389,30 @@ impl App {
         self.on_paint();
     }
 
+    fn anim_interval_ms(&self) -> u32 {
+        if self.settings.high_refresh_120fps {
+            8
+        } else {
+            16
+        }
+    }
+
     fn ensure_anim_timer(&mut self) {
         if !self.anim_timer_running {
             self.anim_timer_running = true;
+            let ms = self.anim_interval_ms();
             unsafe {
-                let _ = SetTimer(self.hwnd, TIMER_ANIM, 8, None);
+                let _ = SetTimer(self.hwnd, TIMER_ANIM, ms, None);
+            }
+        }
+    }
+
+    fn refresh_anim_timer(&mut self) {
+        if self.anim_timer_running {
+            let ms = self.anim_interval_ms();
+            unsafe {
+                let _ = KillTimer(self.hwnd, TIMER_ANIM);
+                let _ = SetTimer(self.hwnd, TIMER_ANIM, ms, None);
             }
         }
     }
@@ -795,6 +824,9 @@ impl App {
 
     /// Start a non-blocking async lyrics fetch on an MTA worker thread.
     fn request_lyrics_async(&mut self) {
+        if !self.settings.lyrics_sync {
+            return;
+        }
         let Some(m) = self.media.as_ref() else {
             return;
         };
@@ -920,6 +952,7 @@ impl App {
         let caps = tray::is_caps_lock_on();
         if caps != self.caps_lock {
             self.caps_lock = caps;
+            if self.settings.pill_alerts_enabled && self.settings.alert_capslock {
             let alert = PillAlert {
                 icon: AlertIcon::CapsLock { on: caps },
                 message: "Caps Lock".to_string(),
@@ -931,6 +964,7 @@ impl App {
                 }),
             };
             self.trigger_alert(alert, Duration::from_millis(1800));
+            }
         }
 
         // 2. Power / Battery status
@@ -938,8 +972,9 @@ impl App {
         let prev = self.power_state;
         self.power_state = pwr;
         let pct_f = pwr.percent.unwrap_or(100) as f32 / 100.0;
+        let battery_alerts = self.settings.pill_alerts_enabled && self.settings.alert_battery;
 
-        if pwr.ac_online != prev.ac_online {
+        if battery_alerts && pwr.ac_online != prev.ac_online {
             if pwr.ac_online {
                 self.low_bat_warned = false;
                 self.crit_bat_warned = false;
@@ -971,7 +1006,8 @@ impl App {
                     Duration::from_millis(2400),
                 );
             }
-        } else if let Some(pct) = pwr.percent {
+        } else if battery_alerts {
+            if let Some(pct) = pwr.percent {
             if pwr.ac_online {
                 if pct == 100 && prev.percent.unwrap_or(100) < 100 {
                     tray::play_alert_pop();
@@ -1020,6 +1056,7 @@ impl App {
                     Duration::from_millis(3200),
                 );
             }
+            }
         }
 
         // 3. Expire finished alert
@@ -1044,10 +1081,20 @@ impl App {
     fn on_timer(&mut self, id: usize) {
         match id {
             TIMER_TICK => {
+                // Hide the pill while a fullscreen app (game/video/slides) is in front.
+                let fs = self.settings.hide_in_fullscreen && window::foreground_is_fullscreen();
+                if fs != self.hidden_for_fullscreen {
+                    self.hidden_for_fullscreen = fs;
+                    unsafe {
+                        let _ = ShowWindow(self.hwnd, if fs { SW_HIDE } else { SW_SHOWNA });
+                    }
+                }
                 self.update_eyes();
                 self.refresh_media_from_cache(false);
                 if self.pomodoro.check_finished(chrono::Local::now()) {
-                    tray::play_chime();
+                    if self.settings.sound_chimes {
+                        tray::play_chime();
+                    }
                     let done_msg = match self.pomodoro.mode {
                         pomodoro::PomodoroMode::Focus => "Focus Done",
                         pomodoro::PomodoroMode::Break => "Break Done",
@@ -1299,7 +1346,8 @@ impl App {
                 self.on_paint();
             }
 
-            let vol_hover = x >= renderer::MUSIC_VOLUME_BAR_RECT.0 - 4.0
+            let vol_hover = self.settings.master_volume_control
+                && x >= renderer::MUSIC_VOLUME_BAR_RECT.0 - 4.0
                 && x <= renderer::MUSIC_SPEAKER_RECT.2 + 4.0
                 && y >= renderer::MUSIC_VOLUME_BAR_RECT.1 - 4.0
                 && y <= renderer::MUSIC_VOLUME_BAR_RECT.3 + 4.0;
@@ -1602,7 +1650,8 @@ impl App {
             }
 
             // Volume speaker click (mute toggle):
-            if x >= renderer::MUSIC_SPEAKER_RECT.0 - 4.0 && x <= renderer::MUSIC_SPEAKER_RECT.2 + 4.0
+            if self.settings.master_volume_control
+                && x >= renderer::MUSIC_SPEAKER_RECT.0 - 4.0 && x <= renderer::MUSIC_SPEAKER_RECT.2 + 4.0
                 && y >= renderer::MUSIC_SPEAKER_RECT.1 - 4.0 && y <= renderer::MUSIC_SPEAKER_RECT.3 + 4.0 {
                 if self.master_volume > 0.02 {
                     self.last_non_zero_volume = self.master_volume;
@@ -1615,7 +1664,8 @@ impl App {
                 return;
             }
             // Volume bar click & drag:
-            if self.volume_bar_zoom > 0.15
+            if self.settings.master_volume_control
+                && self.volume_bar_zoom > 0.15
                 && x >= renderer::MUSIC_VOLUME_BAR_RECT.0 - 4.0
                 && x <= renderer::MUSIC_VOLUME_BAR_RECT.2 + 4.0
                 && y >= renderer::MUSIC_VOLUME_BAR_RECT.1 - 4.0
@@ -1947,7 +1997,12 @@ impl App {
                             return;
                         }
                         if x >= renderer::TODO_ROW_X && x <= renderer::TODO_ROW_TOGGLE_RIGHT {
+                            let was_done = self.todo.tasks.get(row_i).map(|t| t.done).unwrap_or(true);
                             self.todo.toggle(row_i);
+                            let now_done = self.todo.tasks.get(row_i).map(|t| t.done).unwrap_or(false);
+                            if !was_done && now_done && self.settings.sound_on_complete {
+                                tray::play_chime();
+                            }
                             self.on_paint();
                             return;
                         }
@@ -3505,6 +3560,10 @@ unsafe extern "system" fn wnd_proc(
         crate::settings_window::WM_SETTINGS_UPDATED => {
             app.settings = crate::settings::AuraSettings::load();
             crate::tray::set_autorun(app.settings.start_with_windows);
+            app.water.set_goal(app.settings.water_daily_goal as i64);
+            app.pomodoro.focus_mins = app.settings.pomodoro_focus_mins;
+            window::place_canvas_on_monitor(app.hwnd, app.settings.pill_monitor);
+            app.refresh_anim_timer();
             let state = app.pill.state;
             let (tw, th) = app.target_size_for(state);
             app.pill.width = tw;

@@ -29,6 +29,7 @@ impl PomodoroMode {
 pub struct Pomodoro {
     pub mode: PomodoroMode,
     pub running: bool,
+    pub focus_mins: u32,
     ends_at: Option<DateTime<Local>>,
     paused_remaining_secs: i64,
 }
@@ -39,7 +40,8 @@ impl Pomodoro {
             mode: PomodoroMode::Focus,
             running: false,
             ends_at: None,
-            paused_remaining_secs: PomodoroMode::Focus.duration_secs(),
+            focus_mins: 25,
+            paused_remaining_secs: 25 * 60,
         }
     }
 
@@ -51,26 +53,33 @@ impl Pomodoro {
         self.mode = mode;
         self.running = false;
         self.ends_at = None;
-        self.paused_remaining_secs = mode.duration_secs();
+        self.paused_remaining_secs = self.mode_duration_secs(mode);
     }
 
     /// Reset current mode timer to its full duration, stopped.
     pub fn reset(&mut self) {
         self.running = false;
         self.ends_at = None;
-        self.paused_remaining_secs = self.mode.duration_secs();
+        self.paused_remaining_secs = self.mode_duration_secs(self.mode);
     }
 
     /// True when a countdown is live (running, or paused mid-countdown),
     /// matching `IslandView.isPomodoroActive` on Aura Mac.
     pub fn is_active(&self, now: DateTime<Local>) -> bool {
         let rem = self.remaining(now);
-        let dur = self.mode.duration_secs();
+        let dur = self.mode_duration_secs(self.mode);
         self.running || (rem > 0 && rem < dur)
     }
 
     pub fn duration_secs(&self) -> i64 {
-        self.mode.duration_secs()
+        self.mode_duration_secs(self.mode)
+    }
+
+    fn mode_duration_secs(&self, mode: PomodoroMode) -> i64 {
+        match mode {
+            PomodoroMode::Focus => self.focus_mins.max(1) as i64 * 60,
+            PomodoroMode::Break => 5 * 60,
+        }
     }
 
     /// Start (or resume) / pause toggle.
@@ -83,7 +92,7 @@ impl Pomodoro {
         } else {
             // Start/resume: if finished (0), reset to full duration first.
             if self.paused_remaining_secs <= 0 {
-                self.paused_remaining_secs = self.mode.duration_secs();
+                self.paused_remaining_secs = self.mode_duration_secs(self.mode);
             }
             self.ends_at = Some(now + Duration::seconds(self.paused_remaining_secs));
             self.running = true;
