@@ -305,6 +305,7 @@ pub struct RenderContext<'a> {
     pub tray_spring_scale: f32,
     pub cur_w: f32,
     pub cur_h: f32,
+    pub notch_scale: f32,
     pub alert: Option<&'a PillAlert>,
     pub eye_openness: [f32; 2],
     pub eye_slant: [f32; 2],
@@ -5243,17 +5244,24 @@ impl Renderer {
 
             // Apply `tray_spring_scale` (`1.03` on drag hover, `1.12 -> 1.0` damped cosine bounce on drop)
             // anchored at the top-center bezel `(window::CANVAS_W * 0.5, 0.0)`:
+            // Also scale content by `notch_scale` so the pill interior is fully
+            // responsive (text, icons, spacing grow with the pill).
             let s = if ctx.state == IslandState::Tray {
                 ctx.tray_spring_scale
             } else {
                 1.0
             };
-            let tx = window::CANVAS_W * 0.5 - (lw * 0.5) * s;
+            let notch = ctx.notch_scale.clamp(0.8, 1.5);
+            let content_s = s * notch;
+            // `lw` already includes notch_scale; divide to get the base width
+            // so the scaled content stays centered.
+            let base_w = lw / notch.max(0.01);
+            let tx = window::CANVAS_W * 0.5 - (base_w * 0.5) * content_s;
             let base_xform = Matrix3x2 {
-                M11: s,
+                M11: content_s,
                 M12: 0.0,
                 M21: 0.0,
-                M22: s,
+                M22: content_s,
                 M31: tx,
                 M32: 0.0,
             };
