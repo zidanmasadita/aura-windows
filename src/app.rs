@@ -123,6 +123,7 @@ pub struct App {
     volume_hover_since: Option<Instant>,
     pill_hovered: bool,
     preview_close_at: Option<Instant>,
+    manual_hold: bool,
     renderer: renderer::Renderer,
     pill: state::PillState,
     spring: animator::Spring2D,
@@ -349,6 +350,7 @@ impl App {
             volume_hover_since: None,
             pill_hovered: false,
             preview_close_at: None,
+            manual_hold: false,
         });
         app.water.set_goal(app.settings.water_daily_goal as i64);
         app.pomodoro.focus_mins = app.settings.pomodoro_focus_mins;
@@ -699,8 +701,9 @@ impl App {
         let peek = 5.0 - h;
         // If the user is hovering the pill (even just the peek tip), reveal it.
         // Once opened (not idle), never hide until the user closes it.
+        // If the user manually clicked to open, hold it visible (no auto-hide).
         // This prevents flicker: hide must not fight an active hover/open.
-        if self.pill_hovered || !idle {
+        if self.pill_hovered || !idle || self.manual_hold {
             return 0.0;
         }
         let hide = self.hide_fs
@@ -1283,6 +1286,10 @@ impl App {
                 // the animation timer was stopped, restart it so the slide is smooth.
                 if (self.pill_y_offset - self.pill_offset_target()).abs() > 0.5 {
                     self.ensure_anim_timer();
+                }
+                // Release the manual hold when leaving fullscreen.
+                if !self.hide_fs && self.manual_hold {
+                    self.manual_hold = false;
                 }
                 // Auto-close the pill 0.5s after the user stops dragging a slider.
                 if let Some(deadline) = self.preview_close_at {
@@ -2043,6 +2050,8 @@ impl App {
         // Closed pill click -> expand to `last_section` (or `Pomodoro` if active timer pill clicked):
         if !self.pill.state.is_expanded() {
             self.suppress_hover_open_after_click_close = false;
+            // Manual open: hold the pill visible, don't auto-hide/peek afterwards.
+            self.manual_hold = true;
             if self.pomodoro.is_active(chrono::Local::now()) && self.media.is_none() {
                 self.set_state(IslandState::Pomodoro);
             } else {
