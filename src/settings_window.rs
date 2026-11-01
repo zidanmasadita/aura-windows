@@ -202,17 +202,6 @@ fn apply_slider(state: &mut State, kind: SliderKind, x: f32) {
     let (min, max) = slider_min_max(kind);
     let t = ((x - sx) / w).clamp(0.0, 1.0);
     let v = slider_snap(kind, min + t * (max - min));
-    // Skip if the snapped value didn't change (avoids message/file flood).
-    let changed = match kind {
-        SliderKind::Size => (state.settings.notch_scale - v).abs() > 0.0001,
-        SliderKind::Opacity => (state.settings.pill_opacity - v).abs() > 0.0001,
-        SliderKind::DodgeRadius => (state.settings.dodge_radius - v).abs() > 0.01,
-        SliderKind::DodgeDelay => state.settings.dodge_delay_ms != v.round() as u64,
-        SliderKind::HoverDelay => state.settings.hover_open_delay_ms != v.round() as u64,
-    };
-    if !changed {
-        return;
-    }
     match kind {
         SliderKind::Size => state.settings.notch_scale = v,
         SliderKind::Opacity => state.settings.pill_opacity = v,

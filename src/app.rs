@@ -3647,7 +3647,6 @@ impl App {
                 tray_spring_scale: self.tray_bounce.scale(),
                 cur_w: self.pill.width,
                 cur_h: self.pill.height,
-                notch_scale: self.settings.notch_scale.clamp(0.8, 1.5),
                 alert: alert_clone.as_ref(),
                 eye_openness: self.eye_openness,
                 eye_slant: self.eye_slant,
