@@ -92,6 +92,8 @@ pub struct RemoveBgState {
     pub saved_path: Option<String>,
     pub error: Option<String>,
     pub notice: String,
+    pub queue: Vec<String>,
+    pub queue_idx: usize,
 }
 
 impl RemoveBgState {
@@ -109,6 +111,45 @@ impl RemoveBgState {
             saved_path: None,
             error: None,
             notice: String::new(),
+            queue: Vec::new(),
+            queue_idx: 0,
+        }
+    }
+
+    pub fn add_to_queue(&mut self, paths: &[String]) {
+        for p in paths {
+            if !self.queue.contains(p) {
+                self.queue.push(p.clone());
+            }
+        }
+        if self.input_path.is_none() && !self.queue.is_empty() {
+            self.set_queue_index(0);
+        }
+    }
+
+    pub fn set_queue_index(&mut self, idx: usize) {
+        if idx < self.queue.len() {
+            self.queue_idx = idx;
+            let path = self.queue[idx].clone();
+            self.set_input(&path);
+        }
+    }
+
+    pub fn next_in_queue(&mut self) {
+        if !self.queue.is_empty() {
+            let next = (self.queue_idx + 1) % self.queue.len();
+            self.set_queue_index(next);
+        }
+    }
+
+    pub fn prev_in_queue(&mut self) {
+        if !self.queue.is_empty() {
+            let prev = if self.queue_idx == 0 {
+                self.queue.len() - 1
+            } else {
+                self.queue_idx - 1
+            };
+            self.set_queue_index(prev);
         }
     }
 
@@ -279,6 +320,21 @@ fn sanitize_filename(name: &str) -> String {
         .collect()
 }
 
+fn mime_for_filename(name: &str) -> &'static str {
+    let lower = name.to_lowercase();
+    if lower.ends_with(".png") {
+        "image/png"
+    } else if lower.ends_with(".jpg") || lower.ends_with(".jpeg") {
+        "image/jpeg"
+    } else if lower.ends_with(".webp") {
+        "image/webp"
+    } else if lower.ends_with(".bmp") {
+        "image/bmp"
+    } else {
+        "image/png"
+    }
+}
+
 /// Build a `multipart/form-data` body with a single `file` part.
 fn build_multipart(boundary: &str, filename: &str, file_bytes: &[u8]) -> Vec<u8> {
     let mut body = Vec::new();
@@ -290,7 +346,8 @@ fn build_multipart(boundary: &str, filename: &str, file_bytes: &[u8]) -> Vec<u8>
         )
         .as_bytes(),
     );
-    body.extend_from_slice(b"Content-Type: application/octet-stream\r\n\r\n");
+    let mime = mime_for_filename(filename);
+    body.extend_from_slice(format!("Content-Type: {}\r\n\r\n", mime).as_bytes());
     body.extend_from_slice(file_bytes);
     body.extend_from_slice(format!("\r\n--{}--\r\n", boundary).as_bytes());
     body

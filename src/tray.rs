@@ -21,10 +21,10 @@ use windows::Win32::UI::Shell::{
     Shell_NotifyIconW, NIF_ICON, NIF_MESSAGE, NIF_TIP, NIM_ADD, NIM_DELETE, NOTIFYICONDATAW,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
-    AppendMenuW, CreatePopupMenu, DestroyMenu, GetCursorPos, LoadIconW, MessageBoxW,
-    SetForegroundWindow, TrackPopupMenu, DEVICE_NOTIFY_WINDOW_HANDLE, IDI_APPLICATION,
-    MB_ICONINFORMATION, MB_OK, MF_CHECKED, MF_SEPARATOR, MF_STRING, MF_UNCHECKED, TPM_RETURNCMD,
-    TPM_RIGHTBUTTON,
+    AppendMenuW, CreateIconFromResourceEx, CreatePopupMenu, DestroyMenu, GetCursorPos, LoadIconW,
+    MessageBoxW, SetForegroundWindow, TrackPopupMenu, DEVICE_NOTIFY_WINDOW_HANDLE, HICON,
+    IDI_APPLICATION, LR_DEFAULTCOLOR, MB_ICONINFORMATION, MB_OK, MF_CHECKED, MF_SEPARATOR,
+    MF_STRING, MF_UNCHECKED, TPM_RETURNCMD, TPM_RIGHTBUTTON,
 };
 
 pub const TRAY_CALLBACK_MSG: u32 = 0x8001; // WM_APP + 1
@@ -32,13 +32,72 @@ pub const TRAY_ID: u32 = 1;
 pub const MENU_STATUS: usize = 1001;
 pub const MENU_QUIT: usize = 1002;
 pub const MENU_AUTORUN: usize = 1003;
+pub const MENU_SETTINGS: usize = 1004;
 
 /// `GUID_ACDC_POWER_SOURCE` (`{5D3E9A59-E9D5-4B00-A6BD-FF34FF516548}`) from `nusa.exe` (`0x1400236C0`).
 const GUID_ACDC_POWER_SOURCE: GUID = GUID::from_u128(0x5d3e9a59_e9d5_4b00_a6bd_ff34ff516548);
 
+const AURA_ICO_BYTES: &[u8] = include_bytes!("../assets/aura.ico");
+
+/// Load the Aura mascot icon at the specified dimension from embedded ICO resource.
+pub fn load_aura_icon(target_size: i32) -> Option<HICON> {
+    if AURA_ICO_BYTES.len() < 6 {
+        return None;
+    }
+    let count = u16::from_le_bytes([AURA_ICO_BYTES[4], AURA_ICO_BYTES[5]]) as usize;
+    let mut best_offset = 0;
+    let mut best_size = 0;
+    let mut best_diff = i32::MAX;
+
+    for i in 0..count {
+        let entry_pos = 6 + i * 16;
+        if entry_pos + 16 > AURA_ICO_BYTES.len() {
+            break;
+        }
+        let w = AURA_ICO_BYTES[entry_pos];
+        let actual_w = if w == 0 { 256 } else { w as i32 };
+        let sz = u32::from_le_bytes([
+            AURA_ICO_BYTES[entry_pos + 8],
+            AURA_ICO_BYTES[entry_pos + 9],
+            AURA_ICO_BYTES[entry_pos + 10],
+            AURA_ICO_BYTES[entry_pos + 11],
+        ]) as usize;
+        let offset = u32::from_le_bytes([
+            AURA_ICO_BYTES[entry_pos + 12],
+            AURA_ICO_BYTES[entry_pos + 13],
+            AURA_ICO_BYTES[entry_pos + 14],
+            AURA_ICO_BYTES[entry_pos + 15],
+        ]) as usize;
+
+        let diff = (actual_w - target_size).abs();
+        if diff < best_diff {
+            best_diff = diff;
+            best_offset = offset;
+            best_size = sz;
+        }
+    }
+
+    if best_size == 0 || best_offset + best_size > AURA_ICO_BYTES.len() {
+        return None;
+    }
+
+    let slice = &AURA_ICO_BYTES[best_offset..best_offset + best_size];
+    unsafe {
+        CreateIconFromResourceEx(
+            slice,
+            true, // fIcon = TRUE
+            0x00030000, // dwVersion = 3.0
+            target_size,
+            target_size,
+            LR_DEFAULTCOLOR,
+        ).ok()
+    }
+}
+
 pub fn add_icon(hwnd: HWND) -> bool {
     unsafe {
-        let Ok(icon) = LoadIconW(None, IDI_APPLICATION) else {
+        let icon = load_aura_icon(32).or_else(|| LoadIconW(None, IDI_APPLICATION).ok());
+        let Some(icon) = icon else {
             return false;
         };
         let mut tip = [0u16; 128];
@@ -86,6 +145,7 @@ pub fn show_menu(hwnd: HWND) -> usize {
             MF_STRING | MF_UNCHECKED
         };
         let _ = AppendMenuW(menu, autorun_flags, MENU_AUTORUN, w!("Start with Windows"));
+        let _ = AppendMenuW(menu, MF_STRING, MENU_SETTINGS, w!("Settings..."));
         let _ = AppendMenuW(menu, MF_SEPARATOR, 0, PCWSTR::null());
         let _ = AppendMenuW(menu, MF_STRING, MENU_QUIT, w!("Quit"));
         let _ = SetForegroundWindow(hwnd);
@@ -154,6 +214,12 @@ pub fn toggle_autorun() -> bool {
             );
             true
         }
+    }
+}
+
+pub fn set_autorun(enable: bool) {
+    if is_autorun_enabled() != enable {
+        let _ = toggle_autorun();
     }
 }
 

@@ -43,9 +43,44 @@ use windows::Win32::Graphics::Imaging::{
     WICBitmapDitherTypeNone, WICBitmapInterpolationModeFant, WICBitmapPaletteTypeMedianCut,
     WICDecodeMetadataCacheOnDemand,
 };
-use windows::Win32::System::Com::{CoCreateInstance, CLSCTX_INPROC_SERVER};
+use windows::Win32::Media::Audio::Endpoints::IAudioEndpointVolume;
+use windows::Win32::Media::Audio::{
+    IMMDeviceEnumerator, MMDeviceEnumerator, eMultimedia, eRender,
+};
+use windows::Win32::System::Com::{CoCreateInstance, CLSCTX_ALL, CLSCTX_INPROC_SERVER};
 use windows::Win32::System::WinRT::{RoInitialize, RO_INIT_MULTITHREADED};
 use windows::Win32::UI::WindowsAndMessaging::PostMessageW;
+
+pub fn get_master_volume() -> Option<f32> {
+    unsafe {
+        let _ = RoInitialize(RO_INIT_MULTITHREADED);
+        let enumerator: IMMDeviceEnumerator =
+            CoCreateInstance(&MMDeviceEnumerator, None, CLSCTX_ALL).ok()?;
+        let device = enumerator.GetDefaultAudioEndpoint(eRender, eMultimedia).ok()?;
+        let endpoint: IAudioEndpointVolume = device.Activate(CLSCTX_ALL, None).ok()?;
+        endpoint.GetMasterVolumeLevelScalar().ok()
+    }
+}
+
+pub fn set_master_volume(level: f32) -> Option<()> {
+    unsafe {
+        let _ = RoInitialize(RO_INIT_MULTITHREADED);
+        let enumerator: IMMDeviceEnumerator =
+            CoCreateInstance(&MMDeviceEnumerator, None, CLSCTX_ALL).ok()?;
+        let device = enumerator.GetDefaultAudioEndpoint(eRender, eMultimedia).ok()?;
+        let endpoint: IAudioEndpointVolume = device.Activate(CLSCTX_ALL, None).ok()?;
+        endpoint
+            .SetMasterVolumeLevelScalar(level.clamp(0.0, 1.0), std::ptr::null())
+            .ok()?;
+        Some(())
+    }
+}
+
+pub fn set_master_volume_async(level: f32) {
+    std::thread::spawn(move || {
+        let _ = set_master_volume(level);
+    });
+}
 
 /// Posted to the main HWND whenever GSMTC state updates (Nusa `0x8003`).
 pub const WM_MEDIA_UPDATE: u32 = 0x8003;
@@ -111,6 +146,8 @@ impl EventSignal {
 
 static GLOBAL_SIGNAL: OnceLock<Arc<EventSignal>> = OnceLock::new();
 static PROPS_GENERATION: AtomicU64 = AtomicU64::new(0);
+static ACTIVE_MANAGER: Mutex<Option<GlobalSystemMediaTransportControlsSessionManager>> =
+    Mutex::new(None);
 
 fn signal_media_event(bits: u32) {
     if let Some(sig) = GLOBAL_SIGNAL.get() {
@@ -166,21 +203,31 @@ pub fn spawn_poller(hwnd: HWND, cache: Arc<Mutex<PollCache>>) {
         init_mta();
         let hwnd = HWND(hwnd_raw as *mut core::ffi::c_void);
 
-        // Step 1: Request SessionManager ONCE via `.get()` on this MTA thread,
-        // identical to Nusa's `0x14000AB44` -> `0x14007B933` -> `0x140039D37`.
-        set_phase(&cache, "manager request (MTA)");
-        let manager = match GlobalSystemMediaTransportControlsSessionManager::RequestAsync()
-            .and_then(|op| op.get())
-        {
-            Ok(mgr) => mgr,
-            Err(e) => {
-                update_cache(
-                    &cache,
-                    None,
-                    format!("request failed {:#010x}", e.code().0 as u32),
-                    "error",
-                );
-                return;
+        // Step 1: Request SessionManager via `.get()` on this MTA thread.
+        // If GSMTC / NPSMSvc times out (0x800705b4) or fails, loop with retry backoff
+        // instead of exiting the thread so Aura reconnects automatically when music plays.
+        let manager = loop {
+            set_phase(&cache, "manager request (MTA)");
+            match GlobalSystemMediaTransportControlsSessionManager::RequestAsync()
+                .and_then(|op| op.get())
+            {
+                Ok(mgr) => {
+                    if let Ok(mut g) = ACTIVE_MANAGER.lock() {
+                        *g = Some(mgr.clone());
+                    }
+                    update_cache(&cache, None, "GSMTC connected".to_string(), "ready");
+                    break mgr;
+                }
+                Err(e) => {
+                    let code = e.code().0 as u32;
+                    update_cache(
+                        &cache,
+                        None,
+                        format!("GSMTC request failed {:#010x} (retrying...)", code),
+                        "retrying",
+                    );
+                    std::thread::sleep(Duration::from_millis(2500));
+                }
             }
         };
 
@@ -522,12 +569,38 @@ pub fn skip_previous_async() {
     spawn_control(skip_previous);
 }
 
+pub fn seek_async(secs: f64) {
+    std::thread::spawn(move || {
+        init_mta();
+        let _ = with_session(|session| {
+            let pos_100ns = (secs.max(0.0) * 10_000_000.0) as i64;
+            let op = session.TryChangePlaybackPositionAsync(pos_100ns)?;
+            let _ = op.get();
+            Ok(true)
+        });
+        signal_media_event(FLAG_TIMELINE);
+    });
+}
+
 fn with_session<F>(f: F) -> bool
 where
     F: FnOnce(GlobalSystemMediaTransportControlsSession) -> Result<bool>,
 {
     let run = || -> Result<bool> {
-        let manager = GlobalSystemMediaTransportControlsSessionManager::RequestAsync()?.get()?;
+        let mgr = {
+            let guard = ACTIVE_MANAGER.lock().ok();
+            guard.and_then(|g| g.clone())
+        };
+        let manager = match mgr {
+            Some(m) => m,
+            None => {
+                let m = GlobalSystemMediaTransportControlsSessionManager::RequestAsync()?.get()?;
+                if let Ok(mut g) = ACTIVE_MANAGER.lock() {
+                    *g = Some(m.clone());
+                }
+                m
+            }
+        };
         let session = manager.GetCurrentSession()?;
         f(session)
     };

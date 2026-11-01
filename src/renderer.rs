@@ -37,8 +37,12 @@ use windows::Win32::Graphics::Direct2D::Common::*;
 use windows::Win32::Graphics::Direct2D::*;
 use windows::Win32::Graphics::DirectWrite::*;
 use windows::Win32::Graphics::Dxgi::Common::DXGI_FORMAT_B8G8R8A8_UNORM;
+use windows::core::PCWSTR;
+use windows::Win32::Graphics::Imaging::*;
+use windows::Win32::System::Com::{CoCreateInstance, CLSCTX_INPROC_SERVER};
 use windows::Win32::Graphics::Gdi::{
     CreateCompatibleDC, CreateDIBSection, DeleteDC, DeleteObject, SelectObject, ValidateRect,
+    GetDC, ReleaseDC, GetDIBits,
     AC_SRC_ALPHA, AC_SRC_OVER, BITMAPINFO, BITMAPINFOHEADER, BI_RGB, BLENDFUNCTION,
     DIB_RGB_COLORS, HBITMAP, HDC, HGDIOBJ,
 };
@@ -50,64 +54,195 @@ use crate::window;
 // --- Interactive hit-test constants (exact `IslandView.swift` coordinates) ---
 
 /// Speech bubble button on Music (`520x180`) and Lyrics (`700x180`) cards: `NSRect(x: 42, y: 126, width: 28, height: 28)`.
-pub const MUSIC_BUBBLE_RECT: (f32, f32, f32, f32) = (42.0, 126.0, 70.0, 154.0);
+pub const MUSIC_BUBBLE_RECT: (f32, f32, f32, f32) = (68.0, 126.0, 100.0, 154.0);
 /// Transport control X centers on Music card (`[208, 260, 312]`, `y: 126..154`, `half_w = 20`).
-pub const MUSIC_CONTROL_CENTERS: [f32; 3] = [208.0, 260.0, 312.0];
+pub const MUSIC_CONTROL_CENTERS: [f32; 3] = [224.0, 270.0, 316.0];
 /// Transport control X centers on Lyrics card (`[118, 170, 222]`, `y: 126..154`, `half_w = 20`).
-pub const LYRICS_CONTROL_CENTERS: [f32; 3] = [118.0, 170.0, 222.0];
+pub const LYRICS_CONTROL_CENTERS: [f32; 3] = [170.0, 214.0, 258.0];
 pub const MUSIC_CONTROLS_Y: (f32, f32) = (126.0, 154.0);
+pub const MUSIC_SPEAKER_RECT: (f32, f32, f32, f32) = (454.0, 126.0, 490.0, 154.0);
+pub const MUSIC_VOLUME_BAR_RECT: (f32, f32, f32, f32) = (358.0, 126.0, 452.0, 154.0);
 
-/// Pomodoro (`640x180`) interactive rects (`pomodoroButtonRects`).
-pub const POMODORO_SHORT_BREAK_RECT: (f32, f32, f32, f32) = (220.0, 130.0, 344.0, 158.0);
-pub const POMODORO_PLAY_RECT: (f32, f32, f32, f32) = (352.0, 130.0, 408.0, 158.0);
-pub const POMODORO_FOCUS_RECT: (f32, f32, f32, f32) = (416.0, 130.0, 538.0, 158.0);
-pub const POMODORO_RESET_RECT: (f32, f32, f32, f32) = (362.0, 58.0, 394.0, 90.0);
+/// Pomodoro (`520x180`) interactive rects (`pomodoroButtonRects`).
+pub const POMODORO_RING_CX: f32 = 94.0;
+pub const POMODORO_RING_CY: f32 = 104.0;
+pub const POMODORO_RING_R: f32 = 32.0;
+pub const POMODORO_COUNTDOWN_X: f32 = 156.0;
+pub const POMODORO_COUNTDOWN_Y: f32 = 42.0;
+pub const POMODORO_SUBTITLE_Y: f32 = 96.0;
+pub const POMODORO_RESET_RECT: (f32, f32, f32, f32) = (304.0, 48.0, 332.0, 76.0);
+pub const POMODORO_SHORT_BREAK_RECT: (f32, f32, f32, f32) = (156.0, 122.0, 264.0, 150.0);
+pub const POMODORO_PLAY_RECT: (f32, f32, f32, f32) = (272.0, 122.0, 326.0, 150.0);
+pub const POMODORO_FOCUS_RECT: (f32, f32, f32, f32) = (334.0, 122.0, 442.0, 150.0);
 
-/// Todo (`640x220`) interactive rects (`todoAddPillRect`, `todoInputRect`, `todoVisibleRows`).
-pub const TODO_ADD_PILL_RECT: (f32, f32, f32, f32) = (28.0, 120.0, 132.0, 148.0);
-pub const TODO_INPUT_RECT: (f32, f32, f32, f32) = (28.0, 160.0, 612.0, 192.0);
-pub const TODO_ROW_X: f32 = 280.0;
-pub const TODO_ROW_W: f32 = 320.0;
-pub const TODO_ROW_TOGGLE_RIGHT: f32 = 568.0;
-pub const TODO_ROW_DELETE_LEFT: f32 = 576.0;
-pub const TODO_ROW_DELETE_RIGHT: f32 = 600.0;
-pub const TODO_ROW_Y0: f32 = 52.0;
+/// Todo (`520x180`) interactive rects (`todoAddPillRect`, `todoInputRect`, `todoVisibleRows`).
+pub const TODO_ADD_PILL_RECT: (f32, f32, f32, f32) = (46.0, 120.0, 150.0, 148.0);
+pub const TODO_INPUT_RECT: (f32, f32, f32, f32) = (46.0, 116.0, 150.0, 148.0);
+pub const TODO_ROW_X: f32 = 180.0;
+pub const TODO_ROW_W: f32 = 306.0;
+pub const TODO_ROW_TOGGLE_RIGHT: f32 = 432.0;
+pub const TODO_ROW_EDIT_LEFT: f32 = 436.0;
+pub const TODO_ROW_EDIT_RIGHT: f32 = 460.0;
+pub const TODO_ROW_DELETE_LEFT: f32 = 462.0;
+pub const TODO_ROW_DELETE_RIGHT: f32 = 486.0;
+pub const TODO_ROW_Y0: f32 = 38.0;
 pub const TODO_ROW_H: f32 = 32.0;
-pub const TODO_ROW_PITCH: f32 = 40.0;
+pub const TODO_ROW_PITCH: f32 = 38.0;
 
-/// Water (`640x180`) interactive rects (`waterButtonRects`).
-pub const WATER_TOGGLE_RECT: (f32, f32, f32, f32) = (284.0, 54.0, 340.0, 86.0);
-pub const WATER_DRINK_RECT: (f32, f32, f32, f32) = (48.0, 132.0, 132.0, 160.0);
-pub const WATER_SETTINGS_RECT: (f32, f32, f32, f32) = (140.0, 132.0, 242.0, 160.0);
+/// Water (`520x180`) interactive rects (`waterButtonRects`).
+pub const WATER_TOGGLE_RECT: (f32, f32, f32, f32) = (188.0, 52.0, 238.0, 80.0);
+pub const WATER_DRINK_RECT: (f32, f32, f32, f32) = (54.0, 120.0, 142.0, 150.0);
+pub const WATER_SETTINGS_RECT: (f32, f32, f32, f32) = (150.0, 120.0, 244.0, 150.0);
 
-/// Tray (`640x280`) interactive rects (`trayClearPillRect`, `trayGridTileRects`, `trayGridArrowRects`).
-pub const TRAY_PAGE_SIZE: usize = 8;
-pub const TRAY_CLEAR_RECT: (f32, f32, f32, f32) = (82.0, 10.0, 142.0, 38.0);
-pub const TRAY_TILE_GEOM: (f32, f32, f32, f32, f32, f32) =
-    (30.0, 44.0, 136.0, 100.0, 148.0, 112.0);
-pub const TRAY_LEFT_ARROW_RECT: (f32, f32, f32, f32) = (26.0, 128.0, 70.0, 172.0);
-pub const TRAY_RIGHT_ARROW_RECT: (f32, f32, f32, f32) = (570.0, 128.0, 614.0, 172.0);
+/// Tray (`520x180`) horizontal carousel geometry:
 
-/// Hit test for the vertical section dots on the right edge (`IslandView.dotIndex(at:)`).
-/// Remove BG card geometry (pill points, `(x0, y0, x1, y1)` like `TRAY_*_RECT`).
-pub const RB_MODEL_RECT: (f32, f32, f32, f32) = (500.0, 10.0, 600.0, 34.0);
-pub const RB_LEFT_RECT: (f32, f32, f32, f32) = (20.0, 48.0, 300.0, 208.0);
-pub const RB_FROM_TRAY_RECT: (f32, f32, f32, f32) = (20.0, 218.0, 150.0, 242.0);
-pub const RB_RIGHT_RECT: (f32, f32, f32, f32) = (320.0, 48.0, 600.0, 208.0);
-pub const RB_SAVE_RECT: (f32, f32, f32, f32) = (320.0, 218.0, 400.0, 242.0);
+pub fn compute_tray_button_rects(hovers: &[f32; 4]) -> [(f32, f32, f32, f32); 4] {
+    let base_w = 30.0f32;
+    let extra_ws = [44.0f32, 46.0f32, 82.0f32, 64.0f32];
+    let gap = 8.0f32;
+    let y0 = 24.0f32;
+    let y1 = 54.0f32;
+    let mut x = 116.0f32;
+    let mut rects = [(0.0, 0.0, 0.0, 0.0); 4];
+    for i in 0..4 {
+        let w = base_w + extra_ws[i] * hovers[i];
+        rects[i] = (x, y0, x + w, y1);
+        x += w + gap;
+    }
+    rects
+}
+
+pub fn compute_rb_button_rects(hovers: &[f32; 2], model_len: usize) -> [(f32, f32, f32, f32); 2] {
+    let base_w = 30.0f32;
+    let extra_ws = [50.0f32 + (model_len as f32) * 6.0, 44.0f32];
+    let gap = 8.0f32;
+    let y0 = 24.0f32;
+    let y1 = 54.0f32;
+    let mut x = 340.0f32;
+    let mut rects = [(0.0, 0.0, 0.0, 0.0); 2];
+    for i in 0..2 {
+        let w = base_w + extra_ws[i] * hovers[i];
+        rects[i] = (x, y0, x + w, y1);
+        x += w + gap;
+    }
+    rects
+}
+
+pub fn compute_cv_button_rects(hovers: &[f32; 3], fmt_len: usize, has_format_btn: bool) -> [(f32, f32, f32, f32); 3] {
+    let base_w = 30.0f32;
+    let y0 = 24.0f32;
+    let y1 = 54.0f32;
+
+    // Button 0 (Back): at left (x = 46.0)
+    let w0 = base_w + 42.0 * hovers[0];
+    let r0 = (46.0, y0, 46.0 + w0, y1);
+
+    if has_format_btn {
+        // Button 1 (Format): at right
+        let w1 = base_w + (40.0 + (fmt_len as f32) * 7.0) * hovers[1];
+        let x1 = 360.0f32;
+        let r1 = (x1, y0, x1 + w1, y1);
+
+        // Button 2 (Reset): after Button 1
+        let w2 = base_w + 44.0 * hovers[2];
+        let x2 = x1 + w1 + 8.0;
+        let r2 = (x2, y0, x2 + w2, y1);
+
+        [r0, r1, r2]
+    } else {
+        // No Format button: Button 1 is dummy/empty
+        let r1 = (0.0, 0.0, 0.0, 0.0);
+
+        // Button 2 (Reset): placed stably on the right edge, expanding to the left without shifting
+        let w2 = base_w + 44.0 * hovers[2];
+        let x2 = 450.0 - 44.0 * hovers[2];
+        let r2 = (x2, y0, x2 + w2, y1);
+
+        [r0, r1, r2]
+    }
+}
+
+#[allow(dead_code)]
+pub const TRAY_CLEAR_RECT: (f32, f32, f32, f32) = (90.0, 14.0, 146.0, 42.0);
+#[allow(dead_code)]
+pub const TRAY_SELECT_RECT: (f32, f32, f32, f32) = (152.0, 14.0, 224.0, 42.0);
+#[allow(dead_code)]
+pub const TRAY_TO_REMOVEBG_RECT: (f32, f32, f32, f32) = (230.0, 14.0, 334.0, 42.0);
+#[allow(dead_code)]
+pub const TRAY_TO_CONVERT_RECT: (f32, f32, f32, f32) = (340.0, 14.0, 428.0, 42.0);
+
+pub const TRAY_CAROUSEL_X: f32 = 54.0;
+pub const TRAY_CAROUSEL_Y: f32 = 66.0;
+pub const TRAY_CAROUSEL_W: f32 = 432.0;
+pub const TRAY_CAROUSEL_H: f32 = 88.0;
+pub const TRAY_TILE_W: f32 = 80.0;
+pub const TRAY_TILE_H: f32 = 88.0;
+pub const TRAY_TILE_PITCH: f32 = 90.0;
+
+/// Remove BG card geometry (`540x184`):
+pub const RB_QUEUE_PREV_RECT: (f32, f32, f32, f32) = (236.0, 24.0, 264.0, 52.0);
+pub const RB_QUEUE_NEXT_RECT: (f32, f32, f32, f32) = (300.0, 24.0, 328.0, 52.0);
+#[allow(dead_code)]
+pub const RB_MODEL_RECT: (f32, f32, f32, f32) = (340.0, 24.0, 420.0, 54.0);
+#[allow(dead_code)]
+pub const RB_RESET_BTN_RECT: (f32, f32, f32, f32) = (428.0, 24.0, 458.0, 54.0);
+
+pub const RB_DROP_ZONE_RECT: (f32, f32, f32, f32) = (54.0, 58.0, 486.0, 156.0);
+pub const RB_LEFT_PREVIEW_RECT: (f32, f32, f32, f32) = (54.0, 58.0, 266.0, 156.0);
+pub const RB_RIGHT_PREVIEW_RECT: (f32, f32, f32, f32) = (274.0, 58.0, 486.0, 156.0);
+pub const RB_PROCESS_BTN_RECT: (f32, f32, f32, f32) = (448.0, 116.0, 480.0, 148.0);
+pub const RB_SAVE_BTN_RECT: (f32, f32, f32, f32) = (448.0, 116.0, 480.0, 148.0);
+
+/// Convert card geometry (`540x184`):
+#[allow(dead_code)]
+pub const CONVERT_APP_ICON_SIZE: f32 = 36.0;
+pub const CONVERT_APP_CARD_W: f32 = 132.0;
+pub const CONVERT_APP_CARD_H: f32 = 92.0;
+pub const CONVERT_APP_START_X: f32 = 54.0;
+pub const CONVERT_APP_Y: f32 = 58.0;
+pub const CONVERT_APP_PITCH: f32 = 150.0;
+
+#[allow(dead_code)]
+pub const CONVERT_BACK_BTN_RECT: (f32, f32, f32, f32) = (46.0, 24.0, 76.0, 54.0);
+pub const CONVERT_QUEUE_PREV_RECT: (f32, f32, f32, f32) = (236.0, 24.0, 264.0, 52.0);
+pub const CONVERT_QUEUE_NEXT_RECT: (f32, f32, f32, f32) = (300.0, 24.0, 328.0, 52.0);
+#[allow(dead_code)]
+pub const CONVERT_FORMAT_PICKER_RECT: (f32, f32, f32, f32) = (360.0, 24.0, 424.0, 54.0);
+#[allow(dead_code)]
+pub const CONVERT_RESET_BTN_RECT: (f32, f32, f32, f32) = (432.0, 24.0, 462.0, 54.0);
+
+pub const CONVERT_DROP_ZONE_RECT: (f32, f32, f32, f32) = (54.0, 58.0, 486.0, 110.0);
+pub const CONVERT_LIST_VIEW_RECT: (f32, f32, f32, f32) = (54.0, 118.0, 486.0, 162.0);
+pub const CONVERT_PROCESS_BTN_RECT: (f32, f32, f32, f32) = (448.0, 124.0, 480.0, 156.0);
+pub const CONVERT_SAVE_BTN_RECT: (f32, f32, f32, f32) = (448.0, 124.0, 480.0, 156.0);
+
+pub const MERGE_PDF_ADD_BTN: (f32, f32, f32, f32) = (330.0, 24.0, 420.0, 52.0);
+pub const MERGE_PDF_RUN_BTN: (f32, f32, f32, f32) = (340.0, 134.0, 486.0, 166.0);
+
+pub const PDF_MD_PORTAL_RECT: (f32, f32, f32, f32) = (368.0, 58.0, 486.0, 156.0);
+pub const PDF_MD_CARD_START_X: f32 = 54.0;
+pub const PDF_MD_CARD_Y: f32 = 58.0;
+pub const PDF_MD_CARD_W: f32 = 78.0;
+pub const PDF_MD_CARD_H: f32 = 98.0;
+pub const PDF_MD_CARD_PITCH: f32 = 88.0;
+
+pub const SETTINGS_CLOSE_BTN: (f32, f32, f32, f32) = (484.0, 22.0, 516.0, 50.0);
 
 pub fn dot_index_at(x: f32, y: f32, lw: f32, lh: f32) -> Option<usize> {
-    let count = 6usize;
-    if x < lw - 32.0 || x > lw - 10.0 {
+    let count = crate::state::SECTION_COUNT;
+    // Bottom horizontal dots: y is within [lh - 26.0, lh - 2.0]
+    if y < lh - 26.0 || y > lh - 2.0 {
         return None;
     }
-    let top = (lh - (count as f32) * 18.0) / 2.0;
-    if y < top || y > top + (count as f32) * 18.0 {
+    let spacing = 16.0f32;
+    let total_w = (count as f32 - 1.0) * spacing;
+    let start_x = (lw - total_w) * 0.5;
+    if x < start_x - 12.0 || x > start_x + total_w + 12.0 {
         return None;
     }
-    let idx = ((y - top) / 18.0) as usize;
-    if idx < count {
-        Some(idx)
+    let idx = ((x - (start_x - spacing * 0.5)) / spacing).floor() as isize;
+    if idx >= 0 && (idx as usize) < count {
+        Some(idx as usize)
     } else {
         None
     }
@@ -149,6 +284,7 @@ pub struct RenderContext<'a> {
     pub state: IslandState,
     pub lyrics_mode: bool,
     pub eye_look: (f32, f32),
+    #[allow(dead_code)]
     pub eyes_closed: bool,
     pub battery_percent: Option<f32>,
     pub battery_charging: bool,
@@ -162,6 +298,7 @@ pub struct RenderContext<'a> {
     pub shelf: &'a crate::shelf::Shelf,
     pub removebg: &'a crate::removebg::RemoveBgState,
     pub removebg_drop_highlight: bool,
+    #[allow(dead_code)]
     pub tray_page: usize,
     pub tray_drop_highlight: bool,
     pub tray_drag_pt: Option<(f32, f32)>,
@@ -169,6 +306,39 @@ pub struct RenderContext<'a> {
     pub cur_w: f32,
     pub cur_h: f32,
     pub alert: Option<&'a PillAlert>,
+    pub eye_openness: [f32; 2],
+    pub eye_slant: [f32; 2],
+    pub convert: &'a crate::convert::ConvertState,
+    pub music_button_zooms: [f32; 4],
+    pub music_bar_hover: bool,
+    pub music_seek_pos: Option<f64>,
+    pub master_volume: f32,
+    #[allow(dead_code)]
+    pub volume_bar_hover: bool,
+    pub volume_bar_zoom: f32,
+    #[allow(dead_code)]
+    pub card_expanded: bool,
+    pub todo_scroll: f32,
+    pub todo_editing_idx: Option<usize>,
+    pub tray_scroll: f32,
+    pub transition_active: bool,
+    pub transition_progress: f32,
+    pub transition_dir: f32,
+    #[allow(dead_code)]
+    pub transition_from: IslandState,
+    #[allow(dead_code)]
+    pub transition_to: IslandState,
+    pub dot_indicator_bounds: (f32, f32),
+    pub hovered_dot: Option<usize>,
+    pub music_bar_zoom: f32,
+    pub tray_genie_progress: Option<f32>,
+    pub mouse_pt: Option<(f32, f32)>,
+    pub header_active: bool,
+    pub tray_btn_hovers: [f32; 4],
+    pub rb_btn_hovers: [f32; 2],
+    pub cv_btn_hovers: [f32; 3],
+    pub settings: &'a crate::settings::AuraSettings,
+    pub pdf_md_drag: Option<(usize, f32, f32)>,
 }
 
 fn format_time_02(secs: f64) -> String {
@@ -253,6 +423,13 @@ pub struct Renderer {
     removebg_in_key: (String, usize),
     removebg_bitmap: Option<ID2D1Bitmap>,
     removebg_gen: u64,
+    convert_in_bitmap: Option<ID2D1Bitmap>,
+    convert_in_key: (String, usize),
+    convert_bitmap: Option<ID2D1Bitmap>,
+    convert_gen: u64,
+    convert_app_bitmaps: [Option<ID2D1Bitmap>; 3],
+    dot_icons: [Option<ID2D1Bitmap>; 7],
+    tray_thumb_cache: std::collections::HashMap<String, ID2D1Bitmap>,
     dominant_rgb: Option<(f32, f32, f32)>,
     // Lyric slot-machine roll animation state:
     lyric_roll: Option<LyricRollState>,
@@ -367,6 +544,13 @@ impl Renderer {
                 removebg_in_key: (String::new(), 0),
                 removebg_bitmap: None,
                 removebg_gen: 0,
+                convert_in_bitmap: None,
+                convert_in_key: (String::new(), 0),
+                convert_bitmap: None,
+                convert_gen: 0,
+                convert_app_bitmaps: [None, None, None],
+                dot_icons: [None, None, None, None, None, None, None],
+                tray_thumb_cache: std::collections::HashMap::new(),
                 dominant_rgb: None,
                 lyric_roll: None,
                 started_at: Instant::now(),
@@ -380,6 +564,11 @@ impl Renderer {
             .as_ref()
             .map(|r| r.started_at.elapsed().as_secs_f32() < 0.70)
             .unwrap_or(false)
+    }
+
+    /// Immediately cancels any active lyric rolling animation.
+    pub fn cancel_lyric_roll(&mut self) {
+        self.lyric_roll = None;
     }
 
     fn ensure_target(&mut self, canvas_w_px: i32, canvas_h_px: i32, dpi: f32) -> bool {
@@ -441,9 +630,9 @@ impl Renderer {
                     format: DXGI_FORMAT_B8G8R8A8_UNORM,
                     alphaMode: D2D1_ALPHA_MODE_PREMULTIPLIED,
                 },
-                dpiX: dpi,
-                dpiY: dpi,
-                usage: D2D1_RENDER_TARGET_USAGE_NONE,
+                dpiX: 0.0,
+                dpiY: 0.0,
+                usage: D2D1_RENDER_TARGET_USAGE_GDI_COMPATIBLE,
                 minLevel: D2D1_FEATURE_LEVEL_DEFAULT,
             };
             let Ok(dc_target) = self.factory.CreateDCRenderTarget(&props) else {
@@ -471,6 +660,9 @@ impl Renderer {
                 return false;
             };
             target.SetAntialiasMode(D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
+            if dpi > 0.0 {
+                target.SetDpi(dpi, dpi);
+            }
             self.mem_dc = mem_dc;
             self.dib_bmp = dib_bmp;
             self.old_bmp = old_bmp;
@@ -670,6 +862,288 @@ impl Renderer {
         }
     }
 
+    fn update_convert_bitmaps(&mut self, cv: &crate::convert::ConvertState) {
+        let Some(target) = self.target.clone() else {
+            return;
+        };
+        let st = cv.tool_state(crate::convert::ConvertTool::Photo);
+        match &st.input_preview {
+            Some((pixels, w, h)) => {
+                let key = (st.input_path.clone().unwrap_or_default(), pixels.len());
+                if self.convert_in_key != key || self.convert_in_bitmap.is_none() {
+                    if let Some(bmp) = self.bitmap_from_pixels(&target, pixels, *w, *h) {
+                        self.convert_in_bitmap = Some(bmp);
+                        self.convert_in_key = key;
+                    }
+                }
+            }
+            None => {
+                self.convert_in_bitmap = None;
+                self.convert_in_key = (String::new(), 0);
+            }
+        }
+        match &st.result_preview {
+            Some((pixels, w, h)) => {
+                if self.convert_gen != st.run_gen || self.convert_bitmap.is_none() {
+                    if let Some(bmp) = self.bitmap_from_pixels(&target, pixels, *w, *h) {
+                        self.convert_bitmap = Some(bmp);
+                        self.convert_gen = st.run_gen;
+                    }
+                }
+            }
+            None => {
+                self.convert_bitmap = None;
+            }
+        }
+    }
+
+    fn decode_image_bytes(
+        &self,
+        target: &ID2D1RenderTarget,
+        bytes: &[u8],
+        max_size: u32,
+    ) -> Option<ID2D1Bitmap> {
+        unsafe {
+            let factory: IWICImagingFactory = CoCreateInstance(
+                &CLSID_WICImagingFactory,
+                None,
+                CLSCTX_INPROC_SERVER,
+            ).ok()?;
+            let stream: IWICStream = factory.CreateStream().ok()?;
+            stream.InitializeFromMemory(bytes).ok()?;
+            let decoder = factory
+                .CreateDecoderFromStream(&stream, std::ptr::null(), WICDecodeMetadataCacheOnDemand)
+                .ok()?;
+            let frame: IWICBitmapFrameDecode = decoder.GetFrame(0).ok()?;
+            let src: IWICBitmapSource = frame.cast().ok()?;
+            let mut w = 0u32;
+            let mut h = 0u32;
+            src.GetSize(&mut w, &mut h).ok()?;
+            if w == 0 || h == 0 {
+                return None;
+            }
+            let scale = ((max_size as f32) / (w as f32)).min((max_size as f32) / (h as f32)).min(1.0);
+            let tw = ((w as f32) * scale).round().max(1.0) as u32;
+            let th = ((h as f32) * scale).round().max(1.0) as u32;
+
+            let scaler = factory.CreateBitmapScaler().ok()?;
+            scaler
+                .Initialize(&src, tw, th, WICBitmapInterpolationModeFant)
+                .ok()?;
+            let converter: IWICFormatConverter = factory.CreateFormatConverter().ok()?;
+            let scaler_src: IWICBitmapSource = scaler.cast().ok()?;
+            converter
+                .Initialize(
+                    &scaler_src,
+                    &GUID_WICPixelFormat32bppPBGRA,
+                    WICBitmapDitherTypeNone,
+                    None,
+                    0.0,
+                    WICBitmapPaletteTypeMedianCut,
+                )
+                .ok()?;
+            let mut pixels = vec![0u8; (tw * th * 4) as usize];
+            converter
+                .CopyPixels(
+                    std::ptr::null(),
+                    tw * 4,
+                    &mut pixels,
+                )
+                .ok()?;
+
+            self.bitmap_from_pixels(target, &pixels, tw, th)
+        }
+    }
+
+    fn ensure_convert_app_bitmaps(&mut self, target: &ID2D1RenderTarget) {
+        const ICON_PHOTO_PNG: &[u8] = include_bytes!("../assets/convert_photo.png");
+        const ICON_MERGE_PNG: &[u8] = include_bytes!("../assets/convert_merge.png");
+        const ICON_PDF_PNG: &[u8] = include_bytes!("../assets/convert_pdf.png");
+
+        if self.convert_app_bitmaps[0].is_none() {
+            self.convert_app_bitmaps[0] = self.decode_image_bytes(target, ICON_PHOTO_PNG, 128);
+        }
+        if self.convert_app_bitmaps[1].is_none() {
+            self.convert_app_bitmaps[1] = self.decode_image_bytes(target, ICON_MERGE_PNG, 128);
+        }
+        if self.convert_app_bitmaps[2].is_none() {
+            self.convert_app_bitmaps[2] = self.decode_image_bytes(target, ICON_PDF_PNG, 128);
+        }
+    }
+
+    fn ensure_dot_icons(&mut self, target: &ID2D1RenderTarget) {
+        const ICON_MUSIC: &[u8] = include_bytes!("../assets/music_icon.png");
+        const ICON_FOCUS: &[u8] = include_bytes!("../assets/focus_icon.png");
+        const ICON_TODO: &[u8] = include_bytes!("../assets/todo_icon.png");
+        const ICON_WATER: &[u8] = include_bytes!("../assets/water_icon.png");
+        const ICON_SHELF: &[u8] = include_bytes!("../assets/shelf_icon.png");
+        const ICON_REMOVEBG: &[u8] = include_bytes!("../assets/removebg_icon.png");
+        const ICON_CONVERT: &[u8] = include_bytes!("../assets/convert_icon.png");
+
+        let icons = [
+            ICON_MUSIC,
+            ICON_FOCUS,
+            ICON_TODO,
+            ICON_WATER,
+            ICON_SHELF,
+            ICON_REMOVEBG,
+            ICON_CONVERT,
+        ];
+        for i in 0..7 {
+            if self.dot_icons[i].is_none() {
+                self.dot_icons[i] = self.decode_image_bytes(target, icons[i], 48);
+            }
+        }
+    }
+
+    fn load_shell_icon(target: &ID2D1RenderTarget, path: &str) -> Option<ID2D1Bitmap> {
+        unsafe {
+            use windows::Win32::UI::WindowsAndMessaging::{GetIconInfo, DestroyIcon, ICONINFO};
+
+            #[repr(C)]
+            struct ShFileInfoW {
+                h_icon: windows::Win32::UI::WindowsAndMessaging::HICON,
+                i_icon: i32,
+                dw_attributes: u32,
+                sz_display_name: [u16; 260],
+                sz_type_name: [u16; 80],
+            }
+
+            #[link(name = "shell32")]
+            extern "system" {
+                fn SHGetFileInfoW(
+                    psz_path: PCWSTR,
+                    dw_file_attributes: u32,
+                    psfi: *mut ShFileInfoW,
+                    cb_file_info: u32,
+                    u_flags: u32,
+                ) -> usize;
+            }
+
+            let path_wide: Vec<u16> = path.encode_utf16().chain(std::iter::once(0)).collect();
+            let mut sfi = ShFileInfoW {
+                h_icon: windows::Win32::UI::WindowsAndMessaging::HICON(std::ptr::null_mut()),
+                i_icon: 0,
+                dw_attributes: 0,
+                sz_display_name: [0; 260],
+                sz_type_name: [0; 80],
+            };
+            const SHGFI_ICON: u32 = 0x000000100;
+            const SHGFI_LARGEICON: u32 = 0x000000000;
+            let ret = SHGetFileInfoW(
+                PCWSTR(path_wide.as_ptr()),
+                0,
+                &mut sfi,
+                std::mem::size_of::<ShFileInfoW>() as u32,
+                SHGFI_ICON | SHGFI_LARGEICON,
+            );
+            if ret == 0 || sfi.h_icon.0.is_null() {
+                return None;
+            }
+            let hicon = sfi.h_icon;
+
+            let mut info = ICONINFO::default();
+            if GetIconInfo(hicon, &mut info).is_err() {
+                let _ = DestroyIcon(hicon);
+                return None;
+            }
+            let hbm = if !info.hbmColor.0.is_null() {
+                info.hbmColor
+            } else {
+                info.hbmMask
+            };
+            let hdc_screen = GetDC(HWND(std::ptr::null_mut()));
+            let hdc_mem = CreateCompatibleDC(hdc_screen);
+            let mut bmi = BITMAPINFO {
+                bmiHeader: BITMAPINFOHEADER {
+                    biSize: std::mem::size_of::<BITMAPINFOHEADER>() as u32,
+                    biWidth: 32,
+                    biHeight: -32,
+                    biPlanes: 1,
+                    biBitCount: 32,
+                    biCompression: BI_RGB.0,
+                    ..Default::default()
+                },
+                ..Default::default()
+            };
+            let mut pixels = vec![0u8; 32 * 32 * 4];
+            let old_bmp = SelectObject(hdc_mem, HGDIOBJ(hbm.0));
+            GetDIBits(
+                hdc_mem,
+                hbm,
+                0,
+                32,
+                Some(pixels.as_mut_ptr() as *mut _),
+                &mut bmi,
+                DIB_RGB_COLORS,
+            );
+            SelectObject(hdc_mem, old_bmp);
+            let _ = DeleteDC(hdc_mem);
+            ReleaseDC(HWND(std::ptr::null_mut()), hdc_screen);
+            if !info.hbmColor.0.is_null() {
+                let _ = DeleteObject(HGDIOBJ(info.hbmColor.0));
+            }
+            if !info.hbmMask.0.is_null() {
+                let _ = DeleteObject(HGDIOBJ(info.hbmMask.0));
+            }
+            let _ = DestroyIcon(hicon);
+
+            let has_alpha = pixels.chunks_exact(4).any(|p| p[3] > 0);
+            if !has_alpha {
+                for chunk in pixels.chunks_exact_mut(4) {
+                    if chunk[0] > 0 || chunk[1] > 0 || chunk[2] > 0 {
+                        chunk[3] = 255;
+                    }
+                }
+            }
+
+            target
+                .CreateBitmap(
+                    D2D_SIZE_U {
+                        width: 32,
+                        height: 32,
+                    },
+                    Some(pixels.as_ptr() as *const core::ffi::c_void),
+                    32 * 4,
+                    &D2D1_BITMAP_PROPERTIES {
+                        pixelFormat: D2D1_PIXEL_FORMAT {
+                            format: DXGI_FORMAT_B8G8R8A8_UNORM,
+                            alphaMode: D2D1_ALPHA_MODE_PREMULTIPLIED,
+                        },
+                        dpiX: 96.0,
+                        dpiY: 96.0,
+                    },
+                )
+                .ok()
+        }
+    }
+
+    fn ensure_tray_thumbnails(&mut self, target: &ID2D1RenderTarget, shelf: &crate::shelf::Shelf) {
+        for path in &shelf.files {
+            if !self.tray_thumb_cache.contains_key(path) {
+                let p = std::path::Path::new(path);
+                let ext = p.extension().and_then(|e| e.to_str()).unwrap_or("").to_lowercase();
+                let is_img = matches!(ext.as_str(), "png" | "jpg" | "jpeg" | "webp" | "bmp" | "gif" | "ico");
+                let bmp = if is_img {
+                    if let Ok(bytes) = std::fs::read(path) {
+                        if bytes.len() <= 20 * 1024 * 1024 {
+                            self.decode_image_bytes(target, &bytes, 72)
+                        } else {
+                            None
+                        }
+                    } else {
+                        None
+                    }
+                } else {
+                    Self::load_shell_icon(target, path)
+                };
+                if let Some(b) = bmp {
+                    self.tray_thumb_cache.insert(path.clone(), b);
+                }
+            }
+        }
+    }
+
     // --- Primitive & Text Drawing Helpers ---
 
     fn brush(&self, target: &ID2D1RenderTarget, c: D2D1_COLOR_F) -> Option<ID2D1SolidColorBrush> {
@@ -789,15 +1263,46 @@ impl Renderer {
         if self.measure_text(text, fmt).0 <= max_width {
             return text.to_string();
         }
-        let mut chars: Vec<char> = text.chars().collect();
-        while !chars.is_empty() {
-            chars.pop();
-            let candidate = format!("{}…", chars.iter().collect::<String>());
+        let chars: Vec<char> = text.chars().collect();
+        if chars.is_empty() {
+            return String::new();
+        }
+        let mut low = 0;
+        let mut high = chars.len();
+        let mut best = 0;
+        while low <= high {
+            let mid = (low + high) / 2;
+            let candidate: String = chars[..mid].iter().collect::<String>() + "\u{2026}";
             if self.measure_text(&candidate, fmt).0 <= max_width {
-                return candidate;
+                best = mid;
+                low = mid + 1;
+            } else {
+                if mid == 0 {
+                    break;
+                }
+                high = mid - 1;
             }
         }
-        "…".to_string()
+        if best > 0 {
+            chars[..best].iter().collect::<String>() + "\u{2026}"
+        } else {
+            "\u{2026}".to_string()
+        }
+    }
+
+    fn fill_circle(&self, target: &ID2D1RenderTarget, cx: f32, cy: f32, r: f32, c: D2D1_COLOR_F) {
+        if let Some(b) = self.brush(target, c) {
+            unsafe {
+                target.FillEllipse(
+                    &D2D1_ELLIPSE {
+                        point: D2D_POINT_2F { x: cx, y: cy },
+                        radiusX: r,
+                        radiusY: r,
+                    },
+                    &b,
+                );
+            }
+        }
     }
 
     fn draw_text_at(
@@ -851,6 +1356,104 @@ impl Renderer {
                         None,
                     );
                 }
+            }
+        }
+    }
+
+    fn draw_card_content(
+        &self,
+        target: &ID2D1RenderTarget,
+        state: IslandState,
+        ctx: &RenderContext,
+        playing: bool,
+        base_xform: &Matrix3x2,
+        s: f32,
+        tx: f32,
+        lw: f32,
+        lh: f32,
+        lyrics_t: f32,
+    ) {
+        if state.is_expanded() && lh <= 32.0 {
+            return;
+        }
+        match state {
+            IslandState::Zen => {
+                self.draw_eyes(target, lw, lh, ctx.eye_look, ctx.eye_openness, ctx.eye_slant);
+            }
+            IslandState::Compact => {
+                if lh <= 32.0 {
+                    self.draw_closed(target, ctx);
+                }
+            }
+            IslandState::Expanded | IslandState::Lyrics => {
+                if lh <= 44.0 {
+                    return;
+                } else {
+                    self.draw_music_card(
+                        target,
+                        ctx.media,
+                        lyrics_t,
+                        ctx.music_button_zooms,
+                        ctx.music_bar_hover,
+                        ctx.music_seek_pos,
+                        base_xform,
+                        s,
+                        tx,
+                        ctx.music_bar_zoom,
+                        ctx.master_volume,
+                        ctx.volume_bar_zoom,
+                    );
+                    let panel_alpha = ((lyrics_t - 0.12) / 0.88).clamp(0.0, 1.0);
+                    if panel_alpha > 0.01 {
+                        self.draw_lyrics_panel(target, ctx.media, ctx.lyrics, panel_alpha, lw);
+                    }
+                }
+            }
+            IslandState::Pomodoro => {
+                self.draw_pomodoro(target, ctx.pomodoro, playing);
+            }
+            IslandState::Todo => {
+                self.draw_todo(
+                    target,
+                    ctx.todo,
+                    ctx.todo_editing,
+                    ctx.todo_input,
+                    playing,
+                    ctx.todo_scroll,
+                    ctx.todo_editing_idx,
+                );
+            }
+            IslandState::Water => {
+                self.draw_water(target, ctx.water, playing);
+            }
+            IslandState::Tray => {
+                self.draw_tray(
+                    target,
+                    ctx.shelf,
+                    ctx.tray_scroll,
+                    playing,
+                    ctx.tray_drop_highlight,
+                    ctx.tray_drag_pt,
+                    lh,
+                    ctx.tray_genie_progress,
+                    &ctx.tray_btn_hovers,
+                );
+            }
+            IslandState::RemoveBg => {
+                self.draw_removebg(
+                    target,
+                    ctx.removebg,
+                    ctx.shelf,
+                    ctx.removebg_drop_highlight,
+                    ctx.mouse_pt,
+                    ctx,
+                );
+            }
+            IslandState::Convert => {
+                self.draw_convert(target, ctx.convert, ctx.shelf, playing, ctx.mouse_pt, ctx);
+            }
+            IslandState::Settings => {
+                self.draw_settings(target, ctx.settings, ctx.mouse_pt);
             }
         }
     }
@@ -990,6 +1593,47 @@ impl Renderer {
         self.fill_polygon(target, &t2, c);
     }
 
+    /// Speaker icon with sound waves or mute slash, centered at `(cx, cy)`.
+    fn draw_icon_speaker(&self, target: &ID2D1RenderTarget, cx: f32, cy: f32, volume: f32, c: D2D1_COLOR_F) {
+        // Speaker box:
+        self.fill_rounded(target, cx - 7.5, cy - 3.0, 3.5, 6.0, 1.0, c);
+        // Speaker cone:
+        let cone = [
+            D2D_POINT_2F { x: cx - 4.0, y: cy - 3.0 },
+            D2D_POINT_2F { x: cx + 1.5, y: cy - 6.5 },
+            D2D_POINT_2F { x: cx + 1.5, y: cy + 6.5 },
+            D2D_POINT_2F { x: cx - 4.0, y: cy + 3.0 },
+        ];
+        self.fill_polygon(target, &cone, c);
+
+        if volume <= 0.01 {
+            // Mute "x"
+            let x0 = cx + 4.5;
+            let x1 = cx + 9.5;
+            let l1 = [D2D_POINT_2F { x: x0, y: cy - 2.5 }, D2D_POINT_2F { x: x1, y: cy + 2.5 }];
+            let l2 = [D2D_POINT_2F { x: x0, y: cy + 2.5 }, D2D_POINT_2F { x: x1, y: cy - 2.5 }];
+            self.stroke_polyline(target, &l1, 1.4, c);
+            self.stroke_polyline(target, &l2, 1.4, c);
+        } else {
+            // Arc 1:
+            let a1 = [
+                D2D_POINT_2F { x: cx + 4.5, y: cy - 3.5 },
+                D2D_POINT_2F { x: cx + 6.5, y: cy },
+                D2D_POINT_2F { x: cx + 4.5, y: cy + 3.5 },
+            ];
+            self.stroke_polyline(target, &a1, 1.4, c);
+            if volume > 0.45 {
+                // Arc 2:
+                let a2 = [
+                    D2D_POINT_2F { x: cx + 8.0, y: cy - 5.5 },
+                    D2D_POINT_2F { x: cx + 10.5, y: cy },
+                    D2D_POINT_2F { x: cx + 8.0, y: cy + 5.5 },
+                ];
+                self.stroke_polyline(target, &a2, 1.4, c);
+            }
+        }
+    }
+
     /// Stopwatch (`stopwatch`) centered at `(cx, cy)`.
     fn draw_icon_stopwatch(&self, target: &ID2D1RenderTarget, cx: f32, cy: f32, size: f32, c: D2D1_COLOR_F) {
         let r = size * 0.38;
@@ -1099,6 +1743,7 @@ impl Renderer {
     }
 
     /// Chevron (`chevron.left` / `chevron.right`) centered at `(cx, cy)`.
+    #[allow(dead_code)]
     fn draw_icon_chevron(&self, target: &ID2D1RenderTarget, cx: f32, cy: f32, right: bool, c: D2D1_COLOR_F) {
         let dx = if right { 3.5f32 } else { -3.5f32 };
         let pts = [
@@ -1109,63 +1754,334 @@ impl Renderer {
         self.stroke_polyline(target, &pts, 2.0, c);
     }
 
-    // --- Shared Aura Mac Pieces (`IslandView.swift`) ---
-
-    /// Idle eyes (`drawEyes`, `IslandView.swift` lines 1509-1531).
-    fn draw_eyes(&self, target: &ID2D1RenderTarget, lw: f32, lh: f32, eye_look: (f32, f32), eyes_closed: bool) {
-        let mid_x = lw * 0.5;
-        let mid_y = lh * 0.5;
-        // At 140x32: mid_x = 70, so mid_x - 20 = 50 and mid_x + 7 = 77; mid_y - 8 = 8.
-        let xs = [mid_x - 20.0, mid_x + 7.0];
-        let white = color(1.0, 1.0, 1.0, 1.0);
-        for &x in &xs {
-            if eyes_closed {
-                self.fill_oval(target, x, mid_y - 1.0, 13.0, 2.0, white);
-            } else {
-                self.fill_oval(target, x, mid_y - 8.0, 13.0, 16.0, white);
+    /// Trash can icon centered at (cx, cy).
+    fn draw_icon_trash(&self, target: &ID2D1RenderTarget, cx: f32, cy: f32, c: D2D1_COLOR_F) {
+        self.stroke_rounded(target, cx - 4.5, cy - 2.5, 9.0, 9.0, 1.5, 1.4, c, None);
+        self.fill_rounded(target, cx - 6.0, cy - 4.2, 12.0, 1.5, 0.75, c);
+        self.stroke_rounded(target, cx - 2.0, cy - 6.2, 4.0, 2.0, 1.0, 1.2, c, None);
+        if let Some(b) = self.brush(target, c) {
+            unsafe {
+                target.DrawLine(D2D_POINT_2F { x: cx - 1.8, y: cy - 0.5 }, D2D_POINT_2F { x: cx - 1.8, y: cy + 4.5 }, &b, 1.0, None);
+                target.DrawLine(D2D_POINT_2F { x: cx + 1.8, y: cy - 0.5 }, D2D_POINT_2F { x: cx + 1.8, y: cy + 4.5 }, &b, 1.0, None);
             }
         }
-        if eyes_closed {
-            return;
+    }
+
+    /// Scissors icon centered at (cx, cy).
+    fn draw_icon_scissors(&self, target: &ID2D1RenderTarget, cx: f32, cy: f32, c: D2D1_COLOR_F) {
+        self.stroke_oval(target, cx - 4.5, cy + 1.5, 3.5, 3.5, 1.2, c);
+        self.stroke_oval(target, cx + 1.0, cy + 1.5, 3.5, 3.5, 1.2, c);
+        if let Some(b) = self.brush(target, c) {
+            unsafe {
+                target.DrawLine(D2D_POINT_2F { x: cx - 3.0, y: cy + 1.5 }, D2D_POINT_2F { x: cx + 4.5, y: cy - 5.5 }, &b, 1.3, None);
+                target.DrawLine(D2D_POINT_2F { x: cx + 3.0, y: cy + 1.5 }, D2D_POINT_2F { x: cx - 4.5, y: cy - 5.5 }, &b, 1.3, None);
+            }
         }
-        let black = color(0.0, 0.0, 0.0, 1.0);
-        for &x in &xs {
-            let cx = x + 6.5 + eye_look.0.clamp(-1.0, 1.0) * 2.0;
-            let cy = mid_y + eye_look.1.clamp(-1.0, 1.0) * 3.0;
-            self.fill_oval(target, cx - 3.0, cy - 3.0, 6.0, 6.0, black);
+    }
+
+    /// Convert/sync circular arrows centered at (cx, cy).
+    fn draw_icon_sync(&self, target: &ID2D1RenderTarget, cx: f32, cy: f32, c: D2D1_COLOR_F) {
+        let r = 5.0f32;
+        let mut pts1 = Vec::new();
+        for i in 0..=12 {
+            let a = -std::f32::consts::FRAC_PI_2 + (std::f32::consts::PI * 0.8) * (i as f32 / 12.0);
+            pts1.push(D2D_POINT_2F { x: cx + r * a.cos(), y: cy + r * a.sin() });
+        }
+        self.stroke_polyline(target, &pts1, 1.4, c);
+        let head1 = [
+            D2D_POINT_2F { x: cx + 5.0, y: cy - 1.0 },
+            D2D_POINT_2F { x: cx + 6.5, y: cy + 3.5 },
+            D2D_POINT_2F { x: cx + 2.0, y: cy + 2.5 },
+        ];
+        self.fill_polygon(target, &head1, c);
+
+        let mut pts2 = Vec::new();
+        for i in 0..=12 {
+            let a = std::f32::consts::FRAC_PI_2 + (std::f32::consts::PI * 0.8) * (i as f32 / 12.0);
+            pts2.push(D2D_POINT_2F { x: cx + r * a.cos(), y: cy + r * a.sin() });
+        }
+        self.stroke_polyline(target, &pts2, 1.4, c);
+        let head2 = [
+            D2D_POINT_2F { x: cx - 5.0, y: cy + 1.0 },
+            D2D_POINT_2F { x: cx - 6.5, y: cy - 3.5 },
+            D2D_POINT_2F { x: cx - 2.0, y: cy - 2.5 },
+        ];
+        self.fill_polygon(target, &head2, c);
+    }
+
+    /// Download arrow into tray (`arrow.down.to.line`) centered at `(cx, cy)`.
+    fn draw_icon_download(&self, target: &ID2D1RenderTarget, cx: f32, cy: f32, s: f32, c: D2D1_COLOR_F) {
+        let arrow = [
+            D2D_POINT_2F { x: cx, y: cy - s * 0.4 },
+            D2D_POINT_2F { x: cx, y: cy + s * 0.15 },
+        ];
+        self.stroke_polyline(target, &arrow, 1.8, c);
+        let head = [
+            D2D_POINT_2F { x: cx - s * 0.28, y: cy - s * 0.05 },
+            D2D_POINT_2F { x: cx, y: cy + s * 0.22 },
+            D2D_POINT_2F { x: cx + s * 0.28, y: cy - s * 0.05 },
+        ];
+        self.stroke_polyline(target, &head, 1.8, c);
+        let tray = [
+            D2D_POINT_2F { x: cx - s * 0.35, y: cy + s * 0.4 },
+            D2D_POINT_2F { x: cx + s * 0.35, y: cy + s * 0.4 },
+        ];
+        self.stroke_polyline(target, &tray, 1.8, c);
+    }
+
+    /// Lightning bolt / process icon centered at `(cx, cy)`.
+    fn draw_icon_bolt(&self, target: &ID2D1RenderTarget, cx: f32, cy: f32, s: f32, c: D2D1_COLOR_F) {
+        let pts = [
+            D2D_POINT_2F { x: cx + s * 0.08, y: cy - s * 0.45 },
+            D2D_POINT_2F { x: cx - s * 0.32, y: cy + s * 0.02 },
+            D2D_POINT_2F { x: cx - s * 0.02, y: cy + s * 0.02 },
+            D2D_POINT_2F { x: cx - s * 0.08, y: cy + s * 0.45 },
+            D2D_POINT_2F { x: cx + s * 0.32, y: cy - s * 0.02 },
+            D2D_POINT_2F { x: cx + s * 0.02, y: cy - s * 0.02 },
+        ];
+        self.fill_polygon(target, &pts, c);
+    }
+
+    fn draw_icon_lines_three(&self, target: &ID2D1RenderTarget, cx: f32, cy: f32, w: f32, c: D2D1_COLOR_F) {
+        let half = w * 0.5;
+        for &dy in &[-3.5f32, 0.0, 3.5] {
+            self.fill_rounded(target, cx - half, cy + dy - 0.75, w, 1.5, 0.75, c);
+        }
+    }
+
+    fn draw_icon_markdown(&self, target: &ID2D1RenderTarget, cx: f32, cy: f32, s: f32, c: D2D1_COLOR_F) {
+        let w = s * 1.3;
+        let h = s * 0.8;
+        let x = cx - w * 0.5;
+        let y = cy - h * 0.5;
+        self.stroke_rounded(target, x, y, w, h, 6.0, 1.8, c, None);
+
+        let mx0 = x + 6.0;
+        let mw = w * 0.44;
+        let my0 = y + 6.0;
+        let mh = h - 12.0;
+
+        if let Some(b) = self.brush(target, c) {
+            unsafe {
+                target.DrawLine(D2D_POINT_2F { x: mx0, y: my0 + mh }, D2D_POINT_2F { x: mx0, y: my0 }, &b, 1.8, None);
+                target.DrawLine(D2D_POINT_2F { x: mx0, y: my0 }, D2D_POINT_2F { x: mx0 + mw * 0.5, y: my0 + mh * 0.6 }, &b, 1.8, None);
+                target.DrawLine(D2D_POINT_2F { x: mx0 + mw * 0.5, y: my0 + mh * 0.6 }, D2D_POINT_2F { x: mx0 + mw, y: my0 }, &b, 1.8, None);
+                target.DrawLine(D2D_POINT_2F { x: mx0 + mw, y: my0 }, D2D_POINT_2F { x: mx0 + mw, y: my0 + mh }, &b, 1.8, None);
+
+                let ax = x + w - 10.0;
+                target.DrawLine(D2D_POINT_2F { x: ax, y: my0 }, D2D_POINT_2F { x: ax, y: my0 + mh }, &b, 1.8, None);
+                target.DrawLine(D2D_POINT_2F { x: ax - 3.5, y: my0 + mh - 3.5 }, D2D_POINT_2F { x: ax, y: my0 + mh }, &b, 1.8, None);
+                target.DrawLine(D2D_POINT_2F { x: ax + 3.5, y: my0 + mh - 3.5 }, D2D_POINT_2F { x: ax, y: my0 + mh }, &b, 1.8, None);
+            }
+        }
+    }
+
+    fn draw_tooltip(&self, target: &ID2D1RenderTarget, text: &str, cx: f32, cy: f32) {
+        if let Some(fmt) = self.fmt_11_reg.as_ref() {
+            let (tw, th) = self.measure_text(text, fmt);
+            let pad_h = 7.0f32;
+            let pad_v = 3.5f32;
+            let w = tw + pad_h * 2.0;
+            let h = th + pad_v * 2.0;
+            let x = (cx - w * 0.5).clamp(8.0, 532.0 - w);
+            let y = cy - h * 0.5;
+            self.fill_rounded(target, x, y, w, h, 6.0, color(0.12, 0.12, 0.14, 0.96));
+            self.stroke_rounded(target, x, y, w, h, 6.0, 1.0, color(1.0, 1.0, 1.0, 0.28), None);
+            self.draw_text_at(target, text, Some(fmt), color(1.0, 1.0, 1.0, 1.0), x + pad_h, y + pad_v - 0.5);
+        }
+    }
+
+    fn draw_icon_button(
+        &self,
+        target: &ID2D1RenderTarget,
+        rect: (f32, f32, f32, f32),
+        is_hovered: bool,
+        tooltip: &str,
+        primary: bool,
+        draw_icon: &dyn Fn(f32, f32, D2D1_COLOR_F),
+    ) {
+        let (x0, y0, x1, y1) = rect;
+        let w = x1 - x0;
+        let h = y1 - y0;
+        let cx = x0 + w * 0.5;
+        let cy = y0 + h * 0.5;
+        let r = 10.0f32.min(h * 0.5);
+
+        let (bg_color, stroke_color, icon_color) = if primary {
+            if is_hovered {
+                (color(1.0, 1.0, 1.0, 1.0), color(1.0, 1.0, 1.0, 1.0), color(0.0, 0.0, 0.0, 1.0))
+            } else {
+                (color(1.0, 1.0, 1.0, 0.90), color(1.0, 1.0, 1.0, 0.90), color(0.0, 0.0, 0.0, 1.0))
+            }
+        } else {
+            if is_hovered {
+                (color(1.0, 1.0, 1.0, 0.24), color(1.0, 1.0, 1.0, 0.45), color(1.0, 1.0, 1.0, 1.0))
+            } else {
+                (color(1.0, 1.0, 1.0, 0.10), color(1.0, 1.0, 1.0, 0.20), color(1.0, 1.0, 1.0, 0.85))
+            }
+        };
+
+        self.fill_rounded(target, x0, y0, w, h, r, bg_color);
+        self.stroke_rounded(target, x0, y0, w, h, r, 1.0, stroke_color, None);
+        draw_icon(cx, cy, icon_color);
+
+        if is_hovered && !tooltip.is_empty() {
+            let tip_y = if y0 < 45.0 { y1 + 14.0 } else { y0 - 14.0 };
+            self.draw_tooltip(target, tooltip, cx, tip_y);
+        }
+    }
+
+    /// Expanding oval button on hover:
+    /// At hover_t = 0.0: circle (w = h) with icon centered.
+    /// At hover_t > 0.0: expands horizontally to an oval/pill revealing label text beside icon.
+    fn draw_expanding_button(
+        &self,
+        target: &ID2D1RenderTarget,
+        rect: (f32, f32, f32, f32),
+        hover_t: f32,
+        label: &str,
+        primary: bool,
+        draw_icon: &dyn Fn(f32, f32, D2D1_COLOR_F),
+    ) {
+        let (x0, y0, x1, y1) = rect;
+        let w = x1 - x0;
+        let h = y1 - y0;
+        let r = h * 0.5;
+
+        let (bg_color, stroke_color, content_color) = if primary {
+            (
+                color(1.0, 1.0, 1.0, 0.90 + 0.10 * hover_t),
+                color(1.0, 1.0, 1.0, 0.90 + 0.10 * hover_t),
+                color(0.0, 0.0, 0.0, 1.0),
+            )
+        } else {
+            (
+                color(1.0, 1.0, 1.0, 0.08 + 0.12 * hover_t),
+                color(1.0, 1.0, 1.0, 0.18 + 0.25 * hover_t),
+                color(1.0, 1.0, 1.0, 0.85 + 0.15 * hover_t),
+            )
+        };
+
+        self.fill_rounded(target, x0, y0, w, h, r, bg_color);
+        self.stroke_rounded(target, x0, y0, w, h, r, 1.0, stroke_color, None);
+
+        // Icon position: centered in circle portion (left h x h)
+        let icon_cx = x0 + h * 0.5;
+        let icon_cy = y0 + h * 0.5;
+        draw_icon(icon_cx, icon_cy, content_color);
+
+        // Label text smoothly fades and reveals when expanding:
+        if hover_t > 0.03 && !label.is_empty() {
+            unsafe {
+                let clip = D2D_RECT_F {
+                    left: x0 + h,
+                    top: y0,
+                    right: x1 - 4.0,
+                    bottom: y1,
+                };
+                target.PushAxisAlignedClip(&clip, D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
+            }
+            if let Some(fmt) = self.fmt_12_reg.as_ref() {
+                let text_alpha = (hover_t * 1.5).clamp(0.0, 1.0);
+                let text_c = if primary {
+                    color(0.0, 0.0, 0.0, text_alpha)
+                } else {
+                    color(1.0, 1.0, 1.0, text_alpha)
+                };
+                self.draw_text_at(target, label, Some(fmt), text_c, x0 + h + 2.0, y0 + (h - 14.0) * 0.5);
+            }
+            unsafe {
+                target.PopAxisAlignedClip();
+            }
+        }
+    }
+
+    // --- Shared Aura Mac Pieces (`IslandView.swift`) ---
+
+    /// Idle eyes (`drawEyes`) with morphing, winking, and asymmetrical inquisitive tilt.
+    fn draw_eyes(
+        &self,
+        target: &ID2D1RenderTarget,
+        lw: f32,
+        lh: f32,
+        eye_look: (f32, f32),
+        eye_openness: [f32; 2],
+        eye_slant: [f32; 2],
+    ) {
+        let mid_x = lw * 0.5;
+        let mid_y = lh * 0.5;
+        let eye_gap = 13.0f32;
+        let w = 15.0f32;
+        let centers = [mid_x - (w + eye_gap) * 0.5, mid_x + (w + eye_gap) * 0.5];
+        let white = color(1.0, 1.0, 1.0, 1.0);
+
+        for (i, &cx_base) in centers.iter().enumerate() {
+            let openness = eye_openness[i].clamp(0.06, 1.0);
+            let slant = eye_slant[i];
+            let h = 2.5 + (13.5 - 2.5) * openness;
+            let cx = cx_base + eye_look.0.clamp(-1.0, 1.0) * 2.0;
+            let cy = mid_y + slant + eye_look.1.clamp(-1.0, 1.0) * 2.0;
+            let r = (4.0f32).min(h * 0.5);
+
+            if slant.abs() > 0.05 {
+                let angle_deg = if i == 0 { -slant * 3.5 } else { slant * 3.5 };
+                let angle_rad = angle_deg * std::f32::consts::PI / 180.0;
+                let sin_a = angle_rad.sin();
+                let cos_a = angle_rad.cos();
+                let rot = Matrix3x2 {
+                    M11: cos_a,
+                    M12: sin_a,
+                    M21: -sin_a,
+                    M22: cos_a,
+                    M31: cx * (1.0 - cos_a) + cy * sin_a,
+                    M32: cy * (1.0 - cos_a) - cx * sin_a,
+                };
+                unsafe {
+                    target.SetTransform(&rot);
+                }
+                self.fill_rounded(target, cx - w * 0.5, cy - h * 0.5, w, h, r, white);
+                unsafe {
+                    target.SetTransform(&Matrix3x2::identity());
+                }
+            } else {
+                self.fill_rounded(target, cx - w * 0.5, cy - h * 0.5, w, h, r, white);
+            }
         }
     }
 
     /// iOS battery icon (`drawBatteryIcon`, `IslandView.swift` lines 1539-1564).
     fn draw_battery_icon(&self, target: &ID2D1RenderTarget, cx: f32, cy: f32, percent: Option<f32>, charging: bool) {
-        let Some(pct) = percent else { return };
-        let level = pct.clamp(0.0, 1.0);
-        let w = 24.0f32;
-        let h = 12.0f32;
+        let level = percent.unwrap_or(1.0).clamp(0.0, 1.0);
+        let is_charging = charging || percent.is_none();
+        let w = 20.0f32;
+        let h = 10.0f32;
         let x = cx - w * 0.5;
         let y = cy - h * 0.5;
         let white = color(1.0, 1.0, 1.0, 1.0);
-        self.stroke_rounded(target, x, y, w, h, 3.5, 1.5, white, None);
-        self.fill_rounded(target, x + w + 1.0, cy - 2.5, 2.0, 5.0, 1.0, white);
-        let fill_c = if charging {
+        self.stroke_rounded(target, x, y, w, h, 2.8, 1.2, white, None);
+        self.fill_rounded(target, x + w + 0.8, cy - 2.0, 1.5, 4.0, 0.75, white);
+        let fill_c = if is_charging {
             color(SYSTEM_GREEN.0, SYSTEM_GREEN.1, SYSTEM_GREEN.2, 1.0)
         } else if level <= 0.20 {
             color(SYSTEM_RED.0, SYSTEM_RED.1, SYSTEM_RED.2, 1.0)
         } else {
             white
         };
-        let fill_w = (w - 4.0) * level;
+        let fill_w = (w - 3.6) * level;
         if fill_w > 0.0 {
-            let r = 1.5f32.min(fill_w * 0.5);
-            self.fill_rounded(target, x + 2.0, y + 2.0, fill_w, h - 4.0, r, fill_c);
+            let r = 1.2f32.min(fill_w * 0.5);
+            self.fill_rounded(target, x + 1.8, y + 1.8, fill_w, h - 3.6, r, fill_c);
         }
     }
 
-    /// 5-bar animated waveform (`drawWaveform`, `IslandView.swift` lines 1623-1641).
+    /// Animated waveform (5 bars in expanded headers, 4 slim bars in compact pill).
     fn draw_waveform(&self, target: &ID2D1RenderTarget, rx: f32, ry: f32, rw: f32, rh: f32, playing: bool) {
-        let bars = 5usize;
-        let bar_w = 3.0f32;
-        let gap = 3.0f32;
+        let is_compact = rh <= 10.0;
+        let (bars, bar_w, gap) = if is_compact {
+            (4usize, 2.0f32, 2.0f32)
+        } else {
+            (5usize, 3.0f32, 3.0f32)
+        };
         let total = (bars as f32) * bar_w + ((bars - 1) as f32) * gap;
         let mut x = rx + (rw - total) * 0.5;
         let mid_y = ry + rh * 0.5;
@@ -1179,7 +2095,7 @@ impl Renderer {
                 0.18
             };
             let h = (rh * amp).max(2.0);
-            self.fill_rounded(target, x, mid_y - h * 0.5, bar_w, h, 1.5, white);
+            self.fill_rounded(target, x, mid_y - h * 0.5, bar_w, h, 1.0, white);
             x += bar_w + gap;
         }
     }
@@ -1221,76 +2137,289 @@ impl Renderer {
         self.stroke_polyline(target, &pts, width, c);
     }
 
-    /// Card header (`drawCardHeader`, `IslandView.swift` lines 1849-1861).
-    fn draw_card_header(&self, target: &ID2D1RenderTarget, width: f32, playing: bool) {
+    /// Card header: battery indicator (progress/loading) + centered date/time + right waveform.
+    /// Statically rendered on top across ALL expanded sections.
+    /// Continuous morphing header between compact pill and expanded card.
+    /// Battery icon, clock/date, and waveform smoothly glide from compact pill coordinates
+    /// to expanded card header coordinates as `lh` animates from 30px to 184px (and back).
+    fn draw_morphing_header(
+        &self,
+        target: &ID2D1RenderTarget,
+        lw: f32,
+        _lh: f32,
+        expand_t: f32,
+        playing: bool,
+        battery_percent: Option<f32>,
+        battery_charging: bool,
+        header_active: bool,
+    ) {
+        let mid_y = 15.0f32;
+        let now = chrono::Local::now();
+
+        // 1. Compact coordinates (lw ~ 180, mid_y = 15.0):
+        // Left: Battery centered at cx = 35.0, cy = 15.0 (left edge = 24.0)
+        let compact_bat_cx = 35.0f32;
+        let compact_bat_cy = mid_y;
+        // Center: Time centered at cx = lw * 0.5, y = 7.5
+        let compact_time_y = mid_y - 7.5;
+        // Right: Waveform right edge at lw - 24.0 (width = 14.0, height = 9.0)
+        let compact_wave_w = 14.0f32;
+        let compact_wave_h = 9.0f32;
+        let compact_wave_x = lw - 24.0 - compact_wave_w;
+        let compact_wave_y = mid_y - compact_wave_h * 0.5;
+
+        if !header_active {
+            // For sections without top header (Tray, RemoveBg, Convert):
+            // Compact pill elements smoothly fade in as the pill closes:
+            let fade_alpha = (1.0 - expand_t / 0.35).clamp(0.0, 1.0);
+            if fade_alpha > 0.01 {
+                self.draw_battery_icon(target, compact_bat_cx, compact_bat_cy, battery_percent, battery_charging);
+                let hm = now.format("%H:%M").to_string();
+                if let Some(fmt) = self.fmt_13_med.as_ref() {
+                    self.draw_centered_text(
+                        target,
+                        &hm,
+                        Some(fmt),
+                        color(1.0, 1.0, 1.0, fade_alpha),
+                        lw,
+                        compact_time_y,
+                    );
+                }
+                self.draw_waveform(target, compact_wave_x, compact_wave_y, compact_wave_w, compact_wave_h, playing);
+            }
+            return;
+        }
+
+        // Expanded sections with header (Music, Pomodoro, Todo, Water):
+        // Perfectly symmetrical 3-part layout across entire width:
+        // Left: Battery (left margin = 54.0, center = 65.0, cy = 20.0)
+        let header_bat_cx = 65.0f32;
+        let header_bat_cy = 20.0f32;
+
+        // Center: Date & Time (centered at cx = lw * 0.5, y = 12.5)
+        let header_time_y = 12.5f32;
+
+        // Right: Waveform (right margin = 54.0, width = 27.0, height = 12.0, ending at lw - 54.0)
+        let header_wave_w = 27.0f32;
+        let header_wave_h = 12.0f32;
+        let header_wave_x = lw - 54.0 - header_wave_w;
+        let header_wave_y = 20.0 - header_wave_h * 0.5;
+
+        // 1. Battery continuous glide along single smooth trajectory:
+        let cur_bat_x = compact_bat_cx + (header_bat_cx - compact_bat_cx) * expand_t;
+        let cur_bat_y = compact_bat_cy + (header_bat_cy - compact_bat_cy) * expand_t;
+        self.draw_battery_icon(target, cur_bat_x, cur_bat_y, battery_percent, battery_charging);
+
+        // 2. Clock / Date continuous glide & crisp non-overlapping crossfade:
+        let cur_text_y = compact_time_y + (header_time_y - compact_time_y) * expand_t;
+        let date_str = now.format("%a %-d %b %Y %H:%M").to_string();
+        let time_str = now.format("%H:%M").to_string();
+
+        if let Some(fmt) = self.fmt_13_med.as_ref() {
+            if expand_t <= 0.35 {
+                let time_alpha = (1.0 - expand_t / 0.35).clamp(0.0, 1.0);
+                self.draw_centered_text(
+                    target,
+                    &time_str,
+                    Some(fmt),
+                    color(1.0, 1.0, 1.0, time_alpha),
+                    lw,
+                    cur_text_y,
+                );
+            } else {
+                let date_alpha = ((expand_t - 0.35) / 0.65).clamp(0.0, 1.0);
+                self.draw_centered_text(
+                    target,
+                    &date_str,
+                    Some(fmt),
+                    color(1.0, 1.0, 1.0, date_alpha),
+                    lw,
+                    cur_text_y,
+                );
+            }
+        }
+
+        // 3. Waveform continuous glide & scale:
+        let cur_wave_x = compact_wave_x + (header_wave_x - compact_wave_x) * expand_t;
+        let cur_wave_y = compact_wave_y + (header_wave_y - compact_wave_y) * expand_t;
+        let cur_wave_w = compact_wave_w + (header_wave_w - compact_wave_w) * expand_t;
+        let cur_wave_h = compact_wave_h + (header_wave_h - compact_wave_h) * expand_t;
+        self.draw_waveform(target, cur_wave_x, cur_wave_y, cur_wave_w, cur_wave_h, playing);
+    }
+
+    #[allow(dead_code)]
+    fn draw_card_header(
+        &self,
+        target: &ID2D1RenderTarget,
+        width: f32,
+        playing: bool,
+        battery_percent: Option<f32>,
+        battery_charging: bool,
+    ) {
         let date_str = chrono::Local::now()
             .format("%a %-d %b %Y %H:%M")
             .to_string();
         let Some(fmt) = self.fmt_13_med.as_ref() else { return };
         let (date_w, _) = self.measure_text(&date_str, fmt);
-        let group_w = date_w + 16.0;
+        let bat_w = 18.0f32;
+        let gap = 9.0f32;
+        let group_w = bat_w + gap + date_w;
         let group_x = (width - group_w) * 0.5;
-        self.fill_oval(
+
+        // Battery loading/progress indicator replacing green dot:
+        self.draw_battery_icon(
             target,
-            group_x,
-            17.0,
-            8.0,
-            8.0,
-            color(SYSTEM_GREEN.0, SYSTEM_GREEN.1, SYSTEM_GREEN.2, 1.0),
+            group_x + bat_w * 0.5,
+            21.0,
+            battery_percent,
+            battery_charging,
         );
+
         self.draw_text_at(
             target,
             &date_str,
             Some(fmt),
             color(1.0, 1.0, 1.0, 1.0),
-            group_x + 16.0,
+            group_x + bat_w + gap,
             14.0,
         );
         self.draw_waveform(target, width - 68.0, 14.0, 48.0, 16.0, playing);
     }
 
-    /// Card header without the waveform (Mac `showWaveform: false`):
-    /// green dot + centered date.
-    fn draw_card_header_no_waveform(&self, target: &ID2D1RenderTarget, width: f32) {
-        let date_str = chrono::Local::now()
-            .format("%a %-d %b %Y %H:%M")
-            .to_string();
-        let Some(fmt) = self.fmt_13_med.as_ref() else {
+    /// Horizontal interactive page dots at the bottom center of the card.
+    fn draw_page_dots(
+        &self,
+        target: &ID2D1RenderTarget,
+        state: IslandState,
+        lw: f32,
+        lh: f32,
+        dot_bounds: (f32, f32),
+        hovered_dot: Option<usize>,
+        lyrics_t: f32,
+    ) {
+        let dots_alpha = (1.0 - lyrics_t * 1.5).clamp(0.0, 1.0);
+        if dots_alpha <= 0.01 {
             return;
-        };
-        let (date_w, _) = self.measure_text(&date_str, fmt);
-        let group_w = date_w + 16.0;
-        let group_x = (width - group_w) * 0.5;
-        self.fill_oval(
-            target,
-            group_x,
-            17.0,
-            8.0,
-            8.0,
-            color(SYSTEM_GREEN.0, SYSTEM_GREEN.1, SYSTEM_GREEN.2, 1.0),
-        );
-        self.draw_text_at(
-            target,
-            &date_str,
-            Some(fmt),
-            color(1.0, 1.0, 1.0, 1.0),
-            group_x + 16.0,
-            14.0,
-        );
-    }
-
-    /// Vertical page dots on the right edge (`drawPageDots`, `IslandView.swift` lines 554-565, 2117-2130).
-    fn draw_page_dots(&self, target: &ID2D1RenderTarget, state: IslandState, lw: f32, lh: f32) {
-        let count = 6usize;
+        }
+        let count = crate::state::SECTION_COUNT;
         let active = state.section_index();
-        let top = (lh - (count as f32) * 18.0) * 0.5;
-        let x = lw - 24.0;
+        let spacing = 16.0f32;
+        let total_w = (count as f32 - 1.0) * spacing;
+        let base_w = if lw > 540.0 { 540.0 } else { lw };
+        let start_x = (base_w - total_w) * 0.5;
+        let y = lh - 14.0;
+
+        let (pill_left, pill_w) = if dot_bounds.1 > 0.0 {
+            (start_x + dot_bounds.0, dot_bounds.1)
+        } else {
+            let cx = start_x + (active as f32) * spacing;
+            (cx - 7.0, 14.0)
+        };
+        let pill_right = pill_left + pill_w;
+
+        // 1. Draw inactive slot dots (or morph into section icon if hovered):
         for i in 0..count {
-            let y = top + (i as f32) * 18.0;
-            if i == active {
-                self.fill_rounded(target, x, y + 1.0, 6.0, 16.0, 3.0, color(1.0, 1.0, 1.0, 1.0));
+            let cx = start_x + (i as f32) * spacing;
+            let is_hovered = hovered_dot == Some(i);
+            let base_alpha = if is_hovered { 0.95 } else { 0.28 };
+            let r = if is_hovered { 2.75 } else { 2.25 };
+
+            let overlap = if cx >= pill_left - r && cx <= pill_right + r {
+                0.0f32
             } else {
-                self.fill_oval(target, x, y + 6.0, 6.0, 6.0, color(1.0, 1.0, 1.0, 0.30));
+                1.0f32
+            };
+
+            if is_hovered {
+                if let Some(bmp) = &self.dot_icons[i] {
+                    let isz = 16.0f32;
+                    let dst = D2D_RECT_F {
+                        left: cx - isz * 0.5,
+                        top: y - isz * 0.5,
+                        right: cx + isz * 0.5,
+                        bottom: y + isz * 0.5,
+                    };
+                    unsafe {
+                        target.DrawBitmap(
+                            bmp,
+                            Some(&dst),
+                            dots_alpha,
+                            D2D1_BITMAP_INTERPOLATION_MODE_LINEAR,
+                            None,
+                        );
+                    }
+                } else {
+                    self.fill_oval(target, cx - r, y - r, r * 2.0, r * 2.0, color(1.0, 1.0, 1.0, base_alpha * dots_alpha));
+                }
+            } else {
+                let alpha = base_alpha * overlap * dots_alpha;
+                if alpha > 0.01 {
+                    self.fill_oval(target, cx - r, y - r, r * 2.0, r * 2.0, color(1.0, 1.0, 1.0, alpha));
+                }
+            }
+        }
+
+        // 2. Draw animated active indicator capsule (if not hovered):
+        if hovered_dot.map(|h| h != active).unwrap_or(true) {
+            let pill_h = 4.5f32;
+            self.fill_rounded(
+                target,
+                pill_left,
+                y - pill_h * 0.5,
+                pill_w,
+                pill_h,
+                pill_h * 0.5,
+                color(1.0, 1.0, 1.0, dots_alpha),
+            );
+        }
+
+        // 3. Mini icon/label badge for hovered dot (Nusa style)
+        if let Some(h_idx) = hovered_dot {
+            let h_cx = start_x + (h_idx as f32) * spacing;
+            let label = match h_idx {
+                0 => "Music",
+                1 => "Focus",
+                2 => "Todo",
+                3 => "Water",
+                4 => "Shelf",
+                5 => "Remove BG",
+                6 => "Convert",
+                _ => "",
+            };
+            if let Some(fmt) = self.fmt_10_med.as_ref() {
+                let (tw, _th) = self.measure_text(label, fmt);
+                let badge_w = tw + 14.0;
+                let badge_h = 16.0;
+                let badge_x = (h_cx - badge_w * 0.5).clamp(16.0, lw - badge_w - 16.0);
+                let badge_y = y - 22.0;
+                self.fill_rounded(
+                    target,
+                    badge_x,
+                    badge_y,
+                    badge_w,
+                    badge_h,
+                    4.0,
+                    color(0.10, 0.10, 0.12, 0.94),
+                );
+                self.stroke_rounded(
+                    target,
+                    badge_x,
+                    badge_y,
+                    badge_w,
+                    badge_h,
+                    4.0,
+                    0.5,
+                    color(1.0, 1.0, 1.0, 0.16),
+                    None,
+                );
+                self.draw_centered_text(
+                    target,
+                    label,
+                    Some(fmt),
+                    color(1.0, 1.0, 1.0, 0.95),
+                    badge_x * 2.0 + badge_w,
+                    badge_y + 1.5,
+                );
             }
         }
     }
@@ -1368,7 +2497,7 @@ impl Renderer {
         let mid_y = lh * 0.5;
         let now = chrono::Local::now();
 
-        // 1. Live Pomodoro takes priority (`160x32`):
+        // 1. Live Pomodoro takes priority:
         if ctx.pomodoro.is_active(now) {
             let rem = ctx.pomodoro.remaining(now);
             let dur = ctx.pomodoro.duration_secs().max(1);
@@ -1380,9 +2509,9 @@ impl Renderer {
             };
             self.draw_progress_ring(
                 target,
-                30.0,
+                24.0,
                 mid_y,
-                8.0,
+                6.5,
                 2.0,
                 frac,
                 color(rgb.0, rgb.1, rgb.2, alpha),
@@ -1391,57 +2520,60 @@ impl Renderer {
             self.draw_centered_text(
                 target,
                 &format_pomodoro_time(rem),
-                self.fmt_15_semi.as_ref(),
+                self.fmt_13_bold.as_ref(),
                 color(1.0, 1.0, 1.0, text_alpha),
                 lw,
-                mid_y - 10.0,
+                mid_y - 8.0,
             );
             return;
         }
 
-        // 2. Lyrics-mode closed pill (`360x32`, when closed from Lyrics page):
+        // 2. Lyrics-mode closed pill:
         if ctx.lyrics_mode {
             if let Some(m) = ctx.media {
                 self.draw_text_at(
                     target,
                     "♪",
-                    self.fmt_18_med.as_ref(),
+                    self.fmt_14_semi.as_ref(),
                     color(1.0, 1.0, 1.0, 1.0),
-                    22.0,
-                    mid_y - 12.0,
+                    28.0,
+                    mid_y - 9.0,
                 );
                 let line = Self::current_lyric_triple(Some(m), ctx.lyrics)
                     .1
                     .unwrap_or_else(|| m.title.clone());
                 if let Some(fmt) = self.fmt_13_med.as_ref() {
-                    let shown = self.truncate_text(&line, 236.0, fmt);
+                    let shown = self.truncate_text(&line, lw - 72.0, fmt);
                     self.draw_centered_text(
                         target,
                         &shown,
                         Some(fmt),
                         color(1.0, 1.0, 1.0, 1.0),
                         lw,
-                        mid_y - 9.0,
+                        mid_y - 8.0,
                     );
                 }
                 return;
             }
         }
 
-        // 3. Plain music / hover pill (`180x32`): battery icon + HH:mm clock + 5-bar waveform.
-        self.draw_battery_icon(target, 30.0, mid_y, ctx.battery_percent, ctx.battery_charging);
+        // 3. Plain minimalist compact pill: battery + clock + waveform with comfortable padding:
+        let compact_bat_cx = 35.0f32;
+        self.draw_battery_icon(target, compact_bat_cx, mid_y, ctx.battery_percent, ctx.battery_charging);
         let hm = now.format("%H:%M").to_string();
         self.draw_centered_text(
             target,
             &hm,
-            self.fmt_15_semi.as_ref(),
+            self.fmt_13_med.as_ref(),
             color(1.0, 1.0, 1.0, 1.0),
             lw,
-            mid_y - 10.0,
+            mid_y - 7.5,
         );
-        let wave_h = if lh <= 40.0 { 14.0 } else { 20.0 };
+        let wave_h = 9.0f32;
         let playing = ctx.media.map(|m| m.playing).unwrap_or(false);
-        self.draw_waveform(target, lw - 50.0, mid_y - wave_h * 0.5, 28.0, wave_h, playing);
+        let wave_w = 14.0f32;
+        let wave_x = lw - 24.0 - wave_w;
+        self.draw_waveform(target, wave_x, mid_y - wave_h * 0.5, wave_w, wave_h, playing);
     }
 
     // --- Music Card (`Expanded`, `520x180`) & Lyrics Card (`Lyrics`, `700x180`) ---
@@ -1449,32 +2581,39 @@ impl Renderer {
     fn draw_music_card(
         &self,
         target: &ID2D1RenderTarget,
-        m: &crate::media::MediaInfo,
+        m_opt: Option<&crate::media::MediaInfo>,
         lyrics_t: f32,
+        button_zooms: [f32; 4],
+        _bar_hover: bool,
+        seek_pos: Option<f64>,
+        base_xform: &Matrix3x2,
+        s: f32,
+        tx: f32,
+        music_bar_zoom: f32,
+        master_volume: f32,
+        volume_bar_zoom: f32,
     ) {
-        if lyrics_t < 0.5 {
-            self.draw_card_header(target, 520.0, m.playing);
-        }
-
-        // Cover art (`x: 36, y: 36, w: 56, h: 56, cornerRadius: 12`):
+        // Cover art (`x: 54, y: 36, w: 60, h: 60, cornerRadius: 14`):
         let cover_rect = D2D_RECT_F {
-            left: 36.0,
+            left: 54.0,
             top: 36.0,
-            right: 92.0,
-            bottom: 92.0,
+            right: 114.0,
+            bottom: 96.0,
         };
-        if let Some(bmp) = &self.cover_bitmap {
-            unsafe {
-                target.DrawBitmap(
-                    bmp,
-                    Some(&cover_rect),
-                    1.0,
-                    D2D1_BITMAP_INTERPOLATION_MODE_LINEAR,
-                    None,
-                );
+        if m_opt.is_some() && self.cover_bitmap.is_some() {
+            if let Some(bmp) = &self.cover_bitmap {
+                unsafe {
+                    target.DrawBitmap(
+                        bmp,
+                        Some(&cover_rect),
+                        1.0,
+                        D2D1_BITMAP_INTERPOLATION_MODE_LINEAR,
+                        None,
+                    );
+                }
             }
         } else {
-            self.fill_rounded(target, 36.0, 36.0, 56.0, 56.0, 12.0, color(1.0, 1.0, 1.0, 0.12));
+            self.fill_rounded(target, 54.0, 36.0, 60.0, 60.0, 14.0, color(1.0, 1.0, 1.0, 0.12));
             if let Some(fmt) = self.fmt_28_reg.as_ref() {
                 let (w, h) = self.measure_text("♪", fmt);
                 self.draw_text_at(
@@ -1482,8 +2621,8 @@ impl Renderer {
                     "♪",
                     Some(fmt),
                     color(1.0, 1.0, 1.0, 0.70),
-                    64.0 - w * 0.5,
-                    64.0 - h * 0.5,
+                    84.0 - w * 0.5,
+                    66.0 - h * 0.5,
                 );
             }
         }
@@ -1493,14 +2632,25 @@ impl Renderer {
         // with `PushAxisAlignedClip` so characters never jump/flicker during `520 <-> 700` morphs.
         let text_w = 340.0 + (212.0 - 340.0) * lyrics_t;
         let trunc_w = if lyrics_t >= 0.99 { 212.0 } else { 340.0 };
-        let title_raw = if m.title.is_empty() { "Unknown title" } else { m.title.as_str() };
-        let artist_raw = if m.artist.is_empty() { "Unknown artist" } else { m.artist.as_str() };
+        let (title_raw, artist_raw, title_c, artist_c) = match m_opt {
+            Some(m) => {
+                let t = if m.title.is_empty() { "Unknown title" } else { m.title.as_str() };
+                let a = if m.artist.is_empty() { "Unknown artist" } else { m.artist.as_str() };
+                (t, a, color(1.0, 1.0, 1.0, 1.0), color(1.0, 1.0, 1.0, 0.65))
+            }
+            None => (
+                "Not Playing",
+                "No media active",
+                color(1.0, 1.0, 1.0, 0.85),
+                color(1.0, 1.0, 1.0, 0.38),
+            ),
+        };
         unsafe {
             target.PushAxisAlignedClip(
                 &D2D_RECT_F {
-                    left: 116.0,
+                    left: 130.0,
                     top: 30.0,
-                    right: 116.0 + text_w,
+                    right: 130.0 + text_w,
                     bottom: 96.0,
                 },
                 D2D1_ANTIALIAS_MODE_PER_PRIMITIVE,
@@ -1508,27 +2658,30 @@ impl Renderer {
         }
         if let Some(fmt) = self.fmt_25_bold.as_ref() {
             let shown = self.truncate_text(title_raw, trunc_w, fmt);
-            self.draw_text_at(target, &shown, Some(fmt), color(1.0, 1.0, 1.0, 1.0), 116.0, 34.0);
+            self.draw_text_at(target, &shown, Some(fmt), title_c, 130.0, 34.0);
         }
         if let Some(fmt) = self.fmt_16_reg.as_ref() {
             let shown = self.truncate_text(artist_raw, trunc_w, fmt);
-            self.draw_text_at(target, &shown, Some(fmt), color(1.0, 1.0, 1.0, 0.65), 116.0, 68.0);
+            self.draw_text_at(target, &shown, Some(fmt), artist_c, 130.0, 68.0);
         }
         unsafe {
             target.PopAxisAlignedClip();
         }
 
         // Progress row (`y: 104`):
-        let bar_w = 324.0 + (164.0 - 324.0) * lyrics_t;
-        let right_x = 484.0 + (320.0 - 484.0) * lyrics_t;
-        let pos = m.position_secs.max(0.0);
-        let dur = m.duration_secs.max(0.0);
+        let bar_w = 340.0 + (164.0 - 340.0) * lyrics_t;
+        let right_x = 486.0 + (320.0 - 486.0) * lyrics_t;
+        let (pos, dur) = match m_opt {
+            Some(m) => (seek_pos.unwrap_or_else(|| m.position_secs.max(0.0)), m.duration_secs.max(0.0)),
+            None => (0.0, 0.0),
+        };
+        let time_c = if m_opt.is_some() { color(1.0, 1.0, 1.0, 1.0) } else { color(1.0, 1.0, 1.0, 0.35) };
         self.draw_text_at(
             target,
             &format_time_02(pos),
             self.fmt_12_reg.as_ref(),
-            color(1.0, 1.0, 1.0, 1.0),
-            36.0,
+            time_c,
+            54.0,
             102.0,
         );
         if dur > 0.0 {
@@ -1537,33 +2690,86 @@ impl Renderer {
                 target,
                 &format!("-{}", format_time_02(rem)),
                 self.fmt_12_reg.as_ref(),
-                color(1.0, 1.0, 1.0, 1.0),
+                time_c,
                 right_x,
                 102.0,
             );
         }
-        self.fill_rounded(target, 96.0, 110.0, bar_w, 4.0, 2.0, color(1.0, 1.0, 1.0, 0.25));
+        let bar_h = 4.0 + 3.0 * music_bar_zoom;
+        let bar_y = 110.0 - (bar_h - 4.0) * 0.5;
+        self.fill_rounded(target, 98.0, bar_y, bar_w, bar_h, bar_h * 0.5, color(1.0, 1.0, 1.0, 0.20));
         if dur > 0.0 {
             let filled = (pos / dur).clamp(0.0, 1.0) as f32;
             let fill_w = bar_w * filled;
             if fill_w > 0.0 {
-                self.fill_rounded(target, 96.0, 110.0, fill_w, 4.0, 2.0, color(1.0, 1.0, 1.0, 1.0));
+                self.fill_rounded(target, 98.0, bar_y, fill_w, bar_h, bar_h * 0.5, color(1.0, 1.0, 1.0, 1.0));
             }
         }
 
         // Controls row (`y: 140`):
-        let white = color(1.0, 1.0, 1.0, 1.0);
-        self.draw_icon_bubble(target, 56.0, 140.0, white);
+        let ctrl_c = if m_opt.is_some() { color(1.0, 1.0, 1.0, 1.0) } else { color(1.0, 1.0, 1.0, 0.28) };
+        let draw_scaled = |cx: f32, cy: f32, zoom: f32, f: &dyn Fn()| {
+            if (zoom - 1.0).abs() > 0.005 {
+                let mat = Matrix3x2 {
+                    M11: zoom * s,
+                    M12: 0.0,
+                    M21: 0.0,
+                    M22: zoom * s,
+                    M31: cx * (1.0 - zoom) * s + tx,
+                    M32: cy * (1.0 - zoom) * s,
+                };
+                unsafe {
+                    target.SetTransform(&mat);
+                }
+                f();
+                unsafe {
+                    target.SetTransform(base_xform);
+                }
+            } else {
+                f();
+            }
+        };
+
+        draw_scaled(84.0, 140.0, button_zooms[0], &|| {
+            self.draw_icon_bubble(target, 84.0, 140.0, ctrl_c);
+        });
         let c0 = MUSIC_CONTROL_CENTERS[0] + (LYRICS_CONTROL_CENTERS[0] - MUSIC_CONTROL_CENTERS[0]) * lyrics_t;
         let c1 = MUSIC_CONTROL_CENTERS[1] + (LYRICS_CONTROL_CENTERS[1] - MUSIC_CONTROL_CENTERS[1]) * lyrics_t;
         let c2 = MUSIC_CONTROL_CENTERS[2] + (LYRICS_CONTROL_CENTERS[2] - MUSIC_CONTROL_CENTERS[2]) * lyrics_t;
-        self.draw_icon_backward(target, c0, 140.0, white);
-        if m.playing {
-            self.draw_icon_pause(target, c1, 140.0, 18.0, white);
-        } else {
-            self.draw_icon_play(target, c1, 140.0, 18.0, white);
+        draw_scaled(c0, 140.0, button_zooms[1], &|| {
+            self.draw_icon_backward(target, c0, 140.0, ctrl_c);
+        });
+        draw_scaled(c1, 140.0, button_zooms[2], &|| {
+            let is_playing = m_opt.map(|m| m.playing).unwrap_or(false);
+            if is_playing {
+                self.draw_icon_pause(target, c1, 140.0, 18.0, ctrl_c);
+            } else {
+                self.draw_icon_play(target, c1, 140.0, 18.0, ctrl_c);
+            }
+        });
+        draw_scaled(c2, 140.0, button_zooms[3], &|| {
+            self.draw_icon_forward(target, c2, 140.0, ctrl_c);
+        });
+
+        // Volume control (only speaker icon initially; expands bar to the left on hover):
+        let vol_alpha = (1.0 - lyrics_t * 2.5).clamp(0.0, 1.0);
+        if vol_alpha > 0.01 {
+            self.draw_icon_speaker(target, 472.0, 140.0, master_volume, color(1.0, 1.0, 1.0, 0.85 * vol_alpha));
+            if volume_bar_zoom > 0.005 {
+                let max_w = 94.0f32;
+                let cur_w = max_w * volume_bar_zoom;
+                let bar_right = 452.0f32;
+                let bar_left = bar_right - cur_w;
+                let vbar_h = 4.0;
+                let vbar_y = 140.0 - vbar_h * 0.5;
+                let anim_alpha = vol_alpha * volume_bar_zoom;
+                self.fill_rounded(target, bar_left, vbar_y, cur_w, vbar_h, vbar_h * 0.5, color(1.0, 1.0, 1.0, 0.20 * anim_alpha));
+                let fill_w = (cur_w * master_volume.clamp(0.0, 1.0)).max(0.0);
+                if fill_w > 0.0 {
+                    self.fill_rounded(target, bar_left, vbar_y, fill_w, vbar_h, vbar_h * 0.5, color(1.0, 1.0, 1.0, 0.95 * anim_alpha));
+                }
+            }
         }
-        self.draw_icon_forward(target, c2, 140.0, white);
     }
 
     fn current_lyric_triple(
@@ -1578,10 +2784,7 @@ impl Renderer {
         }
         let clean = |s: &str| s.replace("\r\n", " ").replace('\n', " ").replace('\r', " ");
         if !cache.synced {
-            let c0 = cache.lines.first().map(|l| clean(&l.text));
-            let c1 = cache.lines.get(1).map(|l| clean(&l.text));
-            let c2 = cache.lines.get(2).map(|l| clean(&l.text));
-            return (c0, c1, c2);
+            return (None, None, None);
         }
         let pos_ms = media
             .map(|m| (m.position_secs * 1000.0) as i64)
@@ -1601,46 +2804,26 @@ impl Renderer {
     /// Word-wrap a lyric line into at most `max_lines` visual rows (`IslandView.wrappedLines`).
     fn wrapped_lines(&self, text: &str, fmt: &IDWriteTextFormat, width: f32, max_lines: usize) -> Vec<String> {
         let max_lines = max_lines.max(1);
-        let normalized = text.split_whitespace().collect::<Vec<&str>>().join(" ");
-        if self.measure_text(&normalized, fmt).0 <= width {
-            return vec![normalized];
+        let trimmed = text.trim();
+        if trimmed.is_empty() {
+            return vec![];
         }
-        let mut pieces: Vec<String> = Vec::new();
-        for word in normalized.split_whitespace() {
-            let mut rem = word.to_string();
-            while self.measure_text(&rem, fmt).0 > width {
-                let mut filled = String::new();
-                for ch in rem.chars() {
-                    let cand = format!("{}{}", filled, ch);
-                    if self.measure_text(&cand, fmt).0 <= width {
-                        filled.push(ch);
-                    } else {
-                        break;
-                    }
-                }
-                if filled.is_empty() {
-                    if let Some(ch) = rem.chars().next() {
-                        filled.push(ch);
-                    }
-                }
-                let drop_bytes = filled.len();
-                pieces.push(filled);
-                rem = rem[drop_bytes..].to_string();
-            }
-            if !rem.is_empty() {
-                pieces.push(rem);
-            }
+        if self.measure_text(trimmed, fmt).0 <= width {
+            return vec![trimmed.to_string()];
         }
-        let mut lines: Vec<String> = Vec::new();
+        let words: Vec<&str> = trimmed.split_whitespace().collect();
+        let mut lines = Vec::new();
         let mut current = String::new();
-        for piece in pieces {
-            if current.is_empty() {
-                current = piece;
+        for word in words {
+            let cand = if current.is_empty() {
+                word.to_string()
             } else {
-                let cand = format!("{} {}", current, piece);
-                if self.measure_text(&cand, fmt).0 <= width {
-                    current = cand;
-                } else {
+                format!("{} {}", current, word)
+            };
+            if self.measure_text(&cand, fmt).0 <= width {
+                current = cand;
+            } else {
+                if !current.is_empty() {
                     lines.push(current);
                     if lines.len() == max_lines {
                         if let Some(last) = lines.last_mut() {
@@ -1648,16 +2831,12 @@ impl Renderer {
                         }
                         return lines;
                     }
-                    current = piece;
                 }
+                current = word.to_string();
             }
         }
-        if !current.is_empty() {
-            if lines.len() < max_lines {
-                lines.push(current);
-            } else if let Some(last) = lines.last_mut() {
-                *last = self.truncate_text(&format!("{}…", last), width, fmt);
-            }
+        if !current.is_empty() && lines.len() < max_lines {
+            lines.push(current);
         }
         lines
     }
@@ -1889,10 +3068,10 @@ impl Renderer {
             return;
         };
 
-        if cache.lines.is_empty() {
+        if cache.lines.is_empty() || !cache.synced {
             self.draw_text_at(
                 target,
-                "Lyrics unavailable",
+                "No lyrics found",
                 self.fmt_14_reg.as_ref(),
                 color(1.0, 1.0, 1.0, 0.40 * panel_alpha),
                 x,
@@ -1906,7 +3085,7 @@ impl Renderer {
 
         if let Some(roll) = &self.lyric_roll {
             let elapsed = roll.started_at.elapsed().as_secs_f32();
-            if !roll.items.is_empty() && roll.distance > 0.0 && elapsed < 0.70 {
+            if !roll.items.is_empty() && roll.distance > 0.0 && elapsed < 0.70 && panel_alpha > 0.98 {
                 let p = (elapsed / 0.70).clamp(0.0, 1.0);
                 let prog = if p < 0.5 {
                     4.0 * p * p * p
@@ -1974,17 +3153,16 @@ impl Renderer {
         }
     }
 
-    // --- Pomodoro Section (`drawPomodoro`, `640x180`, `IslandView.swift` lines 2349-2392) ---
+    // --- Pomodoro Section (`drawPomodoro`, `520x180`, `IslandView.swift` lines 2349-2392) ---
 
-    fn draw_pomodoro(&self, target: &ID2D1RenderTarget, pomodoro: &crate::pomodoro::Pomodoro, playing: bool) {
-        self.draw_card_header(target, 640.0, playing);
+    fn draw_pomodoro(&self, target: &ID2D1RenderTarget, pomodoro: &crate::pomodoro::Pomodoro, _playing: bool) {
         self.draw_text_at(
             target,
             "Pomodoro",
             self.fmt_20_bold.as_ref(),
             color(1.0, 1.0, 1.0, 1.0),
-            28.0,
-            10.0,
+            54.0,
+            36.0,
         );
 
         let now = chrono::Local::now();
@@ -1995,39 +3173,46 @@ impl Renderer {
         let rgb = if is_focus { SYSTEM_RED } else { SYSTEM_GREEN };
         let mode_c = color(rgb.0, rgb.1, rgb.2, 1.0);
 
-        // Left ring (`center: (130, 100), radius: 42, width: 8`) + tinted interior + stopwatch:
-        self.draw_progress_ring(target, 130.0, 100.0, 42.0, 8.0, frac, mode_c);
-        self.fill_oval(target, 97.0, 67.0, 66.0, 66.0, color(rgb.0, rgb.1, rgb.2, 0.15));
-        self.draw_icon_stopwatch(target, 130.0, 100.0, 36.0, color(1.0, 1.0, 1.0, 1.0));
+        // Compact left progress ring: center (72, 96), radius 32, width 6 + tinted interior + stopwatch icon:
+        self.draw_progress_ring(target, POMODORO_RING_CX, POMODORO_RING_CY, POMODORO_RING_R, 6.0, frac, mode_c);
+        self.fill_oval(target, POMODORO_RING_CX - 24.0, POMODORO_RING_CY - 24.0, 48.0, 48.0, color(rgb.0, rgb.1, rgb.2, 0.15));
+        self.draw_icon_stopwatch(target, POMODORO_RING_CX, POMODORO_RING_CY, 26.0, color(1.0, 1.0, 1.0, 1.0));
 
-        // Countdown (`44pt bold` at `(220, 48)`) + Reset circle (`(362, 58, 32, 32)`) + subtitle:
+        // Countdown + Reset button + subtitle:
         self.draw_text_at(
             target,
             &format_pomodoro_time(rem),
             self.fmt_44_bold.as_ref(),
             color(1.0, 1.0, 1.0, 1.0),
-            220.0,
-            42.0,
+            POMODORO_COUNTDOWN_X,
+            POMODORO_COUNTDOWN_Y,
         );
+        let reset_w = POMODORO_RESET_RECT.2 - POMODORO_RESET_RECT.0;
+        let reset_h = POMODORO_RESET_RECT.3 - POMODORO_RESET_RECT.1;
         self.fill_oval(
             target,
             POMODORO_RESET_RECT.0,
             POMODORO_RESET_RECT.1,
-            32.0,
-            32.0,
+            reset_w,
+            reset_h,
             color(1.0, 1.0, 1.0, 0.12),
         );
-        self.draw_icon_reset(target, 378.0, 74.0, color(1.0, 1.0, 1.0, 1.0));
+        self.draw_icon_reset(
+            target,
+            POMODORO_RESET_RECT.0 + reset_w * 0.5,
+            POMODORO_RESET_RECT.1 + reset_h * 0.5,
+            color(1.0, 1.0, 1.0, 1.0),
+        );
         self.draw_text_at(
             target,
             if is_focus { "Focus time" } else { "Short break" },
-            self.fmt_16_reg.as_ref(),
+            self.fmt_14_reg.as_ref(),
             color(1.0, 1.0, 1.0, 0.60),
-            220.0,
-            104.0,
+            POMODORO_COUNTDOWN_X,
+            POMODORO_SUBTITLE_Y,
         );
 
-        // Mode pills (`y: 130, h: 28`):
+        // Mode pills (`y: 126..154`):
         // 1. Short Break pill
         let sb_active = !is_focus;
         self.fill_rounded(
@@ -2041,33 +3226,35 @@ impl Renderer {
         );
         self.draw_icon_cup(
             target,
-            POMODORO_SHORT_BREAK_RECT.0 + 20.0,
-            144.0,
+            POMODORO_SHORT_BREAK_RECT.0 + 16.0,
+            POMODORO_SHORT_BREAK_RECT.1 + 14.0,
             color(1.0, 1.0, 1.0, if sb_active { 1.0 } else { 0.75 }),
         );
         self.draw_text_at(
             target,
             "Short Break",
-            self.fmt_14_med.as_ref(),
+            self.fmt_13_med.as_ref(),
             color(1.0, 1.0, 1.0, if sb_active { 1.0 } else { 0.75 }),
-            POMODORO_SHORT_BREAK_RECT.0 + 34.0,
-            134.5,
+            POMODORO_SHORT_BREAK_RECT.0 + 28.0,
+            POMODORO_SHORT_BREAK_RECT.1 + 5.0,
         );
 
-        // 2. Play/Pause pill (`width: 56`, mode color)
+        // 2. Play/Pause pill (`width: 54`, mode color)
         self.fill_rounded(
             target,
             POMODORO_PLAY_RECT.0,
             POMODORO_PLAY_RECT.1,
-            56.0,
+            POMODORO_PLAY_RECT.2 - POMODORO_PLAY_RECT.0,
             28.0,
             14.0,
             mode_c,
         );
+        let play_cx = POMODORO_PLAY_RECT.0 + (POMODORO_PLAY_RECT.2 - POMODORO_PLAY_RECT.0) * 0.5;
+        let play_cy = POMODORO_PLAY_RECT.1 + 14.0;
         if pomodoro.running {
-            self.draw_icon_pause(target, 380.0, 144.0, 15.0, color(1.0, 1.0, 1.0, 1.0));
+            self.draw_icon_pause(target, play_cx, play_cy, 14.0, color(1.0, 1.0, 1.0, 1.0));
         } else {
-            self.draw_icon_play(target, 380.0, 144.0, 15.0, color(1.0, 1.0, 1.0, 1.0));
+            self.draw_icon_play(target, play_cx, play_cy, 14.0, color(1.0, 1.0, 1.0, 1.0));
         }
 
         // 3. Focus Time pill
@@ -2083,21 +3270,21 @@ impl Renderer {
         );
         self.draw_icon_target(
             target,
-            POMODORO_FOCUS_RECT.0 + 20.0,
-            144.0,
+            POMODORO_FOCUS_RECT.0 + 16.0,
+            POMODORO_FOCUS_RECT.1 + 14.0,
             color(1.0, 1.0, 1.0, if fc_active { 1.0 } else { 0.75 }),
         );
         self.draw_text_at(
             target,
             "Focus Time",
-            self.fmt_14_med.as_ref(),
+            self.fmt_13_med.as_ref(),
             color(1.0, 1.0, 1.0, if fc_active { 1.0 } else { 0.75 }),
-            POMODORO_FOCUS_RECT.0 + 34.0,
-            134.5,
+            POMODORO_FOCUS_RECT.0 + 28.0,
+            POMODORO_FOCUS_RECT.1 + 5.0,
         );
     }
 
-    // --- Todo Section (`drawTodo`, `640x220`, `IslandView.swift` lines 2472-2541) ---
+    // --- Todo Section (`drawTodo`, `520x180`, `IslandView.swift` lines 2472-2541) ---
 
     fn draw_todo(
         &self,
@@ -2105,16 +3292,17 @@ impl Renderer {
         todo: &crate::todo::TodoList,
         todo_editing: bool,
         todo_input: &str,
-        playing: bool,
+        _playing: bool,
+        todo_scroll: f32,
+        _todo_editing_idx: Option<usize>,
     ) {
-        self.draw_card_header(target, 640.0, playing);
         self.draw_text_at(
             target,
             "Todo",
             self.fmt_20_bold.as_ref(),
             color(1.0, 1.0, 1.0, 1.0),
-            28.0,
-            10.0,
+            54.0,
+            36.0,
         );
 
         let total = todo.tasks.len();
@@ -2125,94 +3313,199 @@ impl Renderer {
                 &format!("{}/{}", done_count, total),
                 self.fmt_28_bold.as_ref(),
                 color(1.0, 1.0, 1.0, 1.0),
-                28.0,
-                48.0,
+                46.0,
+                58.0,
             );
             self.draw_text_at(
                 target,
                 "done",
-                self.fmt_12_reg.as_ref(),
+                self.fmt_13_med.as_ref(),
                 color(1.0, 1.0, 1.0, 0.60),
-                28.0,
-                88.0,
+                46.0,
+                92.0,
             );
         } else {
             self.draw_text_at(
                 target,
-                "No tasks yet",
-                self.fmt_14_reg.as_ref(),
-                color(1.0, 1.0, 1.0, 0.60),
-                28.0,
-                60.0,
+                "0/0",
+                self.fmt_28_bold.as_ref(),
+                color(1.0, 1.0, 1.0, 0.40),
+                46.0,
+                58.0,
+            );
+            self.draw_text_at(
+                target,
+                "tasks",
+                self.fmt_13_med.as_ref(),
+                color(1.0, 1.0, 1.0, 0.40),
+                46.0,
+                92.0,
             );
         }
 
-        // `"+ Add task"` pill (`x: 28, y: 120, w: 104, h: 28`):
-        self.fill_rounded(
-            target,
-            TODO_ADD_PILL_RECT.0,
-            TODO_ADD_PILL_RECT.1,
-            TODO_ADD_PILL_RECT.2 - TODO_ADD_PILL_RECT.0,
-            28.0,
-            14.0,
-            color(1.0, 1.0, 1.0, 0.10),
-        );
-        self.draw_text_at(
-            target,
-            "+  Add task",
-            self.fmt_14_reg.as_ref(),
-            color(1.0, 1.0, 1.0, 1.0),
-            40.0,
-            124.5,
-        );
-
-        let visible = todo.visible_indices();
-        if todo_editing {
+        // Left control: "+ Add task" pill OR Form input (never overlaps, hides button when input active):
+        if !todo_editing {
+            let px = TODO_ADD_PILL_RECT.0;
+            let py = TODO_ADD_PILL_RECT.1;
+            let pw = TODO_ADD_PILL_RECT.2 - px;
+            let ph = TODO_ADD_PILL_RECT.3 - py;
+            self.fill_rounded(
+                target,
+                px,
+                py,
+                pw,
+                ph,
+                ph * 0.5,
+                color(1.0, 1.0, 1.0, 0.10),
+            );
+            let btn_txt = "+ Add task";
+            if let Some(fmt) = self.fmt_13_med.as_ref() {
+                let (tw, th) = self.measure_text(btn_txt, fmt);
+                self.draw_text_at(
+                    target,
+                    btn_txt,
+                    Some(fmt),
+                    color(1.0, 1.0, 1.0, 1.0),
+                    px + (pw - tw) * 0.5,
+                    py + (ph - th) * 0.5,
+                );
+            }
+        } else {
+            // Input form replaces the button cleanly:
+            let input_w = TODO_INPUT_RECT.2 - TODO_INPUT_RECT.0;
             self.fill_rounded(
                 target,
                 TODO_INPUT_RECT.0,
                 TODO_INPUT_RECT.1,
-                TODO_INPUT_RECT.2 - TODO_INPUT_RECT.0,
+                input_w,
                 32.0,
                 10.0,
-                color(1.0, 1.0, 1.0, 0.10),
+                color(1.0, 1.0, 1.0, 0.12),
+            );
+            self.stroke_rounded(
+                target,
+                TODO_INPUT_RECT.0,
+                TODO_INPUT_RECT.1,
+                input_w,
+                32.0,
+                10.0,
+                1.0,
+                color(1.0, 1.0, 1.0, 0.30),
+                None,
             );
             let (shown, c) = if todo_input.is_empty() {
-                ("New task...".to_string(), color(1.0, 1.0, 1.0, 0.40))
+                ("Task name...".to_string(), color(1.0, 1.0, 1.0, 0.40))
             } else {
                 (format!("{}|", todo_input), color(1.0, 1.0, 1.0, 1.0))
             };
+            if let Some(fmt) = self.fmt_13_reg.as_ref() {
+                let text_s = self.truncate_text(&shown, input_w - 16.0, fmt);
+                self.draw_text_at(
+                    target,
+                    &text_s,
+                    Some(fmt),
+                    c,
+                    TODO_INPUT_RECT.0 + 8.0,
+                    TODO_INPUT_RECT.1 + 7.5,
+                );
+            }
             self.draw_text_at(
                 target,
-                &shown,
-                self.fmt_14_reg.as_ref(),
-                c,
-                TODO_INPUT_RECT.0 + 12.0,
-                TODO_INPUT_RECT.1 + 6.5,
-            );
-            self.draw_text_at(
-                target,
-                "Enter to add · Esc to cancel",
-                self.fmt_11_reg.as_ref(),
-                color(1.0, 1.0, 1.0, 0.40),
-                28.0,
-                196.0,
-            );
-        } else if total > visible.len() {
-            self.draw_text_at(
-                target,
-                &format!("+{} more", total - visible.len()),
-                self.fmt_11_reg.as_ref(),
-                color(1.0, 1.0, 1.0, 0.40),
-                28.0,
-                158.0,
+                "Enter: save · Esc: cancel",
+                self.fmt_10_med.as_ref(),
+                color(1.0, 1.0, 1.0, 0.45),
+                TODO_INPUT_RECT.0,
+                TODO_INPUT_RECT.1 + 36.0,
             );
         }
 
-        // Right column task rows (`x: 280, w: 320, y: 52 + i * 40, h: 32`):
-        for (row_i, &task_idx) in visible.iter().enumerate() {
-            let task = &todo.tasks[task_idx];
-            let y = TODO_ROW_Y0 + (row_i as f32) * TODO_ROW_PITCH;
+        // Empty state illustration when zero tasks:
+        if total == 0 && !todo_editing {
+            let card_x = 166.0f32;
+            let card_y = 44.0f32;
+            let card_w = 320.0f32;
+            let card_h = 104.0f32;
+            self.fill_rounded(target, card_x, card_y, card_w, card_h, 14.0, color(1.0, 1.0, 1.0, 0.05));
+            self.stroke_rounded(
+                target,
+                card_x,
+                card_y,
+                card_w,
+                card_h,
+                14.0,
+                1.0,
+                color(1.0, 1.0, 1.0, 0.14),
+                self.stroke_dashed.as_ref(),
+            );
+            let icon_cx = card_x + 36.0;
+            let icon_cy = card_y + card_h * 0.5;
+            self.fill_oval(
+                target,
+                icon_cx - 16.0,
+                icon_cy - 16.0,
+                32.0,
+                32.0,
+                color(SYSTEM_GREEN.0, SYSTEM_GREEN.1, SYSTEM_GREEN.2, 0.18),
+            );
+            self.stroke_oval(
+                target,
+                icon_cx - 16.0,
+                icon_cy - 16.0,
+                32.0,
+                32.0,
+                1.5,
+                color(SYSTEM_GREEN.0, SYSTEM_GREEN.1, SYSTEM_GREEN.2, 0.60),
+            );
+            self.draw_icon_checkmark(
+                target,
+                icon_cx,
+                icon_cy,
+                color(SYSTEM_GREEN.0, SYSTEM_GREEN.1, SYSTEM_GREEN.2, 1.0),
+            );
+            let text_x = card_x + 64.0;
+            self.draw_text_at(
+                target,
+                "All caught up!",
+                self.fmt_15_semi.as_ref(),
+                color(1.0, 1.0, 1.0, 1.0),
+                text_x,
+                card_y + 24.0,
+            );
+            self.draw_text_at(
+                target,
+                "No tasks pending for today",
+                self.fmt_12_reg.as_ref(),
+                color(1.0, 1.0, 1.0, 0.60),
+                text_x,
+                card_y + 46.0,
+            );
+            self.draw_text_at(
+                target,
+                "Click \"+ Add task\" to plan ahead",
+                self.fmt_11_reg.as_ref(),
+                color(1.0, 1.0, 1.0, 0.40),
+                text_x,
+                card_y + 66.0,
+            );
+            return;
+        }
+
+        // Right column scrollable task list:
+        let list_clip = D2D_RECT_F {
+            left: 156.0,
+            top: 42.0,
+            right: 494.0,
+            bottom: 158.0,
+        };
+        unsafe {
+            target.PushAxisAlignedClip(&list_clip, D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
+        }
+
+        for (row_i, task) in todo.tasks.iter().enumerate() {
+            let y = TODO_ROW_Y0 + (row_i as f32) * TODO_ROW_PITCH - todo_scroll;
+            if y + TODO_ROW_H < 40.0 || y > 160.0 {
+                continue;
+            }
             let cy = y + 16.0;
             self.fill_rounded(
                 target,
@@ -2223,20 +3516,21 @@ impl Renderer {
                 10.0,
                 color(1.0, 1.0, 1.0, 0.08),
             );
+            let cb_x = TODO_ROW_X + 12.0;
             if task.done {
                 self.fill_oval(
                     target,
-                    292.0,
+                    cb_x,
                     cy - 10.0,
                     20.0,
                     20.0,
                     color(SYSTEM_GREEN.0, SYSTEM_GREEN.1, SYSTEM_GREEN.2, 1.0),
                 );
-                self.draw_icon_checkmark(target, 302.0, cy, color(1.0, 1.0, 1.0, 1.0));
+                self.draw_icon_checkmark(target, cb_x + 10.0, cy, color(1.0, 1.0, 1.0, 1.0));
             } else {
                 self.stroke_oval(
                     target,
-                    292.0,
+                    cb_x,
                     cy - 10.0,
                     20.0,
                     20.0,
@@ -2245,14 +3539,15 @@ impl Renderer {
                 );
             }
             if let Some(fmt) = self.fmt_14_reg.as_ref() {
-                let text = self.truncate_text(&task.title, 248.0, fmt);
+                let text = self.truncate_text(&task.title, TODO_ROW_W - 84.0, fmt);
+                let text_x = cb_x + 28.0;
                 if task.done {
                     self.draw_strikethrough_text_at(
                         target,
                         &text,
                         Some(fmt),
                         color(1.0, 1.0, 1.0, 0.50),
-                        320.0,
+                        text_x,
                         y + 6.5,
                     );
                 } else {
@@ -2261,235 +3556,250 @@ impl Renderer {
                         &text,
                         Some(fmt),
                         color(1.0, 1.0, 1.0, 1.0),
-                        320.0,
+                        text_x,
                         y + 6.5,
                     );
                 }
             }
+            // Edit button "✎"
+            self.draw_text_at(
+                target,
+                "✎",
+                self.fmt_12_reg.as_ref(),
+                color(1.0, 1.0, 1.0, 0.45),
+                TODO_ROW_EDIT_LEFT + 6.0,
+                cy - 8.0,
+            );
+            // Delete button "×"
             self.draw_text_at(
                 target,
                 "×",
                 self.fmt_14_reg.as_ref(),
                 color(1.0, 1.0, 1.0, 0.40),
-                584.0,
+                TODO_ROW_DELETE_LEFT + 6.0,
                 cy - 9.5,
             );
         }
+
+        unsafe {
+            target.PopAxisAlignedClip();
+        }
     }
 
-    // --- Water Reminder Section (`drawWater`, `640x180`, `IslandView.swift` lines 4576-4732) ---
+    // --- Water Reminder Section (`drawWater`, `520x180`) ---
 
-    fn draw_water(&self, target: &ID2D1RenderTarget, water: &crate::water::Water, playing: bool) {
-        // Header: `"Water"` white + `"Reminder"` blue + status ring + date + time + waveform:
-        if let Some(fmt20) = self.fmt_20_bold.as_ref() {
-            self.draw_text_at(target, "Water", Some(fmt20), color(1.0, 1.0, 1.0, 1.0), 48.0, 10.0);
-            let (water_w, _) = self.measure_text("Water ", fmt20);
+    fn draw_water(&self, target: &ID2D1RenderTarget, water: &crate::water::Water, _playing: bool) {
+        // Header Title: "Water " white + "Reminder" blue:
+        if let Some(fmt18) = self.fmt_18_med.as_ref() {
+            let left_x = 54.0f32;
+            let top_y = 36.0f32;
+            self.draw_text_at(target, "Water ", Some(fmt18), color(1.0, 1.0, 1.0, 1.0), left_x, top_y);
+            let (water_w, _) = self.measure_text("Water ", fmt18);
             self.draw_text_at(
                 target,
                 "Reminder",
-                Some(fmt20),
+                Some(fmt18),
                 color(SYSTEM_BLUE.0, SYSTEM_BLUE.1, SYSTEM_BLUE.2, 1.0),
-                48.0 + water_w,
-                10.0,
+                left_x + water_w,
+                top_y,
             );
-            let (rem_w, _) = self.measure_text("Reminder", fmt20);
-            let ring_cx = 48.0 + water_w + rem_w + 20.0;
-            let ring_c = if water.notifications_enabled {
-                color(SYSTEM_GREEN.0, SYSTEM_GREEN.1, SYSTEM_GREEN.2, 1.0)
-            } else {
-                color(1.0, 1.0, 1.0, 0.30)
-            };
-            self.stroke_oval(target, ring_cx - 8.0, 14.0, 16.0, 16.0, 2.0, ring_c);
-
-            let now = chrono::Local::now();
-            let date_str = now.format("%a %-d %b %Y").to_string();
-            let time_str = now.format("%H:%M").to_string();
-            let date_x = ring_cx + 20.0;
-            if let Some(fmt_d) = self.fmt_13_med.as_ref() {
-                self.draw_text_at(target, &date_str, Some(fmt_d), color(1.0, 1.0, 1.0, 1.0), date_x, 14.0);
-                let (dw, _) = self.measure_text(&date_str, fmt_d);
-                self.draw_text_at(
-                    target,
-                    &time_str,
-                    self.fmt_13_bold.as_ref(),
-                    color(1.0, 1.0, 1.0, 1.0),
-                    date_x + dw + 6.0,
-                    14.0,
-                );
-            }
         }
-        self.draw_waveform(target, 640.0 - 68.0, 14.0, 48.0, 16.0, playing);
 
-        // Left column: big liter number + `/ 1.5 L`:
+        // --- Left column (Intake, toggle, progress, buttons) ---
+        // Big liter number + `/ 2.0 L`:
         let total_str = crate::water::Water::format_liters(water.ml);
         let goal_str = format!("/ {} L", crate::water::Water::format_liters(water.goal_ml));
-        if let Some(fmt44) = self.fmt_44_bold.as_ref() {
-            self.draw_text_at(target, &total_str, Some(fmt44), color(1.0, 1.0, 1.0, 1.0), 48.0, 42.0);
-            let (tw, _) = self.measure_text(&total_str, fmt44);
+        if let Some(fmt28) = self.fmt_28_bold.as_ref() {
+            self.draw_text_at(target, &total_str, Some(fmt28), color(1.0, 1.0, 1.0, 1.0), 54.0, 56.0);
+            let (tw, _) = self.measure_text(&total_str, fmt28);
             self.draw_text_at(
                 target,
                 &goal_str,
-                self.fmt_18_med.as_ref(),
+                self.fmt_14_med.as_ref(),
                 color(1.0, 1.0, 1.0, 0.50),
-                48.0 + tw + 8.0,
-                61.0,
+                54.0 + tw + 6.0,
+                66.0,
             );
         }
 
-        // Notification toggle (`x: 284, y: 54, w: 56, h: 32`):
+        // Notification toggle (`WATER_TOGGLE_RECT: 188..238, 52..80`):
         let on = water.notifications_enabled;
         let toggle_fill = if on {
             color(SYSTEM_BLUE.0, SYSTEM_BLUE.1, SYSTEM_BLUE.2, 1.0)
         } else {
-            color(1.0, 1.0, 1.0, 0.20)
+            color(1.0, 1.0, 1.0, 0.18)
         };
-        self.fill_rounded(target, 284.0, 54.0, 56.0, 32.0, 16.0, toggle_fill);
-        let knob_x = if on { 312.0 } else { 288.0 };
-        self.fill_oval(target, knob_x, 58.0, 24.0, 24.0, color(1.0, 1.0, 1.0, 1.0));
+        let (tg_x0, tg_y0, tg_x1, tg_y1) = WATER_TOGGLE_RECT;
+        let tg_w = tg_x1 - tg_x0;
+        let tg_h = tg_y1 - tg_y0;
+        self.fill_rounded(target, tg_x0, tg_y0, tg_w, tg_h, tg_h * 0.5, toggle_fill);
+        let knob_size = tg_h - 4.0;
+        let knob_x = if on { tg_x1 - 2.0 - knob_size } else { tg_x0 + 2.0 };
+        let knob_y = tg_y0 + 2.0;
+        self.fill_oval(target, knob_x, knob_y, knob_size, knob_size, color(1.0, 1.0, 1.0, 1.0));
         let bell_c = if on {
             color(SYSTEM_BLUE.0, SYSTEM_BLUE.1, SYSTEM_BLUE.2, 1.0)
         } else {
             color(0.0, 0.0, 0.0, 0.45)
         };
-        self.draw_icon_bell(target, knob_x + 12.0, 70.0, bell_c);
+        self.draw_icon_bell(target, knob_x + knob_size * 0.5, knob_y + knob_size * 0.5, bell_c);
 
-        // `"Today · {percent}%"` at `y = 100`:
+        // `"Today · {percent}%"` at `y = 86`:
         let pct = if water.goal_ml > 0 {
             ((water.ml as f64 / water.goal_ml as f64) * 100.0).round() as i64
         } else {
             0
         };
-        if let (Some(f_med), Some(f_semi)) = (self.fmt_14_med.as_ref(), self.fmt_14_semi.as_ref()) {
-            let mut lx = 48.0f32;
+        if let (Some(f_med), Some(f_bold)) = (self.fmt_13_med.as_ref(), self.fmt_13_bold.as_ref()) {
+            let mut lx = 54.0f32;
             let s1 = "Today · ";
-            self.draw_text_at(target, s1, Some(f_med), color(1.0, 1.0, 1.0, 0.60), lx, 98.0);
+            self.draw_text_at(target, s1, Some(f_med), color(1.0, 1.0, 1.0, 0.60), lx, 86.0);
             lx += self.measure_text(s1, f_med).0;
             let s2 = format!("{}%", pct);
             self.draw_text_at(
                 target,
                 &s2,
-                Some(f_semi),
+                Some(f_bold),
                 color(SYSTEM_BLUE.0, SYSTEM_BLUE.1, SYSTEM_BLUE.2, 1.0),
                 lx,
-                98.0,
+                86.0,
             );
-            lx += self.measure_text(&s2, f_semi).0;
+            lx += self.measure_text(&s2, f_bold).0;
             if pct >= 100 {
                 self.draw_text_at(
                     target,
                     " · Goal reached",
                     Some(f_med),
-                    color(1.0, 1.0, 1.0, 0.60),
+                    color(SYSTEM_GREEN.0, SYSTEM_GREEN.1, SYSTEM_GREEN.2, 0.90),
                     lx,
-                    98.0,
+                    86.0,
                 );
             }
         }
 
-        // Progress bar (`x: 48, y: 118, w: 292, h: 8`):
-        self.fill_rounded(target, 48.0, 118.0, 292.0, 8.0, 4.0, color(1.0, 1.0, 1.0, 0.15));
+        // Progress bar (`x: 54, y: 106, w: 186, h: 5`):
+        self.fill_rounded(target, 54.0, 106.0, 186.0, 5.0, 2.5, color(1.0, 1.0, 1.0, 0.12));
         let frac = if water.goal_ml > 0 {
             (water.ml as f32 / water.goal_ml as f32).clamp(0.0, 1.0)
         } else {
             0.0
         };
         if frac > 0.0 {
-            let fill_w = 292.0 * frac;
-            let r = 4.0f32.min(fill_w * 0.5);
+            let fill_w = 186.0 * frac;
+            let r = 2.5f32.min(fill_w * 0.5);
             self.fill_linear_gradient_rounded(
                 target,
-                48.0,
-                118.0,
+                54.0,
+                106.0,
                 fill_w,
-                8.0,
+                5.0,
                 r,
-                (48.0, 118.0),
-                (48.0 + fill_w, 118.0),
+                (54.0, 106.0),
+                (54.0 + fill_w, 106.0),
                 color(LIGHT_BLUE.0, LIGHT_BLUE.1, LIGHT_BLUE.2, 1.0),
                 color(SYSTEM_BLUE.0, SYSTEM_BLUE.1, SYSTEM_BLUE.2, 1.0),
             );
         }
 
         // Bottom pills: `Drink` (blue) + `Settings` (dark):
+        let (dr_x0, dr_y0, dr_x1, dr_y1) = WATER_DRINK_RECT;
+        let dr_w = dr_x1 - dr_x0;
+        let dr_h = dr_y1 - dr_y0;
         self.fill_rounded(
             target,
-            WATER_DRINK_RECT.0,
-            WATER_DRINK_RECT.1,
-            WATER_DRINK_RECT.2 - WATER_DRINK_RECT.0,
-            28.0,
-            14.0,
+            dr_x0,
+            dr_y0,
+            dr_w,
+            dr_h,
+            dr_h * 0.5,
             color(SYSTEM_BLUE.0, SYSTEM_BLUE.1, SYSTEM_BLUE.2, 1.0),
         );
-        self.draw_icon_drop(target, WATER_DRINK_RECT.0 + 19.0, 146.0, color(1.0, 1.0, 1.0, 1.0));
+        self.draw_icon_drop(target, dr_x0 + 16.0, dr_y0 + dr_h * 0.5, color(1.0, 1.0, 1.0, 1.0));
         self.draw_text_at(
             target,
             "Drink",
-            self.fmt_14_med.as_ref(),
+            self.fmt_13_med.as_ref(),
             color(1.0, 1.0, 1.0, 1.0),
-            WATER_DRINK_RECT.0 + 32.0,
-            136.5,
+            dr_x0 + 29.0,
+            dr_y0 + (dr_h - 14.0) * 0.5 - 1.0,
         );
 
+        let (st_x0, st_y0, st_x1, st_y1) = WATER_SETTINGS_RECT;
+        let st_w = st_x1 - st_x0;
+        let st_h = st_y1 - st_y0;
         self.fill_rounded(
             target,
-            WATER_SETTINGS_RECT.0,
-            WATER_SETTINGS_RECT.1,
-            WATER_SETTINGS_RECT.2 - WATER_SETTINGS_RECT.0,
-            28.0,
-            14.0,
+            st_x0,
+            st_y0,
+            st_w,
+            st_h,
+            st_h * 0.5,
             color(1.0, 1.0, 1.0, 0.10),
         );
         self.draw_icon_sliders(
             target,
-            WATER_SETTINGS_RECT.0 + 19.0,
-            146.0,
+            st_x0 + 17.0,
+            st_y0 + st_h * 0.5,
             color(1.0, 1.0, 1.0, 0.75),
         );
         self.draw_text_at(
             target,
             "Settings",
-            self.fmt_14_med.as_ref(),
+            self.fmt_13_med.as_ref(),
             color(1.0, 1.0, 1.0, 0.75),
-            WATER_SETTINGS_RECT.0 + 32.0,
-            136.5,
+            st_x0 + 31.0,
+            st_y0 + (st_h - 14.0) * 0.5 - 1.0,
         );
 
-        // Right column: 24-hour bar chart (`drawWaterChart`, `x: 390..592, y: 50..150`):
+        // Vertical divider between columns:
+        if let Some(b_div) = self.brush(target, color(1.0, 1.0, 1.0, 0.08)) {
+            unsafe {
+                target.DrawLine(
+                    D2D_POINT_2F { x: 252.0, y: 52.0 },
+                    D2D_POINT_2F { x: 252.0, y: 148.0 },
+                    &b_div,
+                    1.0,
+                    None,
+                );
+            }
+        }
+
+        // --- Right column: 24-hour bar chart (scaled down and padded) ---
         let max_hour = water.hourly.iter().copied().max().unwrap_or(0);
         let scale = max_hour.max(400);
-        let bars_left = 390.0f32;
-        let bars_w = 202.0f32;
-        let baseline = 150.0f32;
-        let chart_h = 100.0f32;
+        let bars_left = 314.0f32;
+        let bars_w = 168.0f32;
+        let baseline = 136.0f32;
+        let chart_h = 58.0f32;
         let slot_w = bars_w / 24.0;
-        let label_c = color(1.0, 1.0, 1.0, 0.50);
+        let label_c = color(1.0, 1.0, 1.0, 0.45);
 
         self.draw_right_aligned_text(
             target,
             &format!("{}", scale),
             self.fmt_10_med.as_ref(),
             label_c,
-            385.0,
-            baseline - chart_h - 6.0,
+            308.0,
+            baseline - chart_h - 5.0,
         );
         self.draw_right_aligned_text(
             target,
             &format!("{}", scale / 2),
             self.fmt_10_med.as_ref(),
             label_c,
-            385.0,
-            baseline - chart_h * 0.5 - 6.0,
+            308.0,
+            baseline - chart_h * 0.5 - 5.0,
         );
         self.draw_right_aligned_text(
             target,
             "0 ml",
             self.fmt_10_med.as_ref(),
             label_c,
-            385.0,
-            baseline - 6.0,
+            308.0,
+            baseline - 5.0,
         );
 
-        if let Some(b_grid) = self.brush(target, color(1.0, 1.0, 1.0, 0.15)) {
+        if let Some(b_grid) = self.brush(target, color(1.0, 1.0, 1.0, 0.12)) {
             for gy in [baseline - chart_h, baseline - chart_h * 0.5] {
                 unsafe {
                     target.DrawLine(
@@ -2505,7 +3815,7 @@ impl Renderer {
                 }
             }
         }
-        if let Some(b_axis) = self.brush(target, color(1.0, 1.0, 1.0, 0.25)) {
+        if let Some(b_axis) = self.brush(target, color(1.0, 1.0, 1.0, 0.22)) {
             unsafe {
                 target.DrawLine(
                     D2D_POINT_2F {
@@ -2528,10 +3838,10 @@ impl Renderer {
                 continue;
             }
             let slot_x = bars_left + (hour as f32) * slot_w;
-            let bar_w = 6.0f32;
+            let bar_w = 4.8f32;
             let bar_x = slot_x + (slot_w - bar_w) * 0.5;
-            let h = ((ml as f32 / scale as f32) * chart_h).clamp(3.0, chart_h);
-            let r = 3.0f32.min(h * 0.5);
+            let h = ((ml as f32 / scale as f32) * chart_h).clamp(2.5, chart_h);
+            let r = 2.0f32.min(h * 0.5);
             self.fill_linear_gradient_rounded(
                 target,
                 bar_x,
@@ -2551,7 +3861,7 @@ impl Renderer {
                 let s = format!("{:02}", hour);
                 let (w, _) = self.measure_text(&s, fmt10);
                 let cx = bars_left + ((hour as f32) + 0.5) * slot_w;
-                self.draw_text_at(target, &s, Some(fmt10), label_c, cx - w * 0.5, 154.0);
+                self.draw_text_at(target, &s, Some(fmt10), label_c, cx - w * 0.5, 142.0);
             }
         }
     }
@@ -2562,18 +3872,17 @@ impl Renderer {
         &self,
         target: &ID2D1RenderTarget,
         shelf: &crate::shelf::Shelf,
-        tray_page: usize,
-        playing: bool,
+        _playing: bool,
         tray_drag_pt: Option<(f32, f32)>,
+        lh: f32,
     ) {
-        self.draw_card_header(target, 640.0, playing);
         self.draw_text_at(
             target,
             "Tray",
             self.fmt_20_bold.as_ref(),
             color(1.0, 1.0, 1.0, 1.0),
-            28.0,
-            10.0,
+            54.0,
+            26.0,
         );
 
         if !shelf.files.is_empty() {
@@ -2600,101 +3909,82 @@ impl Renderer {
             }
         }
 
-        // Drop zone (`NSRect(x: 28, y: 44, width: 584, height: 212)`, `cornerRadius: 20`):
-        // Radial cursor-following light glow (`startRadius: 0, endRadius: 160`, center `white @ 0.25` -> `white @ 0.0`)
-        // clipped to the rounded drop zone:
+        // Drop zone within pill boundaries (x: 54, y: 62, width: 432, height: zone_h):
+        let zone_top = 62.0f32;
+        let zone_bottom = (lh - 24.0).max(zone_top);
+        let zone_h = (zone_bottom - zone_top).min(110.0);
+        let zone_r = 14.0f32.min(zone_h * 0.5);
+
+        // Radial cursor-following light glow
         if let Some((gx, gy)) = tray_drag_pt {
-            unsafe {
-                let stops = [
-                    D2D1_GRADIENT_STOP {
-                        position: 0.0,
-                        color: color(1.0, 1.0, 1.0, 0.25),
-                    },
-                    D2D1_GRADIENT_STOP {
-                        position: 1.0,
-                        color: color(1.0, 1.0, 1.0, 0.0),
-                    },
-                ];
-                if let Ok(stop_col) = target.CreateGradientStopCollection(
-                    &stops,
-                    D2D1_GAMMA_2_2,
-                    D2D1_EXTEND_MODE_CLAMP,
-                ) {
-                    let rprops = D2D1_RADIAL_GRADIENT_BRUSH_PROPERTIES {
-                        center: D2D_POINT_2F { x: gx, y: gy },
-                        gradientOriginOffset: D2D_POINT_2F { x: 0.0, y: 0.0 },
-                        radiusX: 160.0,
-                        radiusY: 160.0,
-                    };
-                    if let Ok(rbrush) = target.CreateRadialGradientBrush(&rprops, None, &stop_col) {
-                        target.FillRoundedRectangle(
-                            &D2D1_ROUNDED_RECT {
-                                rect: D2D_RECT_F {
-                                    left: 28.0,
-                                    top: 44.0,
-                                    right: 612.0,
-                                    bottom: 256.0,
+            if zone_h > 10.0 {
+                unsafe {
+                    let stops = [
+                        D2D1_GRADIENT_STOP {
+                            position: 0.0,
+                            color: color(1.0, 1.0, 1.0, 0.25),
+                        },
+                        D2D1_GRADIENT_STOP {
+                            position: 1.0,
+                            color: color(1.0, 1.0, 1.0, 0.0),
+                        },
+                    ];
+                    if let Ok(stop_col) = target.CreateGradientStopCollection(
+                        &stops,
+                        D2D1_GAMMA_2_2,
+                        D2D1_EXTEND_MODE_CLAMP,
+                    ) {
+                        let rprops = D2D1_RADIAL_GRADIENT_BRUSH_PROPERTIES {
+                            center: D2D_POINT_2F { x: gx, y: gy },
+                            gradientOriginOffset: D2D_POINT_2F { x: 0.0, y: 0.0 },
+                            radiusX: 160.0,
+                            radiusY: 160.0,
+                        };
+                        if let Ok(rbrush) = target.CreateRadialGradientBrush(&rprops, None, &stop_col) {
+                            target.FillRoundedRectangle(
+                                &D2D1_ROUNDED_RECT {
+                                    rect: D2D_RECT_F {
+                                        left: 54.0,
+                                        top: zone_top,
+                                        right: 486.0,
+                                        bottom: zone_top + zone_h,
+                                    },
+                                    radiusX: zone_r,
+                                    radiusY: zone_r,
                                 },
-                                radiusX: 20.0,
-                                radiusY: 20.0,
-                            },
-                            &rbrush,
-                        );
+                                &rbrush,
+                            );
+                        }
                     }
                 }
             }
         }
 
-        self.stroke_rounded(
-            target,
-            28.0,
-            44.0,
-            584.0,
-            212.0,
-            20.0,
-            1.5,
-            color(1.0, 1.0, 1.0, 0.50),
-            self.stroke_dashed.as_ref(),
-        );
-        self.draw_centered_text(
-            target,
-            "Release to add",
-            self.fmt_14_reg.as_ref(),
-            color(1.0, 1.0, 1.0, 0.70),
-            640.0,
-            143.0,
-        );
-
-        let page_count = shelf.page_count(TRAY_PAGE_SIZE);
-        let page = tray_page.min(page_count.saturating_sub(1));
-        if page_count > 1 {
-            let start_x = (640.0 - (page_count as f32) * 18.0) * 0.5;
-            for i in 0..page_count {
-                let slot_cx = start_x + (i as f32) * 18.0 + 9.0;
-                if i == page {
-                    self.fill_rounded(
-                        target,
-                        slot_cx - 6.0,
-                        265.0,
-                        12.0,
-                        6.0,
-                        3.0,
-                        color(1.0, 1.0, 1.0, 1.0),
-                    );
-                } else {
-                    self.fill_oval(
-                        target,
-                        slot_cx - 3.0,
-                        265.0,
-                        6.0,
-                        6.0,
-                        color(1.0, 1.0, 1.0, 0.40),
-                    );
-                }
+        if zone_h > 10.0 {
+            self.stroke_rounded(
+                target,
+                54.0,
+                zone_top,
+                432.0,
+                zone_h,
+                zone_r,
+                1.5,
+                color(1.0, 1.0, 1.0, 0.50),
+                self.stroke_dashed.as_ref(),
+            );
+            if zone_h > 50.0 {
+                self.draw_centered_text(
+                    target,
+                    "Release to add",
+                    self.fmt_14_reg.as_ref(),
+                    color(1.0, 1.0, 1.0, 0.70),
+                    540.0,
+                    zone_top + zone_h * 0.5 - 7.0,
+                );
             }
         }
 
-        // Cursor-following `"+ Copy"` pill badge (`drawDragCopyBadge`, `IslandView.swift` lines 2709-2736):
+        // Cursor-following "+ Copy" pill badge:
         if let Some((gx, gy)) = tray_drag_pt {
             if let Some(fmt) = self.fmt_13_bold.as_ref() {
                 let label = "+ Copy";
@@ -2702,8 +3992,8 @@ impl Renderer {
                 let pad_x = 8.0f32;
                 let badge_w = tw + pad_x * 2.0;
                 let badge_h = 22.0f32;
-                let bx = (gx + 14.0).clamp(8.0, 640.0 - badge_w - 8.0);
-                let by = (gy + 6.0).clamp(8.0, 280.0 - badge_h - 8.0);
+                let bx = (gx + 14.0).clamp(8.0, 520.0 - badge_w - 8.0);
+                let by = (gy + 6.0).clamp(8.0, 180.0 - badge_h - 8.0);
                 self.fill_rounded(
                     target,
                     bx,
@@ -2788,244 +4078,838 @@ impl Renderer {
         rb: &crate::removebg::RemoveBgState,
         shelf: &crate::shelf::Shelf,
         drop_highlight: bool,
+        mouse_pt: Option<(f32, f32)>,
+        ctx: &RenderContext,
     ) {
-        self.draw_card_header_no_waveform(target, 640.0);
-        if let Some(fmt) = self.fmt_13_med.as_ref() {
-            self.draw_text_at(
-                target,
-                "Remove BG",
-                Some(fmt),
-                color(1.0, 1.0, 1.0, 0.90),
-                20.0,
-                14.0,
-            );
-        }
-        // Model pill (Mac `Model:` pill, header row, ends at x600).
-        let (mx0, my0, mx1, my1) = RB_MODEL_RECT;
-        self.fill_rounded(
+        let in_rect = |r: (f32, f32, f32, f32)| {
+            mouse_pt.map(|(mx, my)| mx >= r.0 && mx <= r.2 && my >= r.1 && my <= r.3).unwrap_or(false)
+        };
+
+        self.draw_text_at(
             target,
-            mx0,
-            my0,
-            mx1 - mx0,
-            my1 - my0,
-            12.0,
-            color(1.0, 1.0, 1.0, 0.12),
+            "Remove BG",
+            self.fmt_20_bold.as_ref(),
+            color(1.0, 1.0, 1.0, 1.0),
+            54.0,
+            26.0,
         );
-        let model_label = format!("Model: {} \u{25BE}", rb.model.label());
-        if let Some(fmt) = self.fmt_13_med.as_ref() {
-            let (tw, th) = self.measure_text(&model_label, fmt);
+
+        let _tray_usable = !crate::removebg::tray_images(shelf).is_empty();
+
+        // Header controls (Model + Reset expanding oval buttons):
+        if rb.input_path.is_some() || rb.result_bytes.is_some() {
+            let rb_rects = compute_rb_button_rects(&ctx.rb_btn_hovers, rb.model.label().len());
+            let model_label = format!("Model: {}", rb.model.label());
+            self.draw_expanding_button(target, rb_rects[0], ctx.rb_btn_hovers[0], &model_label, false, &|cx, cy, c| {
+                self.draw_icon_sliders(target, cx, cy, c);
+            });
+            self.draw_expanding_button(target, rb_rects[1], ctx.rb_btn_hovers[1], "Reset", false, &|cx, cy, c| {
+                self.draw_icon_trash(target, cx, cy, c);
+            });
+        }
+
+        if rb.queue.len() > 1 {
+            let pq_hov = in_rect(RB_QUEUE_PREV_RECT);
+            self.draw_icon_button(target, RB_QUEUE_PREV_RECT, pq_hov, "Previous File", false, &|cx, cy, c| {
+                self.draw_icon_chevron(target, cx, cy, false, c);
+            });
+
+            let queue_str = format!("{}/{}", rb.queue_idx + 1, rb.queue.len());
+            if let Some(f12) = self.fmt_12_reg.as_ref() {
+                let (qw, qh) = self.measure_text(&queue_str, f12);
+                let mid_x = (RB_QUEUE_PREV_RECT.2 + RB_QUEUE_NEXT_RECT.0) * 0.5;
+                let mid_y = (RB_QUEUE_PREV_RECT.1 + RB_QUEUE_PREV_RECT.3) * 0.5;
+                self.draw_text_at(target, &queue_str, Some(f12), color(1.0, 1.0, 1.0, 0.90), mid_x - qw * 0.5, mid_y - qh * 0.5);
+            }
+
+            let nq_hov = in_rect(RB_QUEUE_NEXT_RECT);
+            self.draw_icon_button(target, RB_QUEUE_NEXT_RECT, nq_hov, "Next File", false, &|cx, cy, c| {
+                self.draw_icon_chevron(target, cx, cy, true, c);
+            });
+        }
+
+        if rb.input_path.is_none() {
+            // Initial dashed drop zone
+            let (dx0, dy0, dx1, dy1) = RB_DROP_ZONE_RECT;
+            let dw = dx1 - dx0;
+            let dh = dy1 - dy0;
+            let fill_a = if drop_highlight { 0.15 } else { 0.05 };
+            self.fill_rounded(target, dx0, dy0, dw, dh, 16.0, color(1.0, 1.0, 1.0, fill_a));
+            self.stroke_rounded(target, dx0, dy0, dw, dh, 16.0, 1.5, color(1.0, 1.0, 1.0, 0.40), self.stroke_dashed.as_ref());
+            let cx = dx0 + dw * 0.5;
+            let cy = dy0 + dh * 0.5;
+            self.draw_icon_doc(target, cx, cy - 20.0, 30.0, color(1.0, 1.0, 1.0, 0.60));
+            if let Some(f14) = self.fmt_14_reg.as_ref() {
+                let msg = "Drop image here or click to pick";
+                let (w, _) = self.measure_text(msg, f14);
+                self.draw_text_at(target, msg, Some(f14), color(1.0, 1.0, 1.0, 0.85), cx - w * 0.5, cy + 2.0);
+            }
+            if let Some(f12) = self.fmt_12_reg.as_ref() {
+                let sub = "PNG, JPG, WEBP, BMP";
+                let (w, _) = self.measure_text(sub, f12);
+                self.draw_text_at(target, sub, Some(f12), color(1.0, 1.0, 1.0, 0.45), cx - w * 0.5, cy + 22.0);
+            }
+            return;
+        }
+
+        // Left side: original image preview
+        let (lx0, ly0, lx1, ly1) = RB_LEFT_PREVIEW_RECT;
+        let lw = lx1 - lx0;
+        let lh_box = ly1 - ly0;
+        self.fill_rounded(target, lx0, ly0, lw, lh_box, 12.0, color(1.0, 1.0, 1.0, 0.06));
+        self.stroke_rounded(target, lx0, ly0, lw, lh_box, 12.0, 1.0, color(1.0, 1.0, 1.0, 0.20), None);
+        if let Some((_, pw, ph)) = &rb.input_preview {
+            if let Some(bmp) = &self.removebg_in_bitmap {
+                let rect = Self::fit_rect(lx0 + 6.0, ly0 + 6.0, lx1 - 6.0, ly1 - 6.0, *pw, *ph);
+                unsafe {
+                    target.DrawBitmap(bmp, Some(&rect), 1.0, D2D1_BITMAP_INTERPOLATION_MODE_LINEAR, None);
+                }
+            }
+        }
+
+        // Right side: result / process button
+        let (rx0, ry0, rx1, ry1) = RB_RIGHT_PREVIEW_RECT;
+        let rw = rx1 - rx0;
+        let rh_box = ry1 - ry0;
+        let rcx = rx0 + rw * 0.5;
+        let rcy = ry0 + rh_box * 0.5;
+
+        if let Some((_, pw, ph)) = &rb.result_preview {
+            // Cutout result ready
+            self.draw_checkerboard(target, rx0, ry0, rx1, ry1);
+            self.stroke_rounded(target, rx0, ry0, rw, rh_box, 12.0, 1.0, color(1.0, 1.0, 1.0, 0.30), None);
+            if let Some(bmp) = &self.removebg_bitmap {
+                let rect = Self::fit_rect(rx0 + 6.0, ry0 + 6.0, rx1 - 6.0, ry1 - 6.0, *pw, *ph);
+                unsafe {
+                    target.DrawBitmap(bmp, Some(&rect), 1.0, D2D1_BITMAP_INTERPOLATION_MODE_LINEAR, None);
+                }
+            }
+            let save_hov = in_rect(RB_SAVE_BTN_RECT);
+            self.draw_icon_button(target, RB_SAVE_BTN_RECT, save_hov, "Save Image", true, &|cx, cy, c| {
+                self.draw_icon_download(target, cx, cy, 18.0, c);
+            });
+        } else if rb.uploading {
+            self.fill_rounded(target, rx0, ry0, rw, rh_box, 12.0, color(1.0, 1.0, 1.0, 0.06));
+            self.stroke_rounded(target, rx0, ry0, rw, rh_box, 12.0, 1.0, color(1.0, 1.0, 1.0, 0.20), None);
+            if let Some(f14) = self.fmt_14_reg.as_ref() {
+                let msg = "Removing background...";
+                let (w, _) = self.measure_text(msg, f14);
+                self.draw_text_at(target, msg, Some(f14), color(1.0, 1.0, 1.0, 0.90), rcx - w * 0.5, rcy - 8.0);
+            }
+        } else if let Some(err) = &rb.error {
+            self.fill_rounded(target, rx0, ry0, rw, rh_box, 12.0, color(1.0, 0.2, 0.2, 0.10));
+            self.stroke_rounded(target, rx0, ry0, rw, rh_box, 12.0, 1.0, color(1.0, 0.3, 0.3, 0.40), None);
+            if let Some(f13) = self.fmt_13_reg.as_ref() {
+                let shown = self.truncate_text(err, rw - 24.0, f13);
+                let (w, _) = self.measure_text(&shown, f13);
+                self.draw_text_at(target, &shown, Some(f13), color(1.0, 0.45, 0.45, 1.0), rcx - w * 0.5, rcy - 8.0);
+            }
+        } else {
+            // File loaded, ready to process
+            self.fill_rounded(target, rx0, ry0, rw, rh_box, 12.0, color(1.0, 1.0, 1.0, 0.04));
+            self.stroke_rounded(target, rx0, ry0, rw, rh_box, 12.0, 1.0, color(1.0, 1.0, 1.0, 0.15), None);
+
+            let proc_hov = in_rect(RB_PROCESS_BTN_RECT);
+            self.draw_icon_button(target, RB_PROCESS_BTN_RECT, proc_hov, "Remove Background", true, &|cx, cy, c| {
+                self.draw_icon_bolt(target, cx, cy, 20.0, c);
+            });
+            if let Some(f12) = self.fmt_12_reg.as_ref() {
+                let hint = "Ready to process";
+                let (hw, _) = self.measure_text(hint, f12);
+                self.draw_text_at(target, hint, Some(f12), color(1.0, 1.0, 1.0, 0.50), rcx - hw * 0.5, rcy + 26.0);
+            }
+        }
+    }
+
+    fn draw_convert(
+        &self,
+        target: &ID2D1RenderTarget,
+        cv: &crate::convert::ConvertState,
+        _shelf: &crate::shelf::Shelf,
+        _playing: bool,
+        mouse_pt: Option<(f32, f32)>,
+        ctx: &RenderContext,
+    ) {
+        let in_rect = |r: (f32, f32, f32, f32)| {
+            mouse_pt.map(|(mx, my)| mx >= r.0 && mx <= r.2 && my >= r.1 && my <= r.3).unwrap_or(false)
+        };
+
+        if cv.view == crate::convert::ConvertView::AppGrid {
             self.draw_text_at(
                 target,
-                &model_label,
-                Some(fmt),
+                "Convert Tools",
+                self.fmt_20_bold.as_ref(),
                 color(1.0, 1.0, 1.0, 1.0),
-                mx0 + (mx1 - mx0 - tw) * 0.5,
-                my0 + (my1 - my0 - th) * 0.5,
+                46.0,
+                28.0,
             );
-        }
-        // Left panel: input.
-        let (lx0, ly0, lx1, ly1) = RB_LEFT_RECT;
-        let left_fill = if drop_highlight { 0.15 } else { 0.08 };
-        self.fill_rounded(
-            target,
-            lx0,
-            ly0,
-            lx1 - lx0,
-            ly1 - ly0,
-            12.0,
-            color(1.0, 1.0, 1.0, left_fill),
-        );
-        if rb.input_path.is_some() {
-            if let Some((_, pw, ph)) = &rb.input_preview {
-                if let Some(bmp) = &self.removebg_in_bitmap {
-                    let rect = Self::fit_rect(28.0, 56.0, 292.0, 164.0, *pw, *ph);
+
+            // 3 App Cards with user-provided Flame Character icons:
+            let apps = [
+                ("Photo", "Convert images", 0usize),
+                ("Merge PDF", "Combine docs", 1usize),
+                ("PDF to MD", "Extract text", 2usize),
+            ];
+
+            for (i, (title, subtitle, icon_idx)) in apps.iter().enumerate() {
+                let card_x = CONVERT_APP_START_X + (i as f32) * CONVERT_APP_PITCH;
+                let card_y = CONVERT_APP_Y;
+                let card_w = CONVERT_APP_CARD_W;
+                let card_h = CONVERT_APP_CARD_H;
+
+                let is_hovered = mouse_pt.map(|(mx, my)| mx >= card_x && mx <= card_x + card_w && my >= card_y && my <= card_y + card_h).unwrap_or(false);
+                let bg_alpha = if is_hovered { 0.14 } else { 0.07 };
+                let stroke_alpha = if is_hovered { 0.35 } else { 0.18 };
+
+                self.fill_rounded(target, card_x, card_y, card_w, card_h, 16.0, color(1.0, 1.0, 1.0, bg_alpha));
+                self.stroke_rounded(target, card_x, card_y, card_w, card_h, 16.0, 1.0, color(1.0, 1.0, 1.0, stroke_alpha), None);
+
+                let icon_size = CONVERT_APP_ICON_SIZE;
+                let icon_x = card_x + (card_w - icon_size) * 0.5;
+                let icon_y = card_y + 8.0;
+                if let Some(bmp) = &self.convert_app_bitmaps[*icon_idx] {
+                    let dst = D2D_RECT_F {
+                        left: icon_x,
+                        top: icon_y,
+                        right: icon_x + icon_size,
+                        bottom: icon_y + icon_size,
+                    };
                     unsafe {
                         target.DrawBitmap(
                             bmp,
-                            Some(&rect),
+                            Some(&dst),
                             1.0,
                             D2D1_BITMAP_INTERPOLATION_MODE_LINEAR,
                             None,
                         );
                     }
                 }
+
+                if let Some(f13b) = self.fmt_13_bold.as_ref() {
+                    let (tw, _) = self.measure_text(title, f13b);
+                    self.draw_text_at(target, title, Some(f13b), color(1.0, 1.0, 1.0, 1.0), card_x + (card_w - tw) * 0.5, icon_y + icon_size + 4.0);
+                }
+                if let Some(f11) = self.fmt_11_reg.as_ref() {
+                    let (sw, _) = self.measure_text(subtitle, f11);
+                    self.draw_text_at(target, subtitle, Some(f11), color(1.0, 1.0, 1.0, 0.55), card_x + (card_w - sw) * 0.5, icon_y + icon_size + 22.0);
+                }
             }
-            if let Some(fmt) = self.fmt_13_reg.as_ref() {
-                let shown = self.truncate_text(&rb.input_name, 260.0, fmt);
-                self.draw_text_at(
-                    target,
-                    &shown,
-                    Some(fmt),
-                    color(1.0, 1.0, 1.0, 1.0),
-                    28.0,
-                    170.0,
-                );
-                let size_str = if rb.input_size >= 1024 * 1024 {
-                    format!("{:.1} MB", rb.input_size as f32 / 1048576.0)
-                } else if rb.input_size >= 1024 {
-                    format!("{:.0} KB", rb.input_size as f32 / 1024.0)
-                } else {
-                    format!("{} B", rb.input_size)
-                };
-                self.draw_text_at(
-                    target,
-                    &size_str,
-                    Some(fmt),
-                    color(1.0, 1.0, 1.0, 0.60),
-                    28.0,
-                    188.0,
-                );
-            }
-        } else {
-            if let Some(fmt) = self.fmt_13_med.as_ref() {
-                let msg = "Drop an image here";
-                let (tw, _) = self.measure_text(msg, fmt);
-                self.draw_text_at(
-                    target,
-                    msg,
-                    Some(fmt),
-                    color(1.0, 1.0, 1.0, 0.90),
-                    160.0 - tw * 0.5,
-                    108.0,
-                );
-            }
-            if let Some(fmt) = self.fmt_13_reg.as_ref() {
-                let msg = "or click to choose a file";
-                let (tw, _) = self.measure_text(msg, fmt);
-                self.draw_text_at(
-                    target,
-                    msg,
-                    Some(fmt),
-                    color(1.0, 1.0, 1.0, 0.60),
-                    160.0 - tw * 0.5,
-                    130.0,
-                );
-            }
+            return;
         }
-        // From Tray pill (only when the tray holds images).
-        if !crate::removebg::tray_images(shelf).is_empty() {
-            let (fx0, fy0, fx1, fy1) = RB_FROM_TRAY_RECT;
-            self.fill_rounded(
-                target,
-                fx0,
-                fy0,
-                fx1 - fx0,
-                fy1 - fy0,
-                12.0,
-                color(1.0, 1.0, 1.0, 0.12),
-            );
-            if let Some(fmt) = self.fmt_13_med.as_ref() {
-                let label = "From Tray \u{25BE}";
-                let (tw, th) = self.measure_text(label, fmt);
-                self.draw_text_at(
-                    target,
-                    label,
-                    Some(fmt),
-                    color(1.0, 1.0, 1.0, 1.0),
-                    fx0 + (fx1 - fx0 - tw) * 0.5,
-                    fy0 + (fy1 - fy0 - th) * 0.5,
-                );
-            }
+
+        // Tool Detail View:
+        let tool = cv.active_tool;
+        if tool == crate::convert::ConvertTool::MergePdf {
+            self.draw_merge_pdf_view(target, cv, mouse_pt, ctx);
+            return;
         }
-        // Right panel: result.
-        let (rx0, ry0, rx1, ry1) = RB_RIGHT_RECT;
-        self.fill_rounded(
-            target,
-            rx0,
-            ry0,
-            rx1 - rx0,
-            ry1 - ry0,
-            12.0,
-            color(1.0, 1.0, 1.0, 0.08),
+        if tool == crate::convert::ConvertTool::PdfToMd {
+            self.draw_pdf_to_md_view(target, cv, mouse_pt, ctx);
+            return;
+        }
+        let st = cv.tool_state(tool);
+
+        let cv_rects = compute_cv_button_rects(
+            &ctx.cv_btn_hovers,
+            cv.photo_format.display_name().len(),
+            tool == crate::convert::ConvertTool::Photo,
         );
-        if let Some((_, pw, ph)) = &rb.result_preview {
-            self.draw_checkerboard(target, 328.0, 56.0, 592.0, 200.0);
-            if let Some(bmp) = &self.removebg_bitmap {
-                let rect = Self::fit_rect(328.0, 56.0, 592.0, 200.0, *pw, *ph);
-                unsafe {
-                    target.DrawBitmap(
-                        bmp,
-                        Some(&rect),
-                        1.0,
-                        D2D1_BITMAP_INTERPOLATION_MODE_LINEAR,
-                        None,
-                    );
-                }
+
+        // Button 0: Back
+        self.draw_expanding_button(target, cv_rects[0], ctx.cv_btn_hovers[0], "Back", false, &|cx, cy, c| {
+            self.draw_icon_chevron(target, cx, cy, false, c);
+        });
+
+        let title_name = match tool {
+            crate::convert::ConvertTool::Photo => "Photo Converter",
+            crate::convert::ConvertTool::MergePdf => "Merge PDFs",
+            crate::convert::ConvertTool::PdfToMd => "PDF to Markdown",
+            _ => "Converter",
+        };
+        let title_x = cv_rects[0].2 + 14.0;
+        self.draw_text_at(target, title_name, self.fmt_18_med.as_ref(), color(1.0, 1.0, 1.0, 1.0), title_x, 28.0);
+
+        // Queue switcher if queue has multiple files:
+        if st.queue.len() > 1 {
+            let pq_hov = in_rect(CONVERT_QUEUE_PREV_RECT);
+            self.draw_icon_button(target, CONVERT_QUEUE_PREV_RECT, pq_hov, "Previous File", false, &|cx, cy, c| {
+                self.draw_icon_chevron(target, cx, cy, false, c);
+            });
+
+            let queue_str = format!("{}/{}", st.queue_idx + 1, st.queue.len());
+            if let Some(f12) = self.fmt_12_reg.as_ref() {
+                let (qw, qh) = self.measure_text(&queue_str, f12);
+                let mid_x = (CONVERT_QUEUE_PREV_RECT.2 + CONVERT_QUEUE_NEXT_RECT.0) * 0.5;
+                let mid_y = (CONVERT_QUEUE_PREV_RECT.1 + CONVERT_QUEUE_PREV_RECT.3) * 0.5;
+                self.draw_text_at(target, &queue_str, Some(f12), color(1.0, 1.0, 1.0, 0.90), mid_x - qw * 0.5, mid_y - qh * 0.5);
             }
-        } else if rb.uploading {
-            if let Some(fmt) = self.fmt_13_med.as_ref() {
-                let msg = "Uploading\u{2026}";
-                let (tw, _) = self.measure_text(msg, fmt);
-                self.draw_text_at(
-                    target,
-                    msg,
-                    Some(fmt),
-                    color(1.0, 1.0, 1.0, 0.90),
-                    460.0 - tw * 0.5,
-                    120.0,
-                );
-            }
-        } else if let Some(err) = &rb.error {
-            if let Some(fmt) = self.fmt_13_reg.as_ref() {
-                let shown = self.truncate_text(err, 260.0, fmt);
-                self.draw_text_at(
-                    target,
-                    &shown,
-                    Some(fmt),
-                    color(1.0, 0.45, 0.45, 1.0),
-                    328.0,
-                    120.0,
-                );
-            }
-        } else if let Some(fmt) = self.fmt_13_reg.as_ref() {
-            let msg = "Result appears here";
-            let (tw, _) = self.measure_text(msg, fmt);
-            self.draw_text_at(
-                target,
-                msg,
-                Some(fmt),
-                color(1.0, 1.0, 1.0, 0.60),
-                460.0 - tw * 0.5,
-                120.0,
-            );
+
+            let nq_hov = in_rect(CONVERT_QUEUE_NEXT_RECT);
+            self.draw_icon_button(target, CONVERT_QUEUE_NEXT_RECT, nq_hov, "Next File", false, &|cx, cy, c| {
+                self.draw_icon_chevron(target, cx, cy, true, c);
+            });
         }
-        // Save button + notice (only with a result).
-        if rb.result_bytes.is_some() {
-            let (sx0, sy0, sx1, sy1) = RB_SAVE_RECT;
-            self.fill_rounded(
-                target,
-                sx0,
-                sy0,
-                sx1 - sx0,
-                sy1 - sy0,
-                12.0,
-                color(1.0, 1.0, 1.0, 0.12),
-            );
-            if let Some(fmt) = self.fmt_13_med.as_ref() {
-                let label = "Save";
-                let (tw, th) = self.measure_text(label, fmt);
-                self.draw_text_at(
-                    target,
-                    label,
-                    Some(fmt),
-                    color(1.0, 1.0, 1.0, 1.0),
-                    sx0 + (sx1 - sx0 - tw) * 0.5,
-                    sy0 + (sy1 - sy0 - th) * 0.5,
-                );
-            }
-            if !rb.notice.is_empty() {
-                if let Some(fmt) = self.fmt_13_reg.as_ref() {
-                    let shown = self.truncate_text(&rb.notice, 180.0, fmt);
-                    self.draw_text_at(
-                        target,
-                        &shown,
-                        Some(fmt),
-                        color(1.0, 1.0, 1.0, 0.80),
-                        410.0,
-                        226.0,
-                    );
+
+        if tool == crate::convert::ConvertTool::Photo {
+            let fmt_label = format!("Format: {}", cv.photo_format.display_name());
+            self.draw_expanding_button(target, cv_rects[1], ctx.cv_btn_hovers[1], &fmt_label, false, &|cx, cy, c| {
+                self.draw_icon_sliders(target, cx, cy, c);
+            });
+        }
+
+        self.draw_expanding_button(target, cv_rects[2], ctx.cv_btn_hovers[2], "Reset", false, &|cx, cy, c| {
+            self.draw_icon_trash(target, cx, cy, c);
+        });
+
+        let has_content = cv.has_active_content();
+
+        // Top: Dashed Drop Zone
+        let (zx0, zy0, zx1, zy1) = if has_content {
+            CONVERT_DROP_ZONE_RECT
+        } else {
+            (54.0, 58.0, 486.0, 154.0)
+        };
+        let zw = zx1 - zx0;
+        let zh = zy1 - zy0;
+        let zcx = zx0 + zw * 0.5;
+        let zcy = zy0 + zh * 0.5;
+        self.fill_rounded(target, zx0, zy0, zw, zh, 14.0, color(1.0, 1.0, 1.0, 0.04));
+        self.stroke_rounded(target, zx0, zy0, zw, zh, 14.0, 1.5, color(1.0, 1.0, 1.0, 0.35), self.stroke_dashed.as_ref());
+
+        let drop_msg = match tool {
+            crate::convert::ConvertTool::Photo => "Drop image here or click to pick",
+            crate::convert::ConvertTool::MergePdf => "Drop PDFs here or click to pick",
+            crate::convert::ConvertTool::PdfToMd => "Drop PDF here or click to pick",
+            _ => "Drop files here",
+        };
+        if let Some(f13) = self.fmt_13_med.as_ref() {
+            let (w, _) = self.measure_text(drop_msg, f13);
+            self.draw_text_at(target, drop_msg, Some(f13), color(1.0, 1.0, 1.0, 0.85), zcx - w * 0.5, zcy - 8.0);
+        }
+
+        // Bottom: List View / Queue + Action Buttons (ONLY when file is present)
+        if has_content {
+            let (lx0, ly0, lx1, ly1) = CONVERT_LIST_VIEW_RECT;
+            let lw_box = lx1 - lx0;
+            let lh_box = ly1 - ly0;
+            self.fill_rounded(target, lx0, ly0, lw_box, lh_box, 12.0, color(1.0, 1.0, 1.0, 0.06));
+            self.stroke_rounded(target, lx0, ly0, lw_box, lh_box, 12.0, 1.0, color(1.0, 1.0, 1.0, 0.15), None);
+
+            if let Some(p) = &st.input_path {
+                let p_name = std::path::Path::new(p).file_name().and_then(|n| n.to_str()).unwrap_or(p);
+                if let Some(f13) = self.fmt_13_bold.as_ref() {
+                    let shown = self.truncate_text(p_name, lw_box - 70.0, f13);
+                    self.draw_text_at(target, &shown, Some(f13), color(1.0, 1.0, 1.0, 1.0), lx0 + 12.0, ly0 + 8.0);
+                }
+                if st.status_is_error {
+                    if let Some(f12) = self.fmt_12_reg.as_ref() {
+                        self.draw_text_at(target, &st.status_text, Some(f12), color(1.0, 0.35, 0.35, 1.0), lx0 + 12.0, ly0 + 26.0);
+                    }
+                } else if st.uploading {
+                    if let Some(f12) = self.fmt_12_reg.as_ref() {
+                        self.draw_text_at(target, "Converting...", Some(f12), color(1.0, 1.0, 1.0, 0.70), lx0 + 12.0, ly0 + 26.0);
+                    }
+                } else if st.result_bytes.is_some() {
+                    if let Some(f12) = self.fmt_12_reg.as_ref() {
+                        self.draw_text_at(target, "Ready! Click Save icon to export.", Some(f12), color(0.4, 1.0, 0.5, 1.0), lx0 + 12.0, ly0 + 26.0);
+                    }
+                } else {
+                    if let Some(f12) = self.fmt_12_reg.as_ref() {
+                        self.draw_text_at(target, "Ready to convert. Click Process icon.", Some(f12), color(1.0, 1.0, 1.0, 0.60), lx0 + 12.0, ly0 + 26.0);
+                    }
+                }
+            } else if !cv.merge_files.is_empty() {
+                let count_str = format!("{} PDFs queued for merge", cv.merge_files.len());
+                if let Some(f13) = self.fmt_13_bold.as_ref() {
+                    self.draw_text_at(target, &count_str, Some(f13), color(1.0, 1.0, 1.0, 1.0), lx0 + 12.0, ly0 + 8.0);
+                }
+                if let Some(f12) = self.fmt_12_reg.as_ref() {
+                    self.draw_text_at(target, "Ready to merge. Click Process icon.", Some(f12), color(1.0, 1.0, 1.0, 0.60), lx0 + 12.0, ly0 + 26.0);
                 }
             }
+
+            // Action Icon Buttons (Process / Save):
+            if (st.input_path.is_some() || !cv.merge_files.is_empty()) && !st.uploading && st.result_bytes.is_none() {
+                let proc_hov = in_rect(CONVERT_PROCESS_BTN_RECT);
+                self.draw_icon_button(target, CONVERT_PROCESS_BTN_RECT, proc_hov, "Convert File", true, &|cx, cy, c| {
+                    self.draw_icon_bolt(target, cx, cy, 18.0, c);
+                });
+            }
+
+            if st.result_bytes.is_some() {
+                let save_hov = in_rect(CONVERT_SAVE_BTN_RECT);
+                self.draw_icon_button(target, CONVERT_SAVE_BTN_RECT, save_hov, "Save Output", true, &|cx, cy, c| {
+                    self.draw_icon_download(target, cx, cy, 18.0, c);
+                });
+            }
+        }
+    }
+
+    fn draw_merge_pdf_view(
+        &self,
+        target: &ID2D1RenderTarget,
+        cv: &crate::convert::ConvertState,
+        mouse_pt: Option<(f32, f32)>,
+        ctx: &RenderContext,
+    ) {
+        let in_rect = |r: (f32, f32, f32, f32)| {
+            mouse_pt.map(|(mx, my)| mx >= r.0 && mx <= r.2 && my >= r.1 && my <= r.3).unwrap_or(false)
+        };
+
+        let cv_rects = compute_cv_button_rects(&ctx.cv_btn_hovers, 0, false);
+
+        // Button 0: Back
+        self.draw_expanding_button(target, cv_rects[0], ctx.cv_btn_hovers[0], "Back", false, &|cx, cy, c| {
+            self.draw_icon_chevron(target, cx, cy, false, c);
+        });
+
+        let title_x = cv_rects[0].2 + 14.0;
+        self.draw_text_at(target, "Merge PDFs", self.fmt_18_med.as_ref(), color(1.0, 1.0, 1.0, 1.0), title_x, 28.0);
+
+        // "+ Add PDFs" button in header
+        let add_hov = in_rect(MERGE_PDF_ADD_BTN);
+        let add_alpha = if add_hov { 0.20 } else { 0.10 };
+        self.fill_rounded(target, MERGE_PDF_ADD_BTN.0, MERGE_PDF_ADD_BTN.1, MERGE_PDF_ADD_BTN.2 - MERGE_PDF_ADD_BTN.0, MERGE_PDF_ADD_BTN.3 - MERGE_PDF_ADD_BTN.1, 14.0, color(1.0, 1.0, 1.0, add_alpha));
+        self.stroke_rounded(target, MERGE_PDF_ADD_BTN.0, MERGE_PDF_ADD_BTN.1, MERGE_PDF_ADD_BTN.2 - MERGE_PDF_ADD_BTN.0, MERGE_PDF_ADD_BTN.3 - MERGE_PDF_ADD_BTN.1, 14.0, 1.0, color(1.0, 1.0, 1.0, 0.25), None);
+        if let Some(f12) = self.fmt_13_med.as_ref() {
+            let (aw, ah) = self.measure_text("+ Add PDFs", f12);
+            let mid_x = (MERGE_PDF_ADD_BTN.0 + MERGE_PDF_ADD_BTN.2) * 0.5;
+            let mid_y = (MERGE_PDF_ADD_BTN.1 + MERGE_PDF_ADD_BTN.3) * 0.5;
+            self.draw_text_at(target, "+ Add PDFs", Some(f12), color(1.0, 1.0, 1.0, 0.95), mid_x - aw * 0.5, mid_y - ah * 0.5);
+        }
+
+        // Reset / Clear button
+        self.draw_expanding_button(target, cv_rects[2], ctx.cv_btn_hovers[2], "Clear", false, &|cx, cy, c| {
+            self.draw_icon_trash(target, cx, cy, c);
+        });
+
+        let st = cv.tool_state(crate::convert::ConvertTool::MergePdf);
+
+        if cv.merge_files.is_empty() {
+            // Empty drop zone
+            let (zx0, zy0, zx1, zy1) = (54.0, 58.0, 486.0, 154.0);
+            let zw = zx1 - zx0;
+            let zh = zy1 - zy0;
+            self.fill_rounded(target, zx0, zy0, zw, zh, 14.0, color(1.0, 1.0, 1.0, 0.04));
+            self.stroke_rounded(target, zx0, zy0, zw, zh, 14.0, 1.5, color(1.0, 1.0, 1.0, 0.35), self.stroke_dashed.as_ref());
+            let cy = zy0 + zh * 0.5;
+            self.draw_icon_doc(target, zx0 + zw * 0.5, cy - 10.0, 28.0, color(1.0, 0.35, 0.35, 0.85));
+            self.draw_centered_text(target, "Drop PDF files here, or click to pick", self.fmt_13_med.as_ref(), color(1.0, 1.0, 1.0, 0.85), 540.0, cy + 12.0);
+            return;
+        }
+
+        // Ordered list of PDF files (thumbnail on left, name in middle, three-line icon on right):
+        let list_top = 58.0f32;
+        let row_h = 24.0f32;
+        let row_spacing = 3.0f32;
+        let visible_count = cv.merge_files.len().min(3);
+
+        for (i, (name, _bytes)) in cv.merge_files.iter().take(visible_count).enumerate() {
+            let ry = list_top + (i as f32) * (row_h + row_spacing);
+            let rx = 54.0f32;
+            let rw = 432.0f32;
+
+            let row_hov = mouse_pt.map(|(mx, my)| mx >= rx && mx <= rx + rw && my >= ry && my <= ry + row_h).unwrap_or(false);
+            let bg_alpha = if row_hov { 0.12 } else { 0.06 };
+            self.fill_rounded(target, rx, ry, rw, row_h, 8.0, color(1.0, 1.0, 1.0, bg_alpha));
+            self.stroke_rounded(target, rx, ry, rw, row_h, 8.0, 1.0, color(1.0, 1.0, 1.0, 0.15), None);
+
+            // 1. Thumbnail on left (red PDF badge):
+            let badge_x = rx + 8.0;
+            let badge_y = ry + 3.0;
+            let badge_w = 26.0;
+            let badge_h = 18.0;
+            self.fill_rounded(target, badge_x, badge_y, badge_w, badge_h, 4.0, color(0.92, 0.25, 0.25, 0.85));
+            if let Some(f9) = self.fmt_10_med.as_ref() {
+                let (tw, th) = self.measure_text("PDF", f9);
+                self.draw_text_at(target, "PDF", Some(f9), color(1.0, 1.0, 1.0, 1.0), badge_x + (badge_w - tw) * 0.5, badge_y + (badge_h - th) * 0.5);
+            }
+
+            // 2. Name in middle:
+            let name_x = badge_x + badge_w + 10.0;
+            if let Some(f12) = self.fmt_12_reg.as_ref() {
+                let avail_w = rw - 90.0;
+                let display_name = self.truncate_text(name, avail_w, f12);
+                self.draw_text_at(target, &display_name, Some(f12), color(1.0, 1.0, 1.0, 0.95), name_x, ry + 4.0);
+            }
+
+            // 3. Delete '×' button:
+            let del_x = rx + rw - 36.0;
+            let del_hov = mouse_pt.map(|(mx, my)| mx >= del_x - 4.0 && mx <= del_x + 12.0 && my >= ry && my <= ry + row_h).unwrap_or(false);
+            let del_c = if del_hov { color(1.0, 0.35, 0.35, 1.0) } else { color(1.0, 1.0, 1.0, 0.40) };
+            if let Some(f13) = self.fmt_13_bold.as_ref() {
+                self.draw_text_at(target, "×", Some(f13), del_c, del_x, ry + 2.0);
+            }
+
+            // 4. Three-line icon (☰) on the right:
+            let bar_x = rx + rw - 14.0;
+            let bar_cy = ry + row_h * 0.5;
+            self.draw_icon_lines_three(target, bar_x, bar_cy, 12.0, color(1.0, 1.0, 1.0, 0.55));
+        }
+
+        if cv.merge_files.len() > 3 {
+            let more_text = format!("+ {} more files in queue", cv.merge_files.len() - 3);
+            if let Some(f11) = self.fmt_11_reg.as_ref() {
+                self.draw_text_at(target, &more_text, Some(f11), color(1.0, 1.0, 1.0, 0.55), 58.0, 142.0);
+            }
+        }
+
+        // Action button area (Merge / Saving / Result):
+        if st.uploading {
+            let msg = "Merging PDFs...";
+            if let Some(f13) = self.fmt_13_bold.as_ref() {
+                self.draw_text_at(target, msg, Some(f13), color(0.3, 0.8, 1.0, 1.0), 360.0, 144.0);
+            }
+        } else if st.result_bytes.is_some() {
+            let r_btn = MERGE_PDF_RUN_BTN;
+            let r_hov = in_rect(r_btn);
+            let bg_c = if r_hov { color(0.25, 0.75, 0.45, 0.95) } else { color(0.20, 0.65, 0.38, 0.85) };
+            self.fill_rounded(target, r_btn.0, r_btn.1, r_btn.2 - r_btn.0, r_btn.3 - r_btn.1, 14.0, bg_c);
+            if let Some(f12) = self.fmt_13_bold.as_ref() {
+                let (tw, th) = self.measure_text("✓ Save Merged PDF", f12);
+                let cx = (r_btn.0 + r_btn.2) * 0.5;
+                let cy = (r_btn.1 + r_btn.3) * 0.5;
+                self.draw_text_at(target, "✓ Save Merged PDF", Some(f12), color(1.0, 1.0, 1.0, 1.0), cx - tw * 0.5, cy - th * 0.5);
+            }
+        } else if cv.merge_files.len() >= 2 {
+            let r_btn = MERGE_PDF_RUN_BTN;
+            let r_hov = in_rect(r_btn);
+            let bg_c = if r_hov { color(0.18, 0.55, 0.95, 0.95) } else { color(0.12, 0.45, 0.85, 0.85) };
+            self.fill_rounded(target, r_btn.0, r_btn.1, r_btn.2 - r_btn.0, r_btn.3 - r_btn.1, 14.0, bg_c);
+            self.stroke_rounded(target, r_btn.0, r_btn.1, r_btn.2 - r_btn.0, r_btn.3 - r_btn.1, 14.0, 1.0, color(1.0, 1.0, 1.0, 0.35), None);
+            let label = format!("Merge {} PDFs", cv.merge_files.len());
+            if let Some(f12) = self.fmt_13_bold.as_ref() {
+                let (tw, th) = self.measure_text(&label, f12);
+                let cx = (r_btn.0 + r_btn.2) * 0.5;
+                let cy = (r_btn.1 + r_btn.3) * 0.5;
+                self.draw_text_at(target, &label, Some(f12), color(1.0, 1.0, 1.0, 1.0), cx - tw * 0.5, cy - th * 0.5);
+            }
+        } else if cv.merge_files.len() == 1 {
+            if let Some(f12) = self.fmt_12_reg.as_ref() {
+                self.draw_text_at(target, "Add at least 1 more PDF to merge", Some(f12), color(1.0, 1.0, 1.0, 0.65), 58.0, 144.0);
+            }
+        }
+    }
+
+    fn draw_pdf_to_md_view(
+        &self,
+        target: &ID2D1RenderTarget,
+        cv: &crate::convert::ConvertState,
+        mouse_pt: Option<(f32, f32)>,
+        ctx: &RenderContext,
+    ) {
+        let in_rect = |r: (f32, f32, f32, f32)| {
+            mouse_pt.map(|(mx, my)| mx >= r.0 && mx <= r.2 && my >= r.1 && my <= r.3).unwrap_or(false)
+        };
+
+        let cv_rects = compute_cv_button_rects(&ctx.cv_btn_hovers, 0, false);
+
+        // Button 0: Back
+        self.draw_expanding_button(target, cv_rects[0], ctx.cv_btn_hovers[0], "Back", false, &|cx, cy, c| {
+            self.draw_icon_chevron(target, cx, cy, false, c);
+        });
+
+        let title_x = cv_rects[0].2 + 14.0;
+        self.draw_text_at(target, "PDF to Markdown", self.fmt_18_med.as_ref(), color(1.0, 1.0, 1.0, 1.0), title_x, 28.0);
+
+        // Reset / Clear button
+        self.draw_expanding_button(target, cv_rects[2], ctx.cv_btn_hovers[2], "Clear", false, &|cx, cy, c| {
+            self.draw_icon_trash(target, cx, cy, c);
+        });
+
+        let st = cv.tool_state(crate::convert::ConvertTool::PdfToMd);
+
+        // Right Side: Markdown Portal Target
+        let (px0, py0, px1, py1) = PDF_MD_PORTAL_RECT;
+        let pw = px1 - px0;
+        let ph = py1 - py0;
+        let pcx = px0 + pw * 0.5;
+        let pcy = py0 + ph * 0.5;
+
+        let is_dragging = ctx.pdf_md_drag.is_some();
+        let drag_near = mouse_pt.map(|(mx, my)| mx >= px0 - 40.0 && mx <= px1 + 20.0 && my >= py0 - 20.0 && my <= py1 + 20.0).unwrap_or(false);
+        let portal_hov = in_rect(PDF_MD_PORTAL_RECT);
+        let target_glow = (is_dragging && drag_near) || (!is_dragging && portal_hov);
+
+        let portal_bg = if target_glow {
+            color(0.15, 0.45, 0.85, 0.40)
+        } else {
+            color(1.0, 1.0, 1.0, 0.05)
+        };
+        let portal_stroke = if target_glow {
+            color(0.35, 0.80, 1.0, 0.90)
+        } else {
+            color(1.0, 1.0, 1.0, 0.20)
+        };
+        let stroke_width = if target_glow { 2.0 } else { 1.0 };
+
+        self.fill_rounded(target, px0, py0, pw, ph, 16.0, portal_bg);
+        self.stroke_rounded(target, px0, py0, pw, ph, 16.0, stroke_width, portal_stroke, None);
+
+        // Markdown Emblem inside Target [M ↓]:
+        let emblem_c = if target_glow { color(0.35, 0.85, 1.0, 1.0) } else { color(1.0, 1.0, 1.0, 0.85) };
+        self.draw_icon_markdown(target, pcx, pcy - 12.0, 36.0, emblem_c);
+
+        let portal_sub = if target_glow {
+            "RELEASE TO CONVERT"
+        } else if is_dragging {
+            "DROP HERE"
+        } else if st.result_bytes.is_some() {
+            "DONE! CLICK SAVE"
+        } else {
+            "SLIDE PDF HERE"
+        };
+        if let Some(f10b) = self.fmt_10_med.as_ref() {
+            let (tw, _) = self.measure_text(portal_sub, f10b);
+            self.draw_text_at(target, portal_sub, Some(f10b), emblem_c, pcx - tw * 0.5, pcy + 22.0);
+        }
+
+        // Left Side: Character Select Carousel
+        let queue = &st.queue;
+        let selected_idx = st.queue_idx;
+
+        if queue.is_empty() {
+            // Slot 0: Add PDF slot
+            let card_x = PDF_MD_CARD_START_X;
+            let card_y = PDF_MD_CARD_Y;
+            let card_w = PDF_MD_CARD_W;
+            let card_h = PDF_MD_CARD_H;
+
+            let card_hov = mouse_pt.map(|(mx, my)| mx >= card_x && mx <= card_x + card_w && my >= card_y && my <= card_y + card_h).unwrap_or(false);
+            let bg_a = if card_hov { 0.10 } else { 0.05 };
+            self.fill_rounded(target, card_x, card_y, card_w, card_h, 14.0, color(1.0, 1.0, 1.0, bg_a));
+            self.stroke_rounded(target, card_x, card_y, card_w, card_h, 14.0, 1.5, color(1.0, 1.0, 1.0, 0.35), self.stroke_dashed.as_ref());
+
+            let ccx = card_x + card_w * 0.5;
+            let ccy = card_y + card_h * 0.5;
+            self.draw_icon_doc(target, ccx, ccy - 10.0, 24.0, color(1.0, 1.0, 1.0, 0.60));
+            if let Some(f11b) = self.fmt_13_bold.as_ref() {
+                let (tw, _) = self.measure_text("+ Add PDF", f11b);
+                self.draw_text_at(target, "+ Add PDF", Some(f11b), color(1.0, 1.0, 1.0, 0.85), ccx - tw * 0.5, ccy + 14.0);
+            }
+
+            // Arrow hint pointing towards Markdown portal:
+            if let Some(f12) = self.fmt_13_med.as_ref() {
+                self.draw_text_at(target, "Drop or pick a PDF to select character ──►", Some(f12), color(1.0, 1.0, 1.0, 0.50), card_x + card_w + 14.0, card_y + card_h * 0.5 - 8.0);
+            }
+            return;
+        }
+
+        // Render character select cards:
+        let visible_cards = queue.len().min(3);
+        for i in 0..visible_cards {
+            let is_selected = i == selected_idx;
+            let is_this_dragging = ctx.pdf_md_drag.map(|(d_idx, _, _)| d_idx == i).unwrap_or(false);
+
+            let (drag_ox, drag_oy) = if is_this_dragging {
+                if let (Some((_, mx, my)), Some(mpt)) = (ctx.pdf_md_drag, mouse_pt) {
+                    ((mpt.0 - mx).max(0.0), mpt.1 - my)
+                } else {
+                    (0.0, 0.0)
+                }
+            } else {
+                (0.0, 0.0)
+            };
+
+            let card_x = PDF_MD_CARD_START_X + (i as f32) * PDF_MD_CARD_PITCH + drag_ox;
+            let card_y = PDF_MD_CARD_Y + drag_oy;
+            let card_w = PDF_MD_CARD_W;
+            let card_h = PDF_MD_CARD_H;
+
+            let card_hov = mouse_pt.map(|(mx, my)| mx >= card_x && mx <= card_x + card_w && my >= card_y && my <= card_y + card_h).unwrap_or(false);
+
+            let card_bg = if is_selected {
+                color(0.18, 0.45, 0.85, 0.25)
+            } else if card_hov {
+                color(1.0, 1.0, 1.0, 0.12)
+            } else {
+                color(1.0, 1.0, 1.0, 0.06)
+            };
+
+            let card_stroke = if is_selected {
+                color(0.40, 0.85, 1.0, 0.95)
+            } else {
+                color(1.0, 1.0, 1.0, 0.20)
+            };
+
+            self.fill_rounded(target, card_x, card_y, card_w, card_h, 14.0, card_bg);
+            self.stroke_rounded(target, card_x, card_y, card_w, card_h, 14.0, if is_selected { 2.0 } else { 1.0 }, card_stroke, None);
+
+            // Character badge / label above card if selected:
+            if is_selected {
+                let tag = "READY";
+                if let Some(f9b) = self.fmt_10_med.as_ref() {
+                    let (tw, _th) = self.measure_text(tag, f9b);
+                    let tag_w = tw + 8.0;
+                    let tag_h = 13.0;
+                    let tag_x = card_x + (card_w - tag_w) * 0.5;
+                    let tag_y = card_y - 6.0;
+                    self.fill_rounded(target, tag_x, tag_y, tag_w, tag_h, 4.0, color(0.35, 0.80, 1.0, 1.0));
+                    self.draw_text_at(target, tag, Some(f9b), color(0.0, 0.0, 0.0, 1.0), tag_x + 4.0, tag_y + 1.0);
+                }
+            }
+
+            // Thumbnail art inside card:
+            let ccx = card_x + card_w * 0.5;
+            let ccy = card_y + 36.0;
+            self.draw_icon_doc(target, ccx, ccy, 28.0, if is_selected { color(1.0, 0.35, 0.35, 1.0) } else { color(1.0, 1.0, 1.0, 0.70) });
+
+            // PDF text badge:
+            if let Some(f9b) = self.fmt_10_med.as_ref() {
+                let (tw, _) = self.measure_text("PDF", f9b);
+                self.draw_text_at(target, "PDF", Some(f9b), color(1.0, 1.0, 1.0, 0.90), ccx - tw * 0.5, ccy + 16.0);
+            }
+
+            // Filename at bottom:
+            let path = &queue[i];
+            let fname = std::path::Path::new(path).file_name().and_then(|n| n.to_str()).unwrap_or(path);
+            if let Some(f10) = self.fmt_10_med.as_ref() {
+                let short = self.truncate_text(fname, card_w - 8.0, f10);
+                let (sw, _) = self.measure_text(&short, f10);
+                self.draw_text_at(target, &short, Some(f10), color(1.0, 1.0, 1.0, 0.90), card_x + (card_w - sw) * 0.5, card_y + card_h - 18.0);
+            }
+        }
+
+        // Add extra card button slot if queue < 3:
+        if queue.len() < 3 {
+            let add_i = queue.len();
+            let card_x = PDF_MD_CARD_START_X + (add_i as f32) * PDF_MD_CARD_PITCH;
+            let card_y = PDF_MD_CARD_Y;
+            let card_w = PDF_MD_CARD_W;
+            let card_h = PDF_MD_CARD_H;
+
+            let card_hov = mouse_pt.map(|(mx, my)| mx >= card_x && mx <= card_x + card_w && my >= card_y && my <= card_y + card_h).unwrap_or(false);
+            let bg_a = if card_hov { 0.08 } else { 0.03 };
+            self.fill_rounded(target, card_x, card_y, card_w, card_h, 14.0, color(1.0, 1.0, 1.0, bg_a));
+            self.stroke_rounded(target, card_x, card_y, card_w, card_h, 14.0, 1.0, color(1.0, 1.0, 1.0, 0.25), self.stroke_dashed.as_ref());
+
+            let ccx = card_x + card_w * 0.5;
+            let ccy = card_y + card_h * 0.5;
+            if let Some(f14) = self.fmt_14_reg.as_ref() {
+                let (tw, th) = self.measure_text("+", f14);
+                self.draw_text_at(target, "+", Some(f14), color(1.0, 1.0, 1.0, 0.60), ccx - tw * 0.5, ccy - th * 0.5);
+            }
+        }
+
+        // Prompt hint underneath character carousel:
+        if !is_dragging {
+            let hint = "Slide thumbnail to the Markdown portal to convert ──►";
+            if let Some(f11) = self.fmt_11_reg.as_ref() {
+                self.draw_text_at(target, hint, Some(f11), color(1.0, 1.0, 1.0, 0.55), 56.0, 166.0);
+            }
+        }
+    }
+
+    fn draw_settings(
+        &self,
+        target: &ID2D1RenderTarget,
+        settings: &crate::settings::AuraSettings,
+        mouse_pt: Option<(f32, f32)>,
+    ) {
+        let in_rect = |r: (f32, f32, f32, f32)| {
+            mouse_pt.map(|(mx, my)| mx >= r.0 && mx <= r.2 && my >= r.1 && my <= r.3).unwrap_or(false)
+        };
+
+        // Header
+        self.draw_text_at(
+            target,
+            "Aura Settings",
+            self.fmt_18_med.as_ref(),
+            color(1.0, 1.0, 1.0, 1.0),
+            54.0,
+            24.0,
+        );
+
+        // Close button at top right
+        let close_hov = in_rect(SETTINGS_CLOSE_BTN);
+        let close_bg = if close_hov { color(1.0, 1.0, 1.0, 0.18) } else { color(1.0, 1.0, 1.0, 0.08) };
+        self.fill_rounded(target, SETTINGS_CLOSE_BTN.0, SETTINGS_CLOSE_BTN.1, SETTINGS_CLOSE_BTN.2 - SETTINGS_CLOSE_BTN.0, SETTINGS_CLOSE_BTN.3 - SETTINGS_CLOSE_BTN.1, 14.0, close_bg);
+        if let Some(f14) = self.fmt_13_bold.as_ref() {
+            let (tw, th) = self.measure_text("×", f14);
+            let cx = (SETTINGS_CLOSE_BTN.0 + SETTINGS_CLOSE_BTN.2) * 0.5;
+            let cy = (SETTINGS_CLOSE_BTN.1 + SETTINGS_CLOSE_BTN.3) * 0.5;
+            self.draw_text_at(target, "×", Some(f14), color(1.0, 1.0, 1.0, 0.90), cx - tw * 0.5, cy - th * 0.5);
+        }
+
+        // Left Column: Active Sections
+        if let Some(f11b) = self.fmt_13_bold.as_ref() {
+            self.draw_text_at(target, "SECTIONS", Some(f11b), color(1.0, 1.0, 1.0, 0.50), 54.0, 54.0);
+        }
+
+        let section_items = [
+            ("Music", settings.music_enabled),
+            ("Focus", settings.pomodoro_enabled),
+            ("Todo", settings.todo_enabled),
+            ("Water", settings.water_enabled),
+            ("Shelf", settings.tray_enabled),
+            ("Remove BG", settings.removebg_enabled),
+            ("Convert", settings.convert_enabled),
+        ];
+
+        // 2-column chips for sections:
+        for (i, (name, on)) in section_items.iter().enumerate() {
+            let col = i % 2;
+            let row = i / 2;
+            let cx = 54.0 + (col as f32) * 110.0;
+            let cy = 70.0 + (row as f32) * 25.0;
+            let cw = 102.0;
+            let ch = 21.0;
+
+            let hov = mouse_pt.map(|(mx, my)| mx >= cx && mx <= cx + cw && my >= cy && my <= cy + ch).unwrap_or(false);
+            let bg_c = if *on {
+                if hov { color(0.18, 0.58, 0.32, 0.40) } else { color(0.18, 0.58, 0.32, 0.25) }
+            } else {
+                if hov { color(1.0, 1.0, 1.0, 0.10) } else { color(1.0, 1.0, 1.0, 0.04) }
+            };
+            let border_c = if *on { color(0.35, 0.85, 0.45, 0.80) } else { color(1.0, 1.0, 1.0, 0.15) };
+            self.fill_rounded(target, cx, cy, cw, ch, 6.0, bg_c);
+            self.stroke_rounded(target, cx, cy, cw, ch, 6.0, 1.0, border_c, None);
+
+            // Indicator dot on left of chip:
+            let dot_c = if *on { color(0.35, 0.85, 0.45, 1.0) } else { color(1.0, 1.0, 1.0, 0.30) };
+            self.fill_oval(target, cx + 8.0, cy + 6.5, 8.0, 8.0, dot_c);
+
+            if let Some(f11) = self.fmt_10_med.as_ref() {
+                self.draw_text_at(target, name, Some(f11), color(1.0, 1.0, 1.0, if *on { 0.95 } else { 0.50 }), cx + 22.0, cy + 3.5);
+            }
+        }
+
+        // Right Column: Preferences & System
+        let rx = 290.0f32;
+        if let Some(f11b) = self.fmt_13_bold.as_ref() {
+            self.draw_text_at(target, "SYSTEM & PREFERENCES", Some(f11b), color(1.0, 1.0, 1.0, 0.50), rx, 54.0);
+        }
+
+        let pref_items = [
+            ("Start with Windows", settings.start_with_windows),
+            ("Sound Chimes", settings.sound_chimes),
+            ("120 FPS High Refresh", settings.high_refresh_120fps),
+            ("Morphing Zen Eyes", settings.eye_expressions),
+        ];
+
+        for (i, (name, on)) in pref_items.iter().enumerate() {
+            let py = 72.0 + (i as f32) * 24.0;
+            if let Some(f11) = self.fmt_11_reg.as_ref() {
+                self.draw_text_at(target, name, Some(f11), color(1.0, 1.0, 1.0, 0.90), rx, py + 2.0);
+            }
+
+            // iOS switch capsule at rx + 164.0
+            let sw_x = rx + 164.0;
+            let sw_y = py;
+            let sw_w = 28.0;
+            let sw_h = 16.0;
+
+            let sw_hov = mouse_pt.map(|(mx, my)| mx >= sw_x && mx <= sw_x + sw_w && my >= sw_y && my <= sw_y + sw_h).unwrap_or(false);
+            let bg = if *on {
+                if sw_hov { color(0.25, 0.82, 0.45, 1.0) } else { color(0.20, 0.75, 0.38, 1.0) }
+            } else {
+                if sw_hov { color(0.40, 0.40, 0.42, 1.0) } else { color(0.30, 0.30, 0.32, 1.0) }
+            };
+            self.fill_rounded(target, sw_x, sw_y, sw_w, sw_h, sw_h * 0.5, bg);
+
+            let knob_r = (sw_h - 4.0) * 0.5;
+            let knob_x = if *on { sw_x + sw_w - sw_h + 2.0 } else { sw_x + 2.0 };
+            self.fill_oval(target, knob_x, sw_y + 2.0, knob_r * 2.0, knob_r * 2.0, color(1.0, 1.0, 1.0, 1.0));
         }
     }
 
@@ -3033,104 +4917,153 @@ impl Renderer {
         &self,
         target: &ID2D1RenderTarget,
         shelf: &crate::shelf::Shelf,
-        tray_page: usize,
+        tray_scroll: f32,
         playing: bool,
         tray_drop_highlight: bool,
         tray_drag_pt: Option<(f32, f32)>,
+        lh: f32,
+        genie_progress: Option<f32>,
+        tray_btn_hovers: &[f32; 4],
     ) {
         if tray_drop_highlight {
-            self.draw_tray_drop_zone(target, shelf, tray_page, playing, tray_drag_pt);
+            self.draw_tray_drop_zone(target, shelf, playing, tray_drag_pt, lh);
             return;
         }
-        self.draw_card_header(target, 640.0, playing);
         self.draw_text_at(
             target,
             "Tray",
             self.fmt_20_bold.as_ref(),
             color(1.0, 1.0, 1.0, 1.0),
-            28.0,
-            10.0,
+            54.0,
+            26.0,
         );
 
-        if shelf.files.is_empty() {
+        if shelf.files.is_empty() && genie_progress.is_none() {
+            let zone_top = 62.0f32;
+            let zone_h = 88.0f32;
+            let zone_r = 14.0f32;
             self.stroke_rounded(
                 target,
-                28.0,
-                44.0,
-                584.0,
-                212.0,
-                20.0,
+                54.0,
+                zone_top,
+                432.0,
+                zone_h,
+                zone_r,
                 1.5,
-                color(1.0, 1.0, 1.0, 0.50),
+                color(1.0, 1.0, 1.0, 0.40),
                 self.stroke_dashed.as_ref(),
             );
-            self.draw_icon_doc(target, 320.0, 165.0, 48.0, color(1.0, 1.0, 1.0, 0.60));
+            let cy = zone_top + zone_h * 0.5;
+            self.draw_icon_doc(target, 270.0, cy - 10.0, 28.0, color(1.0, 1.0, 1.0, 0.60));
             self.draw_centered_text(
                 target,
                 "Drag files here",
                 self.fmt_14_reg.as_ref(),
-                color(1.0, 1.0, 1.0, 0.60),
-                640.0,
-                115.0,
+                color(1.0, 1.0, 1.0, 0.70),
+                540.0,
+                cy + 14.0,
             );
             return;
         }
 
-        // `"Clear"` pill right after `"Tray"`:
-        self.fill_rounded(
-            target,
-            TRAY_CLEAR_RECT.0,
-            TRAY_CLEAR_RECT.1,
-            TRAY_CLEAR_RECT.2 - TRAY_CLEAR_RECT.0,
-            28.0,
-            14.0,
-            color(1.0, 1.0, 1.0, 0.10),
-        );
-        if let Some(fmt14) = self.fmt_14_reg.as_ref() {
-            let (cw, _) = self.measure_text("Clear", fmt14);
-            let mid = (TRAY_CLEAR_RECT.0 + TRAY_CLEAR_RECT.2) * 0.5;
-            self.draw_text_at(
-                target,
-                "Clear",
-                Some(fmt14),
-                color(1.0, 1.0, 1.0, 1.0),
-                mid - cw * 0.5,
-                14.5,
-            );
+        // Header Action Expanding Oval Buttons on hover:
+        let rects = compute_tray_button_rects(tray_btn_hovers);
+
+        // 1. Clear button
+        self.draw_expanding_button(target, rects[0], tray_btn_hovers[0], "Clear", false, &|cx, cy, c| {
+            self.draw_icon_trash(target, cx, cy, c);
+        });
+
+        // 2. Select button
+        let sel_label = if shelf.select_mode { "Done" } else { "Select" };
+        self.draw_expanding_button(target, rects[1], tray_btn_hovers[1], sel_label, shelf.select_mode, &|cx, cy, c| {
+            self.draw_icon_checkmark(target, cx, cy, c);
+        });
+
+        // 3. Remove BG transfer button
+        self.draw_expanding_button(target, rects[2], tray_btn_hovers[2], "Remove BG", false, &|cx, cy, c| {
+            self.draw_icon_scissors(target, cx, cy, c);
+        });
+
+        // 4. Convert transfer button
+        self.draw_expanding_button(target, rects[3], tray_btn_hovers[3], "Convert", false, &|cx, cy, c| {
+            self.draw_icon_sync(target, cx, cy, c);
+        });
+
+        // Horizontal carousel with clip:
+        let carousel_clip = D2D_RECT_F {
+            left: TRAY_CAROUSEL_X,
+            top: TRAY_CAROUSEL_Y,
+            right: TRAY_CAROUSEL_X + TRAY_CAROUSEL_W,
+            bottom: TRAY_CAROUSEL_Y + TRAY_CAROUSEL_H,
+        };
+        unsafe {
+            target.PushAxisAlignedClip(&carousel_clip, D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
         }
 
-        let page_count = shelf.page_count(TRAY_PAGE_SIZE);
-        let page = tray_page.min(page_count.saturating_sub(1));
-        let start = page * TRAY_PAGE_SIZE;
-        let (gx, gy, tw, th, px, py) = (
-            TRAY_TILE_GEOM.0,
-            TRAY_TILE_GEOM.1,
-            TRAY_TILE_GEOM.2,
-            TRAY_TILE_GEOM.3,
-            TRAY_TILE_GEOM.4,
-            TRAY_TILE_GEOM.5,
-        );
-
-        for (i, path) in shelf
-            .files
-            .iter()
-            .skip(start)
-            .take(TRAY_PAGE_SIZE)
-            .enumerate()
-        {
-            let col = (i % 4) as f32;
-            let row = (i / 4) as f32;
-            let left = gx + col * px;
-            let top = gy + row * py;
+        for (i, path) in shelf.files.iter().enumerate() {
+            let left = TRAY_CAROUSEL_X + (i as f32) * TRAY_TILE_PITCH - tray_scroll;
+            let top = TRAY_CAROUSEL_Y;
+            let tw = TRAY_TILE_W;
+            let th = TRAY_TILE_H;
+            if left + tw < TRAY_CAROUSEL_X - 50.0 || left > TRAY_CAROUSEL_X + TRAY_CAROUSEL_W + 50.0 {
+                continue;
+            }
             let cx = left + tw * 0.5;
-            let info = crate::shelf::file_info(path);
-            let alpha = if info.exists { 1.0 } else { 0.40 };
+            let cy = top + th * 0.5;
+            let info = shelf.get_info(path);
+            let mut alpha = if info.exists { 1.0 } else { 0.40 };
 
-            self.fill_rounded(target, left, top, tw, th, 10.0, color(1.0, 1.0, 1.0, 0.08));
-            if info.is_dir {
-                self.draw_icon_folder(target, cx, top + 28.0, 36.0, color(1.0, 1.0, 1.0, alpha));
+            let mut pop_xform = false;
+            if let Some(p) = genie_progress {
+                let p_clamped = p.clamp(0.0, 1.0);
+                let (dest_x, dest_y) = (108.0f32, 24.0f32);
+                let cur_cx = cx + (dest_x - cx) * (p_clamped * p_clamped);
+                let cur_cy = cy + (dest_y - cy) * (p_clamped * p_clamped * p_clamped);
+                let scale = (1.0 - p_clamped).powf(1.4).max(0.001);
+                alpha *= (1.0 - p_clamped).clamp(0.0, 1.0);
+
+                let mat = Matrix3x2 {
+                    M11: scale,
+                    M12: 0.0,
+                    M21: 0.0,
+                    M22: scale,
+                    M31: cur_cx - cx * scale,
+                    M32: cur_cy - cy * scale,
+                };
+                unsafe {
+                    target.SetTransform(&mat);
+                }
+                pop_xform = true;
+            }
+
+            // Pure minimal: NO background box and NO border unless selected!
+            if shelf.is_selected(i) {
+                self.fill_rounded(target, left, top, tw, th, 12.0, color(1.0, 1.0, 1.0, 0.12 * alpha));
+                self.stroke_rounded(target, left, top, tw, th, 12.0, 1.5, color(1.0, 1.0, 1.0, 0.55 * alpha), None);
+            }
+
+            // Real thumbnail preview:
+            if let Some(bmp) = self.tray_thumb_cache.get(path) {
+                let preview_rect = D2D_RECT_F {
+                    left: cx - 18.0,
+                    top: top + 10.0,
+                    right: cx + 18.0,
+                    bottom: top + 46.0,
+                };
+                unsafe {
+                    target.DrawBitmap(
+                        bmp,
+                        Some(&preview_rect),
+                        alpha,
+                        D2D1_BITMAP_INTERPOLATION_MODE_LINEAR,
+                        None,
+                    );
+                }
+            } else if info.is_dir {
+                self.draw_icon_folder(target, cx, top + 26.0, 32.0, color(1.0, 1.0, 1.0, alpha));
             } else {
-                self.draw_icon_doc(target, cx, top + 28.0, 36.0, color(1.0, 1.0, 1.0, alpha));
+                self.draw_icon_doc(target, cx, top + 26.0, 32.0, color(1.0, 1.0, 1.0, alpha));
             }
 
             if let Some(fmt13) = self.fmt_13_reg.as_ref() {
@@ -3142,7 +5075,7 @@ impl Renderer {
                     Some(fmt13),
                     color(1.0, 1.0, 1.0, alpha),
                     cx - nw * 0.5,
-                    top + 60.0,
+                    top + 52.0,
                 );
             }
             if let Some(fmt11) = self.fmt_11_reg.as_ref() {
@@ -3151,41 +5084,46 @@ impl Renderer {
                     target,
                     &info.size_text,
                     Some(fmt11),
-                    color(1.0, 1.0, 1.0, 0.60),
+                    color(1.0, 1.0, 1.0, 0.55 * alpha),
                     cx - sw * 0.5,
-                    top + 80.0,
+                    top + 72.0,
                 );
             }
 
-            // Delete `"×"` at top-right of tile:
-            self.draw_text_at(
-                target,
-                "×",
-                self.fmt_14_reg.as_ref(),
-                color(1.0, 1.0, 1.0, 0.40),
-                left + tw - 16.0,
-                top + 2.0,
-            );
-        }
-
-        // Pagination arrows + bottom page dots when `page_count > 1`:
-        if page_count > 1 {
-            self.fill_oval(target, 30.0, 132.0, 36.0, 36.0, color(1.0, 1.0, 1.0, 0.15));
-            self.fill_oval(target, 574.0, 132.0, 36.0, 36.0, color(1.0, 1.0, 1.0, 0.15));
-            self.draw_icon_chevron(target, 48.0, 150.0, false, color(1.0, 1.0, 1.0, 1.0));
-            self.draw_icon_chevron(target, 592.0, 150.0, true, color(1.0, 1.0, 1.0, 1.0));
-
-            let start_x = (640.0 - (page_count as f32) * 18.0) * 0.5;
-            for i in 0..page_count {
-                let slot_cx = start_x + (i as f32) * 18.0 + 9.0;
-                if i == page {
-                    self.fill_rounded(target, slot_cx - 6.0, 265.0, 12.0, 6.0, 3.0, color(1.0, 1.0, 1.0, 1.0));
+            // Checkbox selection indicator in select mode:
+            if shelf.select_mode {
+                let chk_x = left + 14.0;
+                let chk_y = top + 14.0;
+                let chk_r = 7.0;
+                if shelf.is_selected(i) {
+                    self.fill_circle(target, chk_x, chk_y, chk_r, color(1.0, 1.0, 1.0, alpha));
+                    self.draw_icon_checkmark(target, chk_x, chk_y, color(0.0, 0.0, 0.0, alpha));
                 } else {
-                    self.fill_oval(target, slot_cx - 3.0, 265.0, 6.0, 6.0, color(1.0, 1.0, 1.0, 0.40));
+                    self.stroke_rounded(target, chk_x - chk_r, chk_y - chk_r, chk_r * 2.0, chk_r * 2.0, chk_r, 1.0, color(1.0, 1.0, 1.0, 0.50 * alpha), None);
+                }
+            } else {
+                // Delete "×" button at top-right of tile:
+                self.draw_text_at(
+                    target,
+                    "×",
+                    self.fmt_14_reg.as_ref(),
+                    color(1.0, 1.0, 1.0, 0.40 * alpha),
+                    left + tw - 16.0,
+                    top + 4.0,
+                );
+            }
+
+            if pop_xform {
+                unsafe {
+                    target.SetTransform(&Matrix3x2::identity());
                 }
             }
         }
+        unsafe {
+            target.PopAxisAlignedClip();
+        }
     }
+
 
     fn fill_linear_gradient_rounded(
         &self,
@@ -3260,6 +5198,17 @@ impl Renderer {
         }
         self.update_cover_bitmap(ctx.media);
         self.update_removebg_bitmaps(ctx.removebg);
+        self.update_convert_bitmaps(ctx.convert);
+        if let Some(target) = self.target.as_ref() {
+            let target_clone = target.clone();
+            self.ensure_dot_icons(&target_clone);
+            if ctx.state == IslandState::Convert {
+                self.ensure_convert_app_bitmaps(&target_clone);
+            }
+            if ctx.state == IslandState::Tray {
+                self.ensure_tray_thumbnails(&target_clone, ctx.shelf);
+            }
+        }
         let (lw, lh) = (ctx.cur_w, ctx.cur_h);
         let lyrics_t = if ctx.state == IslandState::Expanded || ctx.state == IslandState::Lyrics {
             ((lw - 520.0) / (700.0 - 520.0)).clamp(0.0, 1.0)
@@ -3311,7 +5260,14 @@ impl Renderer {
 
             let geometry_opt = self.nusa_geometry(lw, lh, radius);
             if let Some(geometry) = &geometry_opt {
-                if let Some(b_black) = self.brush(&target, color(0.0, 0.0, 0.0, 0.98)) {
+                // Subtle dark ambient backdrop shadow around notch edges
+                if let Some(b_shadow) = self.brush(&target, color(0.0, 0.0, 0.0, 0.08)) {
+                    target.DrawGeometry(geometry, &b_shadow, 6.0, None);
+                }
+                if let Some(b_shadow2) = self.brush(&target, color(0.0, 0.0, 0.0, 0.15)) {
+                    target.DrawGeometry(geometry, &b_shadow2, 2.5, None);
+                }
+                if let Some(b_black) = self.brush(&target, color(0.0, 0.0, 0.0, 1.0)) {
                     target.FillGeometry(geometry, &b_black, None);
                 }
                 if grad_alpha > 0.01 {
@@ -3345,106 +5301,118 @@ impl Renderer {
                 }
             }
 
-            // Only push a geometric mask layer when expanding/collapsing vertically (`lh < 175.0`).
-            // Horizontal `520 <-> 700` morphs use hardware `PushAxisAlignedClip` in `draw_music_card`
-            // and `draw_lyrics_panel` so spam-toggling lyrics never incurs software mask rasterization.
-            let mut layer_pushed = false;
-            if lh > 36.0 && lh < 175.0 {
-                if let Some(geometry) = &geometry_opt {
-                    let layer_params = D2D1_LAYER_PARAMETERS {
-                        contentBounds: D2D_RECT_F {
-                            left: 0.0,
-                            top: 0.0,
-                            right: lw,
-                            bottom: lh,
-                        },
-                        geometricMask: ManuallyDrop::new(Some(geometry.clone())),
-                        maskAntialiasMode: D2D1_ANTIALIAS_MODE_PER_PRIMITIVE,
-                        maskTransform: Matrix3x2::identity(),
-                        opacity: 1.0,
-                        opacityBrush: ManuallyDrop::new(None),
-                        layerOptions: D2D1_LAYER_OPTIONS_NONE,
-                    };
-                    target.PushLayer(&layer_params, None);
-                    layer_pushed = true;
-                }
-            }
+            // Hardware-accelerated axis-aligned clip with zero offscreen surface allocation
+            let clip_bounds = D2D_RECT_F {
+                left: 0.0,
+                top: 0.0,
+                right: lw,
+                bottom: lh,
+            };
+            target.PushAxisAlignedClip(&clip_bounds, D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
 
             let playing = ctx.media.map(|m| m.playing).unwrap_or(false);
 
             if !ctx.state.is_expanded() && ctx.alert.is_some() {
                 self.draw_pill_alert(&target, lw, lh, ctx.alert.unwrap());
-            } else {
-                match ctx.state {
-                    IslandState::Zen => {
-                        self.draw_eyes(&target, lw, lh, ctx.eye_look, ctx.eyes_closed);
-                    }
-                    IslandState::Compact => {
-                        self.draw_closed(&target, ctx);
-                    }
-                    IslandState::Expanded | IslandState::Lyrics => {
-                        if let Some(m) = ctx.media {
-                            self.draw_music_card(&target, m, lyrics_t);
-                            let panel_alpha = ((lyrics_t - 0.12) / 0.88).clamp(0.0, 1.0);
-                            if panel_alpha > 0.01 {
-                                self.draw_lyrics_panel(&target, Some(m), ctx.lyrics, panel_alpha, lw);
-                            }
-                        } else {
-                            self.draw_centered_text(
-                                &target,
-                                "No media playing",
-                                self.fmt_13_reg.as_ref(),
-                                color(1.0, 1.0, 1.0, 0.70),
-                                lw,
-                                lh * 0.5 - 9.0,
-                            );
-                        }
-                        self.draw_page_dots(&target, ctx.state, lw, lh);
-                    }
-                    IslandState::Pomodoro => {
-                        self.draw_pomodoro(&target, ctx.pomodoro, playing);
-                        self.draw_page_dots(&target, ctx.state, lw, lh);
-                    }
-                    IslandState::Todo => {
-                        self.draw_todo(&target, ctx.todo, ctx.todo_editing, ctx.todo_input, playing);
-                        self.draw_page_dots(&target, ctx.state, lw, lh);
-                    }
-                    IslandState::Water => {
-                        self.draw_water(&target, ctx.water, playing);
-                        self.draw_page_dots(&target, ctx.state, lw, lh);
-                    }
-                    IslandState::Tray => {
-                        self.draw_tray(
-                            &target,
-                            ctx.shelf,
-                            ctx.tray_page,
-                            playing,
-                            ctx.tray_drop_highlight,
-                            ctx.tray_drag_pt,
-                        );
-                        self.draw_page_dots(&target, ctx.state, lw, lh);
-                    }
-                    IslandState::RemoveBg => {
-                        self.draw_removebg(
-                            &target,
-                            ctx.removebg,
-                            ctx.shelf,
-                            ctx.removebg_drop_highlight,
-                        );
-                        self.draw_page_dots(&target, ctx.state, lw, lh);
+            } else if ctx.transition_active && ctx.state.is_expanded() {
+                let p = ctx.transition_progress.clamp(0.0, 1.0);
+                let ease = 1.0 - (1.0 - p).powi(3);
+                let dir = ctx.transition_dir;
+
+                // Push hard axis-aligned clip to ensure NO pixel can ever escape the notch boundary:
+                let clip_rect = D2D_RECT_F {
+                    left: 14.0,
+                    top: 0.0,
+                    right: lw - 14.0,
+                    bottom: lh,
+                };
+                target.PushAxisAlignedClip(&clip_rect, D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
+
+                let max_drift = 24.0f32;
+
+                // 1. Departing section slides out and fades away smoothly:
+                if ctx.transition_from != ctx.state && ctx.transition_from.is_expanded() {
+                    let from_alpha = (1.0 - p).powi(2).clamp(0.0, 1.0);
+                    if from_alpha > 0.01 {
+                        let from_offset = -dir * ease * max_drift;
+                        let trans_from = Matrix3x2 {
+                            M11: s,
+                            M12: 0.0,
+                            M21: 0.0,
+                            M22: s,
+                            M31: tx + from_offset,
+                            M32: 0.0,
+                        };
+                        let layer_params = D2D1_LAYER_PARAMETERS {
+                            contentBounds: clip_rect,
+                            geometricMask: ManuallyDrop::new(None),
+                            maskAntialiasMode: D2D1_ANTIALIAS_MODE_PER_PRIMITIVE,
+                            maskTransform: Matrix3x2::identity(),
+                            opacity: from_alpha,
+                            opacityBrush: ManuallyDrop::new(None),
+                            layerOptions: D2D1_LAYER_OPTIONS_NONE,
+                        };
+                        target.PushLayer(&layer_params, None);
+                        target.SetTransform(&trans_from);
+                        self.draw_card_content(&target, ctx.transition_from, ctx, playing, &base_xform, s, tx, lw, lh, lyrics_t);
+                        target.PopLayer();
                     }
                 }
-            }
 
-            if layer_pushed {
+                // 2. Incoming section slides in and fades in smoothly:
+                let to_alpha = p.powf(0.8).clamp(0.0, 1.0);
+                let to_offset = dir * (1.0 - ease) * max_drift;
+                let trans_to = Matrix3x2 {
+                    M11: s,
+                    M12: 0.0,
+                    M21: 0.0,
+                    M22: s,
+                    M31: tx + to_offset,
+                    M32: 0.0,
+                };
+                let layer_params = D2D1_LAYER_PARAMETERS {
+                    contentBounds: clip_rect,
+                    geometricMask: ManuallyDrop::new(None),
+                    maskAntialiasMode: D2D1_ANTIALIAS_MODE_PER_PRIMITIVE,
+                    maskTransform: Matrix3x2::identity(),
+                    opacity: to_alpha,
+                    opacityBrush: ManuallyDrop::new(None),
+                    layerOptions: D2D1_LAYER_OPTIONS_NONE,
+                };
+                target.PushLayer(&layer_params, None);
+                target.SetTransform(&trans_to);
+                self.draw_card_content(&target, ctx.state, ctx, playing, &base_xform, s, tx, lw, lh, lyrics_t);
                 target.PopLayer();
+
+                target.PopAxisAlignedClip();
+            } else {
+                target.SetTransform(&base_xform);
+                self.draw_card_content(&target, ctx.state, ctx, playing, &base_xform, s, tx, lw, lh, lyrics_t);
             }
 
-            if let Some(geometry) = &geometry_opt {
-                if let Some(b_border) = self.brush(&target, color(1.0, 1.0, 1.0, 0.15)) {
-                    target.DrawGeometry(geometry, &b_border, 0.75, None);
-                }
+            let has_header = ctx.header_active;
+
+            let expand_t = ((lh - 30.0) / (184.0 - 30.0)).clamp(0.0, 1.0);
+
+            if (ctx.state.is_expanded() || lh > 32.0) && ctx.state != IslandState::Zen {
+                target.SetTransform(&base_xform);
+                self.draw_morphing_header(
+                    &target,
+                    lw,
+                    lh,
+                    expand_t,
+                    playing,
+                    ctx.battery_percent,
+                    ctx.battery_charging,
+                    has_header,
+                );
             }
+
+            if ctx.state.is_expanded() && ctx.state != IslandState::Settings && lh > 60.0 {
+                self.draw_page_dots(&target, ctx.state, lw, lh, ctx.dot_indicator_bounds, ctx.hovered_dot, lyrics_t);
+            }
+
+            target.PopAxisAlignedClip();
 
             target.SetTransform(&Matrix3x2::identity());
             let _ = target.EndDraw(None, None);
@@ -3480,7 +5448,11 @@ impl Renderer {
             let path: ID2D1PathGeometry = self.factory.CreatePathGeometry().ok()?;
             let sink: ID2D1GeometrySink = path.Open().ok()?;
             let r = radius.clamp(0.0, lh / 2.0);
-            let t = 12.0f32.min(lw / 2.0).min(lh / 2.0);
+            let (tw, th) = if lh > 60.0 {
+                (26.0f32.min(lw / 4.0), 18.0f32.min(lh / 4.0))
+            } else {
+                (14.0f32.min(lw / 4.0), 12.0f32.min(lh / 4.0))
+            };
             let mut pts: Vec<D2D_POINT_2F> = Vec::new();
             pts.push(D2D_POINT_2F { x: 0.0, y: 0.0 });
             pts.push(D2D_POINT_2F { x: lw, y: 0.0 });
@@ -3488,41 +5460,41 @@ impl Renderer {
             for i in 1..seg {
                 let a = -std::f32::consts::FRAC_PI_2 * (1.0 + i as f32 / seg as f32);
                 pts.push(D2D_POINT_2F {
-                    x: lw + t * a.cos(),
-                    y: t + t * a.sin(),
+                    x: lw + tw * a.cos(),
+                    y: th + th * a.sin(),
                 });
             }
-            pts.push(D2D_POINT_2F { x: lw - t, y: t });
+            pts.push(D2D_POINT_2F { x: lw - tw, y: th });
             pts.push(D2D_POINT_2F {
-                x: lw - t,
+                x: lw - tw,
                 y: lh - r,
             });
             for i in 1..seg {
                 let a = std::f32::consts::FRAC_PI_2 * (i as f32 / seg as f32);
                 pts.push(D2D_POINT_2F {
-                    x: (lw - t - r) + r * a.cos(),
+                    x: (lw - tw - r) + r * a.cos(),
                     y: (lh - r) + r * a.sin(),
                 });
             }
             pts.push(D2D_POINT_2F {
-                x: lw - t - r,
+                x: lw - tw - r,
                 y: lh,
             });
-            pts.push(D2D_POINT_2F { x: t + r, y: lh });
+            pts.push(D2D_POINT_2F { x: tw + r, y: lh });
             for i in 1..seg {
                 let a = std::f32::consts::FRAC_PI_2 * (1.0 + i as f32 / seg as f32);
                 pts.push(D2D_POINT_2F {
-                    x: (t + r) + r * a.cos(),
+                    x: (tw + r) + r * a.cos(),
                     y: (lh - r) + r * a.sin(),
                 });
             }
-            pts.push(D2D_POINT_2F { x: t, y: lh - r });
-            pts.push(D2D_POINT_2F { x: t, y: t });
+            pts.push(D2D_POINT_2F { x: tw, y: lh - r });
+            pts.push(D2D_POINT_2F { x: tw, y: th });
             for i in 1..seg {
                 let a = -std::f32::consts::FRAC_PI_2 * (i as f32 / seg as f32);
                 pts.push(D2D_POINT_2F {
-                    x: t * a.cos(),
-                    y: t + t * a.sin(),
+                    x: tw * a.cos(),
+                    y: th + th * a.sin(),
                 });
             }
             sink.BeginFigure(pts[0], D2D1_FIGURE_BEGIN_FILLED);

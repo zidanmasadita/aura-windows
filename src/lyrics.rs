@@ -66,11 +66,12 @@ pub fn fetch_async(
     title: String,
     artist: String,
     album: String,
+    duration_secs: f64,
 ) {
     let hwnd_raw = hwnd.0 as isize;
     std::thread::spawn(move || {
         crate::media::init_mta();
-        let result = fetch(&title, &artist, &album);
+        let result = fetch(&title, &artist, &album, duration_secs);
         if let Ok(mut guard) = slot.lock() {
             *guard = Some(result);
         }
@@ -87,13 +88,13 @@ pub fn fetch_async(
 /// 2. LRCLIB `/api/search` (Nusa's primary search endpoint — handles slight title/album diffs)
 /// 3. LRCLIB plainLyrics fallback
 /// 4. `lyrics.ovh` plain fallback
-pub fn fetch(title: &str, artist: &str, album: &str) -> LyricsCache {
+pub fn fetch(title: &str, artist: &str, album: &str, duration_secs: f64) -> LyricsCache {
     let key = key_for(title, artist);
     let nudge_ms = load_nudge(&key);
-    let mut plain_candidate: Option<Vec<LyricLine>> = None;
 
-    // 1. LRCLIB exact /api/get
-    if let Ok(text) = http_get(&lrclib_get_url(title, artist, album)) {
+    // 1. LRCLIB exact /api/get (with duration: LRCLIB then only matches the
+    //    recording within ±2s, i.e. the exact version that is playing).
+    if let Ok(text) = http_get(&lrclib_get_url(title, artist, album, duration_secs)) {
         if let Ok(value) = serde_json::from_str::<serde_json::Value>(&text) {
             if let Some(synced) = value.get("syncedLyrics").and_then(|v| v.as_str()) {
                 if !synced.trim().is_empty() {
@@ -108,22 +109,42 @@ pub fn fetch(title: &str, artist: &str, album: &str) -> LyricsCache {
                     }
                 }
             }
-            if let Some(plain) = value.get("plainLyrics").and_then(|v| v.as_str()) {
-                if !plain.trim().is_empty() {
-                    let parsed = parse_plain(plain);
-                    if !parsed.is_empty() {
-                        plain_candidate = Some(parsed);
-                    }
-                }
-            }
         }
     }
 
-    // 2. LRCLIB /api/search (Nusa's endpoint: returns array of matching tracks)
+    // 2. LRCLIB /api/search: score every candidate (Mac `Lyrics.score`) instead of
+    //    taking the first synced hit, so a remix/live/sped-up version with a
+    //    different duration never wins over the recording actually playing
+    //    (a version mismatch = constant offset = "lyrics not synced").
     if let Ok(text) = http_get(&lrclib_search_url(title, artist)) {
         if let Ok(serde_json::Value::Array(items)) = serde_json::from_str::<serde_json::Value>(&text)
         {
-            for item in &items {
+            let mut ranked: Vec<(i32, &serde_json::Value)> = items
+                .iter()
+                .map(|it| (score_candidate(it, title, artist, duration_secs), it))
+                .collect();
+            ranked.sort_by(|a, b| b.0.cmp(&a.0));
+            let has_synced = |it: &serde_json::Value| {
+                it.get("syncedLyrics")
+                    .and_then(|v| v.as_str())
+                    .map(|s| !s.trim().is_empty())
+                    .unwrap_or(false)
+            };
+            let close_dur = |it: &serde_json::Value| {
+                it.get("duration")
+                    .and_then(|v| v.as_f64())
+                    .map(|d| d <= 0.0 || (d - duration_secs).abs() <= 8.0)
+                    .unwrap_or(true)
+            };
+            // Only reject far-duration candidates when a close synced one exists
+            // (a YouTube video with a long intro still gets synced lyrics).
+            let strict = duration_secs > 0.0
+                && ranked.iter().any(|(_, it)| has_synced(*it) && close_dur(*it));
+            for (_, item) in &ranked {
+                // Reject candidates whose length is clearly another recording.
+                if strict && !close_dur(*item) {
+                    continue;
+                }
                 if let Some(synced) = item.get("syncedLyrics").and_then(|v| v.as_str()) {
                     if !synced.trim().is_empty() {
                         let lines = parse_lrc(synced);
@@ -138,47 +159,10 @@ pub fn fetch(title: &str, artist: &str, album: &str) -> LyricsCache {
                     }
                 }
             }
-            if plain_candidate.is_none() {
-                for item in &items {
-                    if let Some(plain) = item.get("plainLyrics").and_then(|v| v.as_str()) {
-                        if !plain.trim().is_empty() {
-                            let parsed = parse_plain(plain);
-                            if !parsed.is_empty() {
-                                plain_candidate = Some(parsed);
-                                break;
-                            }
-                        }
-                    }
-                }
-            }
         }
     }
 
-    if let Some(lines) = plain_candidate {
-        return LyricsCache {
-            key,
-            lines,
-            synced: false,
-            nudge_ms,
-        };
-    }
-
-    // 3. Fallback: lyrics.ovh (plain only).
-    if let Ok(text) = http_get(&lyrics_ovh_url(title, artist)) {
-        if let Ok(value) = serde_json::from_str::<serde_json::Value>(&text) {
-            if let Some(plain) = value.get("lyrics").and_then(|v| v.as_str()) {
-                if !plain.trim().is_empty() {
-                    return LyricsCache {
-                        key,
-                        lines: parse_plain(plain),
-                        synced: false,
-                        nudge_ms,
-                    };
-                }
-            }
-        }
-    }
-
+    // No synced lyrics found in LRCLIB: do NOT fall back to plain lyrics per user rule.
     LyricsCache {
         key,
         lines: Vec::new(),
@@ -187,7 +171,7 @@ pub fn fetch(title: &str, artist: &str, album: &str) -> LyricsCache {
     }
 }
 
-fn lrclib_get_url(title: &str, artist: &str, album: &str) -> String {
+fn lrclib_get_url(title: &str, artist: &str, album: &str, duration_secs: f64) -> String {
     let mut url = format!(
         "https://lrclib.net/api/get?artist_name={}&track_name={}",
         url_encode(artist),
@@ -196,7 +180,55 @@ fn lrclib_get_url(title: &str, artist: &str, album: &str) -> String {
     if !album.trim().is_empty() {
         url.push_str(&format!("&album_name={}", url_encode(album)));
     }
+    if duration_secs > 0.0 {
+        url.push_str(&format!("&duration={}", duration_secs.round() as i64));
+    }
     url
+}
+
+/// Candidate score (Mac `Lyrics.score`): title/artist match dominate,
+/// synced lyrics and a close duration are bonuses.
+fn score_candidate(item: &serde_json::Value, title: &str, artist: &str, duration_secs: f64) -> i32 {
+    let norm = |s: &str| s.to_lowercase().split_whitespace().collect::<Vec<_>>().join(" ");
+    let (t, a) = (norm(title), norm(artist));
+    let it = norm(item.get("trackName").and_then(|v| v.as_str()).unwrap_or(""));
+    let ia = norm(item.get("artistName").and_then(|v| v.as_str()).unwrap_or(""));
+    let mut s = 0;
+    if it == t {
+        s += 100;
+    } else if !t.is_empty() && (it.contains(&t) || t.contains(&it)) {
+        s += 50;
+    }
+    if ia == a {
+        s += 60;
+    } else if !a.is_empty() && (ia.contains(&a) || a.contains(&ia)) {
+        s += 30;
+    }
+    if item
+        .get("syncedLyrics")
+        .and_then(|v| v.as_str())
+        .map(|x| !x.trim().is_empty())
+        .unwrap_or(false)
+    {
+        s += 40;
+    }
+    if duration_secs > 0.0 {
+        if let Some(d) = item.get("duration").and_then(|v| v.as_f64()) {
+            if d > 0.0 {
+                let delta = (d - duration_secs).abs();
+                s += if delta <= 1.0 {
+                    60
+                } else if delta <= 3.0 {
+                    40
+                } else if delta <= 8.0 {
+                    10
+                } else {
+                    -80
+                };
+            }
+        }
+    }
+    s
 }
 
 fn lrclib_search_url(title: &str, artist: &str) -> String {
@@ -204,14 +236,6 @@ fn lrclib_search_url(title: &str, artist: &str) -> String {
         "https://lrclib.net/api/search?track_name={}&artist_name={}",
         url_encode(title),
         url_encode(artist)
-    )
-}
-
-fn lyrics_ovh_url(title: &str, artist: &str) -> String {
-    format!(
-        "https://api.lyrics.ovh/v1/{}/{}",
-        url_encode(artist),
-        url_encode(title)
     )
 }
 
@@ -241,22 +265,47 @@ fn http_get(url: &str) -> windows::core::Result<String> {
     Ok(text.to_string())
 }
 
-/// Parse LRC text into timestamped lines.
+/// Parse LRC text into timestamped lines (ported from Mac `Lyrics.parseSynced`):
+/// - `[offset:+/-ms]` honored (positive = lyrics sooner, LRC spec).
+/// - Multiple stamps per line (`[00:12.00][00:45.00] chorus`) -> one entry each.
+/// - Metadata brackets (`[ti:]`, `[ar:]`) skipped; enhanced `<mm:ss.xx>` word tags stripped.
+/// - Non-vocal markers (blank, `♪`, `(Instrumental)`) dropped so the last sung
+///   line persists through melody parts.
 fn parse_lrc(text: &str) -> Vec<LyricLine> {
+    let mut offset_ms: i64 = 0;
+    for raw in text.lines() {
+        let line = raw.trim();
+        if let Some(rest) = line.strip_prefix("[offset:") {
+            if let Some(num) = rest.strip_suffix(']') {
+                if let Ok(v) = num.trim().trim_start_matches('+').parse::<i64>() {
+                    offset_ms = v;
+                }
+            }
+        }
+    }
     let mut lines: Vec<LyricLine> = Vec::new();
     for raw in text.lines() {
-        let line = raw.trim_end_matches('\r').trim();
-        if !line.starts_with('[') {
+        let mut line = raw.trim_end_matches('\r').trim();
+        let mut times: Vec<i64> = Vec::new();
+        while line.starts_with('[') {
+            let Some(close) = line.find(']') else {
+                break;
+            };
+            let inside = &line[1..close];
+            let rest = line[close + 1..].trim_start();
+            if let Some(t) = parse_lrc_time(inside) {
+                times.push((t - offset_ms).max(0));
+                line = rest;
+            } else if times.is_empty() {
+                line = rest;
+            } else {
+                break;
+            }
+        }
+        if times.is_empty() {
             continue;
         }
-        let Some(close) = line.find(']') else {
-            continue;
-        };
-        let inside = &line[1..close];
-        let Some(time_ms) = parse_lrc_time(inside) else {
-            continue;
-        };
-        let mut lyric = line[close + 1..].trim().to_string();
+        let mut lyric = line.trim().to_string();
         while let Some(start) = lyric.find('<') {
             if let Some(end_rel) = lyric[start..].find('>') {
                 let end = start + end_rel + 1;
@@ -265,13 +314,48 @@ fn parse_lrc(text: &str) -> Vec<LyricLine> {
                 break;
             }
         }
-        lines.push(LyricLine {
-            time_ms: Some(time_ms),
-            text: lyric.trim().to_string(),
-        });
+        let lyric = lyric.trim().to_string();
+        if is_non_vocal_marker(&lyric) {
+            continue;
+        }
+        for t in times {
+            lines.push(LyricLine {
+                time_ms: Some(t),
+                text: lyric.clone(),
+            });
+        }
     }
     lines.sort_by_key(|l| l.time_ms.unwrap_or(0));
     lines
+}
+
+/// Mac `Lyrics.isNonVocalMarker`.
+fn is_non_vocal_marker(text: &str) -> bool {
+    let t = text.trim();
+    if t.is_empty() {
+        return true;
+    }
+    const SYMBOLS: &str = "♪♫♩♬🎵🎶()[]{}* ";
+    if t.chars().all(|c| SYMBOLS.contains(c)) {
+        return true;
+    }
+    let wrappers = "()[]{}";
+    let (Some(first), Some(last)) = (t.chars().next(), t.chars().last()) else {
+        return false;
+    };
+    if !wrappers.contains(first) || !wrappers.contains(last) {
+        return false;
+    }
+    let inner: String = t
+        .trim_matches(|c| wrappers.contains(c))
+        .chars()
+        .filter(|c| !"♪♫♩♬🎵🎶* ".contains(*c))
+        .collect::<String>()
+        .to_lowercase();
+    matches!(
+        inner.trim(),
+        "instrumental" | "music" | "musik" | "interlude" | "intro" | "outro"
+    )
 }
 
 fn parse_lrc_time(s: &str) -> Option<i64> {
@@ -299,17 +383,6 @@ fn parse_lrc_time(s: &str) -> Option<i64> {
         }
     };
     Some(minutes * 60_000 + seconds * 1_000 + millis)
-}
-
-fn parse_plain(text: &str) -> Vec<LyricLine> {
-    text.lines()
-        .map(|l| l.trim_end_matches('\r').trim().to_string())
-        .filter(|l| !l.is_empty())
-        .map(|text| LyricLine {
-            time_ms: None,
-            text,
-        })
-        .collect()
 }
 
 fn nudges_path() -> Option<PathBuf> {

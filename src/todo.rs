@@ -94,6 +94,7 @@ impl TodoList {
     }
 
     /// Indices of tasks in Aura Mac display order (incomplete-first, up to 4 rows).
+    #[allow(dead_code)]
     pub fn visible_indices(&self) -> Vec<usize> {
         let mut indices: Vec<usize> = (0..self.tasks.len()).collect();
         indices.sort_by_key(|&i| self.tasks[i].done);

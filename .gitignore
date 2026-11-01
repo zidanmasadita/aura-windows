@@ -1,1 +1,21 @@
+# Rust build artifacts
 /target
+
+# Analysis binaries and reverse-engineering tools
+/nusa_analysis/
+
+# Python scripts, virtualenvs and bytecode
+*.py
+*.pyc
+__pycache__/
+.venv/
+venv/
+env/
+
+# IDE and OS files
+.vscode/
+.idea/
+*.suo
+*.user
+Thumbs.db
+[Dd]esktop.ini

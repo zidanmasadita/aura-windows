@@ -7,8 +7,12 @@ use std::path::{Path, PathBuf};
 
 pub struct Shelf {
     pub files: Vec<String>,
+    pub selected: std::collections::HashSet<usize>,
+    pub select_mode: bool,
+    pub info_cache: std::collections::HashMap<String, ShelfFileInfo>,
 }
 
+#[derive(Clone)]
 pub struct ShelfFileInfo {
     pub name: String,
     pub is_dir: bool,
@@ -91,7 +95,63 @@ impl Shelf {
                 }
             }
         }
-        Self { files }
+        let mut info_cache = std::collections::HashMap::new();
+        for f in &files {
+            info_cache.insert(f.clone(), file_info(f));
+        }
+        Self {
+            files,
+            selected: std::collections::HashSet::new(),
+            select_mode: false,
+            info_cache,
+        }
+    }
+
+    pub fn get_info(&self, path: &str) -> ShelfFileInfo {
+        if let Some(info) = self.info_cache.get(path) {
+            info.clone()
+        } else {
+            file_info(path)
+        }
+    }
+
+    pub fn is_selected(&self, idx: usize) -> bool {
+        self.selected.contains(&idx)
+    }
+
+    pub fn toggle_select(&mut self, idx: usize) {
+        if self.selected.contains(&idx) {
+            self.selected.remove(&idx);
+        } else {
+            self.selected.insert(idx);
+        }
+    }
+
+    #[allow(dead_code)]
+    pub fn select_all(&mut self) {
+        if self.selected.len() == self.files.len() {
+            self.selected.clear();
+        } else {
+            self.selected = (0..self.files.len()).collect();
+        }
+    }
+
+    pub fn clear_selection(&mut self) {
+        self.selected.clear();
+    }
+
+    pub fn get_selected_or_all(&self) -> Vec<String> {
+        if self.selected.is_empty() {
+            self.files.clone()
+        } else {
+            let mut list = Vec::new();
+            for &idx in &self.selected {
+                if let Some(f) = self.files.get(idx) {
+                    list.push(f.clone());
+                }
+            }
+            list
+        }
     }
 
     pub fn save(&self) {
@@ -118,13 +178,16 @@ impl Shelf {
             return false;
         }
         self.files.push(trimmed.to_string());
+        self.info_cache.insert(trimmed.to_string(), file_info(trimmed));
         self.save();
         true
     }
 
     pub fn remove(&mut self, index: usize) {
         if index < self.files.len() {
-            self.files.remove(index);
+            let removed = self.files.remove(index);
+            self.info_cache.remove(&removed);
+            self.selected.remove(&index);
             self.save();
         }
     }
@@ -132,10 +195,13 @@ impl Shelf {
     pub fn clear(&mut self) {
         if !self.files.is_empty() {
             self.files.clear();
+            self.info_cache.clear();
+            self.selected.clear();
             self.save();
         }
     }
 
+    #[allow(dead_code)]
     pub fn page_count(&self, page_size: usize) -> usize {
         if page_size == 0 || self.files.is_empty() {
             1

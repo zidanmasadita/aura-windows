@@ -6,9 +6,9 @@
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use windows::core::{w, GUID, Result, PCWSTR};
+use windows::core::{w, GUID, Result, PCWSTR, HSTRING};
 use windows::Win32::Foundation::*;
-use windows::Win32::Graphics::Gdi::HBRUSH;
+use windows::Win32::Graphics::Gdi::{HBRUSH, ScreenToClient};
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::System::Ole::{OleInitialize, OleUninitialize};
 use windows::Win32::System::Com::{CoCreateInstance, CoTaskMemFree, CLSCTX_INPROC_SERVER};
@@ -19,6 +19,24 @@ use windows::Win32::UI::HiDpi::{
 use windows::Win32::UI::Input::KeyboardAndMouse::{TrackMouseEvent, TME_LEAVE, TRACKMOUSEEVENT};
 use windows::Win32::UI::Shell::{DragAcceptFiles, DragFinish, DragQueryFileW, HDROP, IFileOpenDialog, SIGDN_FILESYSPATH};
 use windows::Win32::UI::WindowsAndMessaging::*;
+
+#[link(name = "winmm")]
+extern "system" {
+    fn timeBeginPeriod(uPeriod: u32) -> u32;
+    fn timeEndPeriod(uPeriod: u32) -> u32;
+}
+
+#[link(name = "psapi")]
+extern "system" {
+    fn EmptyWorkingSet(hProcess: HANDLE) -> BOOL;
+}
+
+pub fn trim_working_set() {
+    unsafe {
+        use windows::Win32::System::Threading::GetCurrentProcess;
+        let _ = EmptyWorkingSet(GetCurrentProcess());
+    }
+}
 
 use crate::animator;
 use crate::drag;
@@ -38,14 +56,31 @@ const TIMER_TICK: usize = 1; // 100ms: eye tracking, waveform, media tracker, Po
 const TIMER_ALERT: usize = 2; // 250ms: Caps Lock + power/battery alert check
 const TIMER_ANIM: usize = 3; // 8ms: Nusa 2D spring animation + smooth lyric roll
 const TIMER_CLOSE: usize = 4; // 150ms: debounced mouse-leave close
+const TIMER_HOVER_EXPAND: usize = 5; // 280ms: hover wait-bulge auto-expand timer
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum EyeExpression {
+    Normal,
+    BlinkBoth,
+    WinkLeft,
+    WinkRight,
+    Inquisitive,
+}
 
 const MENU_TILE_OPEN: usize = 2001;
 const MENU_TILE_REMOVE: usize = 2002;
 const MENU_TILE_SHARE_BASE: usize = 2100;
+#[allow(dead_code)]
 const MENU_RB_TRAY_BASE: usize = 2200;
 const MENU_RB_MODEL_QUALITY: usize = 2301;
 const MENU_RB_MODEL_BALANCED: usize = 2302;
 const MENU_RB_MODEL_FAST: usize = 2303;
+
+const MENU_CONVERT_FORMAT_AVIF: usize = 2401;
+const MENU_CONVERT_FORMAT_WEBP: usize = 2402;
+const MENU_CONVERT_FORMAT_PNG: usize = 2403;
+#[allow(dead_code)]
+const MENU_CONVERT_TRAY_BASE: usize = 2500;
 
 const MENU_WATER_GOAL_1500: usize = 3001;
 const MENU_WATER_GOAL_2000: usize = 3002;
@@ -87,9 +122,6 @@ pub struct App {
     lyrics_fetching_key: Option<String>,
     lyrics_mode: bool,
     eye_look: (f32, f32),
-    eyes_closed: bool,
-    next_blink_at: Instant,
-    blink_until: Instant,
     pomodoro: pomodoro::Pomodoro,
     todo: todo::TodoList,
     todo_editing: bool,
@@ -105,6 +137,27 @@ pub struct App {
     removebg: removebg::RemoveBgState,
     removebg_pending: Arc<Mutex<Option<removebg::RemoveBgResult>>>,
     removebg_drag_arm: Option<(i32, i32)>,
+    convert: crate::convert::ConvertState,
+    convert_pending: Arc<Mutex<Option<crate::convert::ConvertResult>>>,
+    convert_drag_arm: Option<(i32, i32)>,
+    eye_openness: [f32; 2],
+    eye_openness_target: [f32; 2],
+    eye_slant: [f32; 2],
+    eye_slant_target: [f32; 2],
+    next_eye_expr_at: Instant,
+    eye_expr_until: Instant,
+    current_eye_expr: EyeExpression,
+    master_volume: f32,
+    last_non_zero_volume: f32,
+    volume_bar_hover: bool,
+    volume_bar_zoom: f32,
+    volume_bar_zoom_target: f32,
+    volume_dragging: bool,
+    music_button_zooms: [f32; 4],
+    music_button_zoom_targets: [f32; 4],
+    music_bar_hover: bool,
+    music_seek_pos: Option<f64>,
+    music_progress_dragging: bool,
     water: water::Water,
     last_water_reminder: Instant,
     last_section: IslandState,
@@ -114,6 +167,35 @@ pub struct App {
     crit_bat_warned: bool,
     caps_lock: bool,
     active_alert: Option<(PillAlert, Instant)>,
+    hover_bulging: bool,
+    hover_expand_timer_active: bool,
+    card_expanded: bool,
+    todo_scroll: f32,
+    todo_scroll_target: f32,
+    todo_editing_idx: Option<usize>,
+    tray_scroll: f32,
+    tray_scroll_target: f32,
+    transition_active: bool,
+    transition_start: Instant,
+    transition_from: IslandState,
+    transition_to: IslandState,
+    transition_dir: f32,
+    dot_spring: animator::FluidDotIndicator,
+    wheel_accum: f32,
+    hovered_dot: Option<usize>,
+    music_bar_zoom: f32,
+    music_bar_zoom_target: f32,
+    tray_genie_start: Option<Instant>,
+    trim_counter: u32,
+    mouse_pt: Option<(f32, f32)>,
+    tray_btn_hovers: [f32; 4],
+    tray_btn_hover_targets: [f32; 4],
+    rb_btn_hovers: [f32; 2],
+    rb_btn_hover_targets: [f32; 2],
+    cv_btn_hovers: [f32; 3],
+    cv_btn_hover_targets: [f32; 3],
+    pub settings: crate::settings::AuraSettings,
+    pub pdf_md_drag: Option<(usize, f32, f32)>,
 }
 
 impl App {
@@ -128,6 +210,12 @@ impl App {
         let now = Instant::now();
         let pill = state::PillState::new();
         let spring = animator::Spring2D::new(pill.width, pill.height);
+        let vol = 0.5f32;
+        let todo = todo::TodoList::load();
+        let shelf = crate::shelf::Shelf::load();
+        let removebg = removebg::RemoveBgState::new();
+        let convert = crate::convert::ConvertState::new();
+        let water = water::Water::load();
         let mut app = Box::new(Self {
             hwnd,
             renderer,
@@ -150,14 +238,11 @@ impl App {
             lyrics_fetching_key: None,
             lyrics_mode: false,
             eye_look: (0.0, 0.0),
-            eyes_closed: false,
-            next_blink_at: now + Duration::from_millis(3200),
-            blink_until: now,
             pomodoro: pomodoro::Pomodoro::new(),
-            todo: todo::TodoList::load(),
+            todo,
             todo_editing: false,
             todo_input: String::new(),
-            shelf: crate::shelf::Shelf::load(),
+            shelf,
             tray_page: 0,
             lan: None,
             dragging_out: false,
@@ -165,10 +250,31 @@ impl App {
             dropped_files,
             drag_arm: None,
             swallow_next_click: false,
-            removebg: removebg::RemoveBgState::new(),
+            removebg,
             removebg_pending: Arc::new(Mutex::new(None)),
             removebg_drag_arm: None,
-            water: water::Water::load(),
+            convert,
+            convert_pending: Arc::new(Mutex::new(None)),
+            convert_drag_arm: None,
+            eye_openness: [1.0, 1.0],
+            eye_openness_target: [1.0, 1.0],
+            eye_slant: [0.0, 0.0],
+            eye_slant_target: [0.0, 0.0],
+            next_eye_expr_at: now + Duration::from_millis(2500),
+            eye_expr_until: now,
+            current_eye_expr: EyeExpression::Normal,
+            master_volume: vol,
+            last_non_zero_volume: if vol > 0.05 { vol } else { 0.5 },
+            volume_bar_hover: false,
+            volume_bar_zoom: 0.0,
+            volume_bar_zoom_target: 0.0,
+            volume_dragging: false,
+            music_button_zooms: [1.0, 1.0, 1.0, 1.0],
+            music_button_zoom_targets: [1.0, 1.0, 1.0, 1.0],
+            music_bar_hover: false,
+            music_seek_pos: None,
+            music_progress_dragging: false,
+            water,
             last_water_reminder: now,
             last_section: IslandState::Expanded,
             last_scroll_switch: now,
@@ -177,9 +283,39 @@ impl App {
             crit_bat_warned: false,
             caps_lock,
             active_alert: None,
+            hover_bulging: false,
+            hover_expand_timer_active: false,
+            card_expanded: false,
+            todo_scroll: 0.0,
+            todo_scroll_target: 0.0,
+            todo_editing_idx: None,
+            tray_scroll: 0.0,
+            tray_scroll_target: 0.0,
+            transition_active: false,
+            transition_start: now,
+            transition_from: IslandState::Compact,
+            transition_to: IslandState::Expanded,
+            transition_dir: 1.0,
+            dot_spring: animator::FluidDotIndicator::new(0),
+            wheel_accum: 0.0,
+            hovered_dot: None,
+            music_bar_zoom: 0.0,
+            music_bar_zoom_target: 0.0,
+            tray_genie_start: None,
+            trim_counter: 0,
+            mouse_pt: None,
+            tray_btn_hovers: [0.0; 4],
+            tray_btn_hover_targets: [0.0; 4],
+            rb_btn_hovers: [0.0; 2],
+            rb_btn_hover_targets: [0.0; 2],
+            cv_btn_hovers: [0.0; 3],
+            cv_btn_hover_targets: [0.0; 3],
+            settings: crate::settings::AuraSettings::load(),
+            pdf_md_drag: None,
         });
         window::place_canvas_top_center(hwnd);
         app.on_paint();
+        trim_working_set();
         Ok(app)
     }
 
@@ -196,26 +332,51 @@ impl App {
         None
     }
 
-    /// Compute the exact target logical size `(width, height)` for `state`, matching
-    /// `IslandView.unbulgedSize` / `closedSize` in `aura-island`.
+    /// Compute the exact target logical size `(width, height)` for `state`.
+    /// Compact/Zen are minimalist (146x26 / 100x26), with smooth hover-bulge (1.08x).
+    /// All expanded sections share the exact unified size (520x180), and can expand via button.
     fn target_size_for(&self, state: IslandState) -> (f32, f32) {
         if !state.is_expanded() {
             if self.current_alert().is_some() {
-                return (360.0, 32.0);
+                return (320.0, 26.0);
             }
             if state == IslandState::Zen {
-                return (140.0, 32.0);
+                let (w, h) = (104.0, 28.0);
+                if self.hover_bulging {
+                    return (w * 1.08, h * 1.08);
+                }
+                return (w, h);
             }
             // Compact state:
             if self.pomodoro.is_active(chrono::Local::now()) {
-                return (160.0, 32.0);
+                let (w, h) = (160.0, 30.0);
+                if self.hover_bulging {
+                    return (w * 1.08, h * 1.08);
+                }
+                return (w, h);
             }
             if self.lyrics_mode && self.media.is_some() {
-                return (360.0, 32.0);
+                let (w, h) = (320.0, 30.0);
+                if self.hover_bulging {
+                    return (w * 1.05, h * 1.05);
+                }
+                return (w, h);
             }
-            return (180.0, 32.0);
+            let (w, h) = (180.0f32, 30.0f32);
+            if self.hover_bulging {
+                return ((w * 1.08).round(), (h * 1.08).round());
+            }
+            return (w, h);
         }
-        state.logical_size()
+        let (w, h) = state.logical_size();
+        (w, h)
+    }
+
+    fn animate_to_size(&mut self, to_w: f32, to_h: f32) {
+        if self.spring.set_target(to_w, to_h, animator::SpringPreset::Morph) {
+            self.ensure_anim_timer();
+        }
+        self.on_paint();
     }
 
     fn ensure_anim_timer(&mut self) {
@@ -265,9 +426,20 @@ impl App {
         }
         if commit {
             let text = std::mem::take(&mut self.todo_input);
-            self.todo.add(&text);
+            if let Some(idx) = self.todo_editing_idx.take() {
+                if let Some(task) = self.todo.tasks.get_mut(idx) {
+                    let trimmed = text.trim();
+                    if !trimmed.is_empty() {
+                        task.title = trimmed.to_string();
+                        self.todo.save();
+                    }
+                }
+            } else {
+                self.todo.add(&text);
+            }
         } else {
             self.todo_input.clear();
+            self.todo_editing_idx = None;
         }
         self.todo_editing = false;
         unsafe {
@@ -282,7 +454,23 @@ impl App {
             return;
         }
         self.todo_editing = true;
+        self.todo_editing_idx = None;
         self.todo_input.clear();
+        unsafe {
+            let ex = GetWindowLongPtrW(self.hwnd, GWL_EXSTYLE_IDX);
+            let _ = SetWindowLongPtrW(self.hwnd, GWL_EXSTYLE_IDX, ex & !NOACTIVATE_BIT);
+            let _ = SetForegroundWindow(self.hwnd);
+        }
+        self.on_paint();
+    }
+
+    fn begin_todo_edit_idx(&mut self, idx: usize) {
+        if idx >= self.todo.tasks.len() {
+            return;
+        }
+        self.todo_editing = true;
+        self.todo_editing_idx = Some(idx);
+        self.todo_input = self.todo.tasks[idx].title.clone();
         unsafe {
             let ex = GetWindowLongPtrW(self.hwnd, GWL_EXSTYLE_IDX);
             let _ = SetWindowLongPtrW(self.hwnd, GWL_EXSTYLE_IDX, ex & !NOACTIVATE_BIT);
@@ -312,9 +500,7 @@ impl App {
                 self.todo_input.pop();
             }
             0x0D => {
-                let text = std::mem::take(&mut self.todo_input);
-                self.todo.add(&text);
-                self.end_todo_editing(false);
+                self.end_todo_editing(true);
                 return;
             }
             0x1B => {
@@ -357,6 +543,10 @@ impl App {
             self.request_lyrics_async();
         }
 
+        if old_state == IslandState::Lyrics || new_state == IslandState::Lyrics || new_state == IslandState::Expanded {
+            self.renderer.cancel_lyric_roll();
+        }
+
         if new_state.is_expanded() {
             self.last_section = if new_state == IslandState::Lyrics {
                 IslandState::Expanded
@@ -376,6 +566,7 @@ impl App {
 
         let (from_w, from_h) = (self.pill.width, self.pill.height);
         self.pill.state = new_state;
+        self.update_dot_indicator_target();
         if new_state == IslandState::Todo {
             self.todo = todo::TodoList::load();
         }
@@ -399,6 +590,29 @@ impl App {
         }
     }
 
+    fn update_dot_indicator_target(&mut self) {
+        let active = self.pill.state.section_index();
+        self.dot_spring.set_target_slot(active);
+    }
+
+    pub fn is_animating(&mut self) -> bool {
+        self.spring.active
+            || self.transition_active
+            || self.tray_bounce.is_active()
+            || self.renderer.is_lyric_rolling()
+            || (self.todo_scroll - self.todo_scroll_target).abs() > 0.5
+            || (self.tray_scroll - self.tray_scroll_target).abs() > 0.5
+            || self.music_button_zooms.iter().zip(&self.music_button_zoom_targets).any(|(a, b)| (a - b).abs() > 0.005)
+            || (self.music_bar_zoom - self.music_bar_zoom_target).abs() > 0.005
+            || (self.volume_bar_zoom - self.volume_bar_zoom_target).abs() > 0.005
+            || (self.eye_openness[0] - self.eye_openness_target[0]).abs() > 0.01
+            || (self.eye_openness[1] - self.eye_openness_target[1]).abs() > 0.01
+            || (self.eye_slant[0] - self.eye_slant_target[0]).abs() > 0.01
+            || (self.eye_slant[1] - self.eye_slant_target[1]).abs() > 0.01
+            || self.tray_genie_start.is_some()
+            || self.dot_spring.active
+    }
+
     fn on_anim_tick(&mut self) {
         let was_active = self.spring.active;
         let (w, h, still_active) = self.spring.step();
@@ -408,23 +622,162 @@ impl App {
         }
         let bounce_active = self.tray_bounce.is_active();
         let rolling = self.renderer.is_lyric_rolling();
-        if was_active || bounce_active || rolling {
+        let mut zoom_anim = false;
+        for i in 0..4 {
+            let diff = self.music_button_zoom_targets[i] - self.music_button_zooms[i];
+            if diff.abs() > 0.005 {
+                self.music_button_zooms[i] += diff * 0.35;
+                zoom_anim = true;
+            } else {
+                self.music_button_zooms[i] = self.music_button_zoom_targets[i];
+            }
+        }
+        let bdiff = self.music_bar_zoom_target - self.music_bar_zoom;
+        if bdiff.abs() > 0.005 {
+            self.music_bar_zoom += bdiff * 0.30;
+            zoom_anim = true;
+        } else {
+            self.music_bar_zoom = self.music_bar_zoom_target;
+        }
+        let vdiff = self.volume_bar_zoom_target - self.volume_bar_zoom;
+        if vdiff.abs() > 0.005 {
+            self.volume_bar_zoom += vdiff * 0.30;
+            zoom_anim = true;
+        } else {
+            self.volume_bar_zoom = self.volume_bar_zoom_target;
+        }
+        if let Some(start) = self.tray_genie_start {
+            let elapsed = start.elapsed().as_secs_f32();
+            if elapsed >= 0.35 {
+                self.shelf.clear();
+                self.tray_genie_start = None;
+            }
+            zoom_anim = true;
+        }
+        let trans_active = if self.transition_active {
+            let elapsed = self.transition_start.elapsed().as_secs_f32();
+            if elapsed >= 0.20 {
+                self.transition_active = false;
+                false
+            } else {
+                true
+            }
+        } else {
+            false
+        };
+        let mut scroll_anim = false;
+        let todo_diff = self.todo_scroll_target - self.todo_scroll;
+        if todo_diff.abs() > 0.5 {
+            self.todo_scroll += todo_diff * 0.25;
+            scroll_anim = true;
+        } else {
+            self.todo_scroll = self.todo_scroll_target;
+        }
+        let tray_diff = self.tray_scroll_target - self.tray_scroll;
+        if tray_diff.abs() > 0.5 {
+            self.tray_scroll += tray_diff * 0.25;
+            scroll_anim = true;
+        } else {
+            self.tray_scroll = self.tray_scroll_target;
+        }
+
+        let (_, _, dot_anim) = self.dot_spring.step();
+
+        let mut btn_hover_anim = false;
+        for i in 0..4 {
+            let diff = self.tray_btn_hover_targets[i] - self.tray_btn_hovers[i];
+            if diff.abs() > 0.005 {
+                self.tray_btn_hovers[i] += diff * 0.28;
+                btn_hover_anim = true;
+            } else {
+                self.tray_btn_hovers[i] = self.tray_btn_hover_targets[i];
+            }
+        }
+        for i in 0..2 {
+            let diff = self.rb_btn_hover_targets[i] - self.rb_btn_hovers[i];
+            if diff.abs() > 0.005 {
+                self.rb_btn_hovers[i] += diff * 0.28;
+                btn_hover_anim = true;
+            } else {
+                self.rb_btn_hovers[i] = self.rb_btn_hover_targets[i];
+            }
+        }
+        for i in 0..3 {
+            let diff = self.cv_btn_hover_targets[i] - self.cv_btn_hovers[i];
+            if diff.abs() > 0.005 {
+                self.cv_btn_hovers[i] += diff * 0.28;
+                btn_hover_anim = true;
+            } else {
+                self.cv_btn_hovers[i] = self.cv_btn_hover_targets[i];
+            }
+        }
+
+        let mut eye_anim = false;
+        if self.pill.state == IslandState::Zen {
+            for i in 0..2 {
+                let odiff = self.eye_openness_target[i] - self.eye_openness[i];
+                if odiff.abs() > 0.005 {
+                    self.eye_openness[i] += odiff * 0.35;
+                    eye_anim = true;
+                } else {
+                    self.eye_openness[i] = self.eye_openness_target[i];
+                }
+                let sdiff = self.eye_slant_target[i] - self.eye_slant[i];
+                if sdiff.abs() > 0.005 {
+                    self.eye_slant[i] += sdiff * 0.30;
+                    eye_anim = true;
+                } else {
+                    self.eye_slant[i] = self.eye_slant_target[i];
+                }
+            }
+        }
+
+        if was_active || bounce_active || rolling || zoom_anim || trans_active || scroll_anim || dot_anim || btn_hover_anim || eye_anim {
             self.on_paint();
         }
-        if !still_active && !self.tray_bounce.is_active() && !self.renderer.is_lyric_rolling() {
+        if !still_active && !self.tray_bounce.is_active() && !self.renderer.is_lyric_rolling() && !zoom_anim && !trans_active && !scroll_anim && !dot_anim && !btn_hover_anim && !eye_anim {
             self.stop_anim_timer();
         }
     }
 
-    /// Update eye cursor tracking & blinking (`AppDelegate.eyeTimer` + `IslandView.drawEyes`).
+    /// Update eye cursor tracking & expressions (`AppDelegate.eyeTimer` + `IslandView.drawEyes`).
     fn update_eyes(&mut self) {
         let now = Instant::now();
-        if now >= self.next_blink_at {
-            self.eyes_closed = true;
-            self.blink_until = now + Duration::from_millis(180);
-            self.next_blink_at = now + Duration::from_millis(3400);
-        } else if self.eyes_closed && now >= self.blink_until {
-            self.eyes_closed = false;
+        if self.pill.state == IslandState::Zen {
+            if self.current_eye_expr == EyeExpression::Normal {
+                if now >= self.next_eye_expr_at {
+                    let r = (now.elapsed().as_millis() % 100) as u32;
+                    if r < 45 {
+                        self.current_eye_expr = EyeExpression::BlinkBoth;
+                        self.eye_openness_target = [0.06, 0.06];
+                        self.eye_slant_target = [0.0, 0.0];
+                        self.eye_expr_until = now + Duration::from_millis(160);
+                    } else if r < 65 {
+                        self.current_eye_expr = EyeExpression::WinkLeft;
+                        self.eye_openness_target = [0.06, 1.0];
+                        self.eye_slant_target = [0.0, 0.0];
+                        self.eye_expr_until = now + Duration::from_millis(400);
+                    } else if r < 85 {
+                        self.current_eye_expr = EyeExpression::WinkRight;
+                        self.eye_openness_target = [1.0, 0.06];
+                        self.eye_slant_target = [0.0, 0.0];
+                        self.eye_expr_until = now + Duration::from_millis(400);
+                    } else {
+                        self.current_eye_expr = EyeExpression::Inquisitive;
+                        self.eye_openness_target = [1.0, 0.88];
+                        self.eye_slant_target = [-1.6, 1.6];
+                        self.eye_expr_until = now + Duration::from_millis(1200);
+                    }
+                    self.ensure_anim_timer();
+                }
+            } else if now >= self.eye_expr_until {
+                self.current_eye_expr = EyeExpression::Normal;
+                self.eye_openness_target = [1.0, 1.0];
+                self.eye_slant_target = [0.0, 0.0];
+                let next_ms = 2200 + ((now.elapsed().as_millis() % 2800) as u64);
+                self.next_eye_expr_at = now + Duration::from_millis(next_ms);
+                self.ensure_anim_timer();
+            }
         }
 
         let mut pt = POINT::default();
@@ -459,6 +812,7 @@ impl App {
             m.title.clone(),
             m.artist.clone(),
             m.album.clone(),
+            m.duration_secs,
         );
     }
 
@@ -729,6 +1083,10 @@ impl App {
             }
             TIMER_ALERT => {
                 self.check_system_sensors();
+                self.trim_counter = self.trim_counter.wrapping_add(1);
+                if self.trim_counter % 20 == 0 {
+                    trim_working_set();
+                }
             }
             TIMER_ANIM => self.on_anim_tick(),
             TIMER_CLOSE => {
@@ -743,6 +1101,17 @@ impl App {
                     return;
                 }
                 self.apply_mouse_leave();
+            }
+            TIMER_HOVER_EXPAND => {
+                unsafe {
+                    let _ = KillTimer(self.hwnd, TIMER_HOVER_EXPAND);
+                }
+                self.hover_expand_timer_active = false;
+                self.hover_bulging = false;
+                if !self.pill.state.is_expanded() && self.cursor_inside_window() {
+                    let target = self.last_section;
+                    self.set_state(target);
+                }
             }
             _ => {}
         }
@@ -773,6 +1142,18 @@ impl App {
         (canvas_x - offset_x, canvas_y)
     }
 
+    fn cursor_inside_pill(&self, x_px: i32, y_px: i32) -> bool {
+        let (target_w, target_h) = self.target_size_for(self.pill.state);
+        let max_w = self.pill.width.max(target_w);
+        let max_h = self.pill.height.max(target_h);
+        let scale = window::dpi_scale(self.hwnd);
+        let canvas_x = (x_px as f32) / scale;
+        let canvas_y = (y_px as f32) / scale;
+        let left = (window::CANVAS_W - max_w) * 0.5;
+        let right = (window::CANVAS_W + max_w) * 0.5;
+        canvas_x >= left - 6.0 && canvas_x <= right + 6.0 && canvas_y >= 0.0 && canvas_y <= max_h + 6.0
+    }
+
     fn cursor_inside_window(&self) -> bool {
         let mut pt = POINT::default();
         let mut rect = RECT::default();
@@ -780,46 +1161,271 @@ impl App {
             return false;
         }
         let scale = window::dpi_scale(self.hwnd);
-        let offset_x_px = (((window::CANVAS_W - self.pill.width) * 0.5) * scale).round() as i32;
-        let pill_w_px = (self.pill.width * scale).round() as i32;
-        let pill_h_px = (self.pill.height * scale).round() as i32;
-        let pill_left = rect.left + offset_x_px - 2;
-        let pill_right = rect.left + offset_x_px + pill_w_px + 2;
+        let (target_w, target_h) = self.target_size_for(self.pill.state);
+        let active_w = if self.pill.state.is_expanded() {
+            self.pill.width.max(target_w)
+        } else {
+            self.pill.width.max(160.0)
+        };
+        let active_h = if self.pill.state.is_expanded() {
+            self.pill.height.max(target_h)
+        } else {
+            self.pill.height.max(30.0)
+        };
+        let offset_x_px = (((window::CANVAS_W - active_w) * 0.5) * scale).round() as i32;
+        let pill_w_px = (active_w * scale).round() as i32;
+        let pill_h_px = (active_h * scale).round() as i32;
+        let pill_left = rect.left + offset_x_px - 6;
+        let pill_right = rect.left + offset_x_px + pill_w_px + 6;
         let pill_top = rect.top;
-        let pill_bottom = rect.top + pill_h_px + 2;
+        let pill_bottom = rect.top + pill_h_px + 6;
         pt.x >= pill_left && pt.x <= pill_right && pt.y >= pill_top && pt.y <= pill_bottom
     }
 
     fn apply_mouse_leave(&mut self) {
+        if self.cursor_inside_window() {
+            self.arm_mouse_tracking();
+            return;
+        }
         self.suppress_hover_open_after_click_close = false;
+        if self.hover_expand_timer_active {
+            self.hover_expand_timer_active = false;
+            self.hover_bulging = false;
+            unsafe {
+                let _ = KillTimer(self.hwnd, TIMER_HOVER_EXPAND);
+            }
+        }
+        self.card_expanded = false;
+        self.mouse_pt = None;
+        self.music_bar_hover = false;
+        self.music_bar_zoom_target = 0.0;
+        self.music_button_zoom_targets = [1.0, 1.0, 1.0, 1.0];
         let target = self.closed_target_state();
         self.set_state(target);
+        trim_working_set();
     }
 
-    fn on_mouse_move(&mut self) {
+    fn on_mouse_move(&mut self, x_px: i32, y_px: i32) {
         self.suppress_leave = false;
-        unsafe {
-            let _ = KillTimer(self.hwnd, TIMER_CLOSE);
-        }
         self.arm_mouse_tracking();
+
+        let (pill_x, pill_y) = self.client_px_to_pill_pt(x_px, y_px);
+        self.mouse_pt = Some((pill_x, pill_y));
+        let old_hovered_dot = self.hovered_dot;
+        self.hovered_dot = if self.pill.state.is_expanded() {
+            renderer::dot_index_at(pill_x, pill_y, self.pill.width, self.pill.height)
+        } else {
+            None
+        };
+        if old_hovered_dot != self.hovered_dot || self.pdf_md_drag.is_some() {
+            self.on_paint();
+        }
+
+        let inside = self.cursor_inside_pill(x_px, y_px);
+        if !inside {
+            if !self.pill.state.is_expanded() {
+                // If cursor moved away while wait-bulging, cancel timer and smoothly deflate back:
+                if self.hover_expand_timer_active {
+                    self.hover_expand_timer_active = false;
+                    self.hover_bulging = false;
+                    unsafe {
+                        let _ = KillTimer(self.hwnd, TIMER_HOVER_EXPAND);
+                    }
+                    let (to_w, to_h) = self.target_size_for(self.pill.state);
+                    self.spring.set_target(to_w, to_h, animator::SpringPreset::Collapse);
+                    self.ensure_anim_timer();
+                }
+                return;
+            } else if !self.cursor_inside_window() {
+                // Moved outside the expanded card area: schedule close timer
+                unsafe {
+                    let _ = SetTimer(self.hwnd, TIMER_CLOSE, 150, None);
+                }
+                return;
+            }
+        } else {
+            // Truly inside the pill: cancel any close timer immediately
+            unsafe {
+                let _ = KillTimer(self.hwnd, TIMER_CLOSE);
+            }
+        }
+
+        if self.pill.state == IslandState::Zen {
+            let (x, y) = self.client_px_to_pill_pt(x_px, y_px);
+            let mid_x = self.pill.width * 0.5;
+            let mid_y = self.pill.height * 0.5;
+            self.eye_look = (((x - mid_x) / 45.0).clamp(-1.0, 1.0), ((y - mid_y) / 25.0).clamp(-1.0, 1.0));
+            if self.media.is_none() && !self.pomodoro.is_active(chrono::Local::now()) {
+                self.on_paint();
+            }
+        }
+        if self.volume_dragging {
+            let (x, _) = self.client_px_to_pill_pt(x_px, y_px);
+            let v_left = renderer::MUSIC_VOLUME_BAR_RECT.0;
+            let v_w = renderer::MUSIC_VOLUME_BAR_RECT.2 - v_left;
+            let level = ((x - v_left) / v_w).clamp(0.0, 1.0);
+            self.master_volume = level;
+            if level > 0.02 {
+                self.last_non_zero_volume = level;
+            }
+            crate::media::set_master_volume_async(level);
+            self.on_paint();
+            return;
+        }
+        if self.music_progress_dragging {
+            let (x, _) = self.client_px_to_pill_pt(x_px, y_px);
+            let lyrics_t = ((self.pill.width - 540.0) / (700.0 - 540.0)).clamp(0.0, 1.0);
+            let bar_w = 340.0 + (164.0 - 340.0) * lyrics_t;
+            let bar_left = 98.0f32;
+            let bar_right = bar_left + bar_w;
+            if let Some(ref m) = self.media {
+                if m.duration_secs > 0.0 {
+                    let t = ((x - bar_left) / (bar_right - bar_left)).clamp(0.0, 1.0) as f64;
+                    self.music_seek_pos = Some(t * m.duration_secs);
+                    self.on_paint();
+                }
+            }
+            return;
+        }
+        if self.pill.state == IslandState::Expanded || self.pill.state == IslandState::Lyrics {
+            let (x, y) = self.client_px_to_pill_pt(x_px, y_px);
+            let lyrics_t = ((self.pill.width - 540.0) / (700.0 - 540.0)).clamp(0.0, 1.0);
+            let bar_w = 324.0 + (164.0 - 324.0) * lyrics_t;
+            let bar_hover = x >= 90.0 && x <= (98.0 + bar_w + 4.0) && y >= 98.0 && y <= 122.0;
+            if bar_hover != self.music_bar_hover {
+                self.music_bar_hover = bar_hover;
+                self.music_bar_zoom_target = if bar_hover { 1.0 } else { 0.0 };
+                self.ensure_anim_timer();
+                self.on_paint();
+            }
+
+            let vol_hover = x >= renderer::MUSIC_VOLUME_BAR_RECT.0 - 4.0
+                && x <= renderer::MUSIC_SPEAKER_RECT.2 + 4.0
+                && y >= renderer::MUSIC_VOLUME_BAR_RECT.1 - 4.0
+                && y <= renderer::MUSIC_VOLUME_BAR_RECT.3 + 4.0;
+            if vol_hover != self.volume_bar_hover {
+                self.volume_bar_hover = vol_hover;
+                self.volume_bar_zoom_target = if vol_hover { 1.0 } else { 0.0 };
+                self.ensure_anim_timer();
+                self.on_paint();
+            }
+
+            let c0 = renderer::MUSIC_CONTROL_CENTERS[0]
+                + (renderer::LYRICS_CONTROL_CENTERS[0] - renderer::MUSIC_CONTROL_CENTERS[0]) * lyrics_t;
+            let c1 = renderer::MUSIC_CONTROL_CENTERS[1]
+                + (renderer::LYRICS_CONTROL_CENTERS[1] - renderer::MUSIC_CONTROL_CENTERS[1]) * lyrics_t;
+            let c2 = renderer::MUSIC_CONTROL_CENTERS[2]
+                + (renderer::LYRICS_CONTROL_CENTERS[2] - renderer::MUSIC_CONTROL_CENTERS[2]) * lyrics_t;
+            let button_centers = [
+                (84.0f32, 140.0f32),
+                (c0, 140.0f32),
+                (c1, 140.0f32),
+                (c2, 140.0f32),
+            ];
+            let mut changed = false;
+            for (i, &(bx, by)) in button_centers.iter().enumerate() {
+                let dist_sq = (x - bx) * (x - bx) + (y - by) * (y - by);
+                let target = if dist_sq <= 18.0 * 18.0 { 1.2 } else { 1.0 };
+                if (self.music_button_zoom_targets[i] - target).abs() > 0.01 {
+                    self.music_button_zoom_targets[i] = target;
+                    changed = true;
+                }
+            }
+            if changed {
+                self.ensure_anim_timer();
+            }
+        }
+        if self.pill.state == IslandState::Tray {
+            let rects = renderer::compute_tray_button_rects(&self.tray_btn_hovers);
+            let mut changed = false;
+            for i in 0..4 {
+                let inside = pill_x >= rects[i].0 && pill_x <= rects[i].2 && pill_y >= rects[i].1 && pill_y <= rects[i].3;
+                let target = if inside { 1.0 } else { 0.0 };
+                if (self.tray_btn_hover_targets[i] - target).abs() > 0.01 {
+                    self.tray_btn_hover_targets[i] = target;
+                    changed = true;
+                }
+            }
+            if changed {
+                self.ensure_anim_timer();
+            }
+        } else {
+            for i in 0..4 { self.tray_btn_hover_targets[i] = 0.0; }
+        }
+
+        if self.pill.state == IslandState::RemoveBg {
+            let rects = renderer::compute_rb_button_rects(&self.rb_btn_hovers, self.removebg.model.label().len());
+            let mut changed = false;
+            for i in 0..2 {
+                let inside = pill_x >= rects[i].0 && pill_x <= rects[i].2 && pill_y >= rects[i].1 && pill_y <= rects[i].3;
+                let target = if inside { 1.0 } else { 0.0 };
+                if (self.rb_btn_hover_targets[i] - target).abs() > 0.01 {
+                    self.rb_btn_hover_targets[i] = target;
+                    changed = true;
+                }
+            }
+            if changed {
+                self.ensure_anim_timer();
+            }
+        } else {
+            for i in 0..2 { self.rb_btn_hover_targets[i] = 0.0; }
+        }
+
+        if self.pill.state == IslandState::Convert && self.convert.view != crate::convert::ConvertView::AppGrid {
+            let has_format_btn = self.convert.active_tool == crate::convert::ConvertTool::Photo;
+            let rects = renderer::compute_cv_button_rects(&self.cv_btn_hovers, self.convert.photo_format.display_name().len(), has_format_btn);
+            let mut changed = false;
+            for i in 0..3 {
+                let inside = pill_x >= rects[i].0 && pill_x <= rects[i].2 && pill_y >= rects[i].1 && pill_y <= rects[i].3;
+                let target = if inside { 1.0 } else { 0.0 };
+                if (self.cv_btn_hover_targets[i] - target).abs() > 0.01 {
+                    self.cv_btn_hover_targets[i] = target;
+                    changed = true;
+                }
+            }
+            if changed {
+                self.ensure_anim_timer();
+            }
+        } else {
+            for i in 0..3 { self.cv_btn_hover_targets[i] = 0.0; }
+        }
+
+        if self.pill.state == IslandState::RemoveBg || self.pill.state == IslandState::Convert {
+            self.on_paint();
+        }
         if self.suppress_hover_open_after_click_close {
             return;
         }
-        if self.pill.state == IslandState::Zen {
-            if self.media.is_some() || self.pomodoro.is_active(chrono::Local::now()) {
-                let target = self.last_section;
-                self.set_state(target);
+
+        if !self.pill.state.is_expanded() {
+            // Nusa-style hover wait-bulge: slightly swell the pill (1.08x) for 280ms before expanding
+            if !self.hover_expand_timer_active {
+                self.hover_expand_timer_active = true;
+                self.hover_bulging = true;
+                unsafe {
+                    let _ = SetTimer(self.hwnd, TIMER_HOVER_EXPAND, 280, None);
+                }
+                let (to_w, to_h) = self.target_size_for(self.pill.state);
+                self.spring.set_target(to_w, to_h, animator::SpringPreset::Bulge);
+                self.ensure_anim_timer();
             }
-        } else if self.pill.state == IslandState::Compact
-            && (self.media.is_some() || self.pomodoro.is_active(chrono::Local::now()))
-        {
-            let target = self.last_section;
-            self.set_state(target);
         }
     }
 
     fn on_mouse_leave(&mut self) {
         self.tracking_mouse = false;
+        self.hovered_dot = None;
+        self.mouse_pt = None;
+        if self.hover_expand_timer_active {
+            self.hover_expand_timer_active = false;
+            self.hover_bulging = false;
+            unsafe {
+                let _ = KillTimer(self.hwnd, TIMER_HOVER_EXPAND);
+            }
+            let (to_w, to_h) = self.target_size_for(self.pill.state);
+            self.spring.set_target(to_w, to_h, animator::SpringPreset::Collapse);
+            self.ensure_anim_timer();
+        }
         if self.dragging_out || self.drag_hovering || self.todo_editing {
             return;
         }
@@ -836,35 +1442,203 @@ impl App {
         }
     }
 
-    /// Vertical mouse-wheel scrolling switches between the 5 expanded sections (`IslandView.scrollWheel`).
+    fn is_section_enabled(&self, state: IslandState) -> bool {
+        match state {
+            IslandState::Expanded | IslandState::Lyrics => self.settings.music_enabled,
+            IslandState::Pomodoro => self.settings.pomodoro_enabled,
+            IslandState::Todo => self.settings.todo_enabled,
+            IslandState::Water => self.settings.water_enabled,
+            IslandState::Tray => self.settings.tray_enabled,
+            IslandState::RemoveBg => self.settings.removebg_enabled,
+            IslandState::Convert => self.settings.convert_enabled,
+            IslandState::Zen | IslandState::Compact | IslandState::Settings => true,
+        }
+    }
+
+    fn switch_section_with_transition(&mut self, target: IslandState, dir: f32) {
+        if target == self.pill.state {
+            return;
+        }
+        self.transition_from = self.pill.state;
+        self.transition_to = target;
+        self.transition_dir = dir;
+        self.transition_start = Instant::now();
+        self.transition_active = true;
+        self.set_state(target);
+        self.ensure_anim_timer();
+    }
+
+    /// Vertical mouse-wheel scrolling switches between the expanded sections with smooth slide transition,
+    /// or scrolls the Todo list and Tray carousel when hovering over them.
     fn on_mouse_wheel(&mut self, wheel_delta: i16) {
         if !self.pill.state.is_expanded() || wheel_delta == 0 {
             return;
         }
-        let now = Instant::now();
-        if now.duration_since(self.last_scroll_switch) < Duration::from_millis(200) {
-            return;
+
+        let mut pt = POINT::default();
+        unsafe {
+            let _ = GetCursorPos(&mut pt);
+            let _ = ScreenToClient(self.hwnd, &mut pt);
         }
-        let cur_idx = self.pill.state.section_index() as isize;
-        let next_idx = if wheel_delta < 0 {
-            (cur_idx + 1).clamp(0, 5) as usize
-        } else {
-            (cur_idx - 1).clamp(0, 5) as usize
-        };
-        if next_idx != cur_idx as usize {
+        let (x, y) = self.client_px_to_pill_pt(pt.x, pt.y);
+
+        // 1. Scroll Todo list when hovering over tasks column:
+        if self.pill.state == IslandState::Todo && x >= 150.0 {
+            let max_scroll = (self.todo.tasks.len() as f32 * renderer::TODO_ROW_PITCH - 110.0).max(0.0);
+            if max_scroll > 0.0 {
+                let step = 34.0f32;
+                if wheel_delta > 0 && self.todo_scroll_target > 0.5 {
+                    self.todo_scroll_target = (self.todo_scroll_target - step).max(0.0);
+                    self.ensure_anim_timer();
+                    return;
+                } else if wheel_delta < 0 && self.todo_scroll_target < max_scroll - 0.5 {
+                    self.todo_scroll_target = (self.todo_scroll_target + step).min(max_scroll);
+                    self.ensure_anim_timer();
+                    return;
+                }
+            }
+            // If the list cannot scroll further or is already at boundary, fall through to section switching!
+        }
+
+        // 2. Scroll Tray horizontal carousel when hovering over shelf:
+        if self.pill.state == IslandState::Tray && y >= 40.0 {
+            let total_w = self.shelf.files.len() as f32 * renderer::TRAY_TILE_PITCH;
+            let max_scroll = (total_w - renderer::TRAY_CAROUSEL_W).max(0.0);
+            if max_scroll > 0.0 {
+                let step = 56.0f32;
+                if wheel_delta > 0 && self.tray_scroll_target > 0.5 {
+                    self.tray_scroll_target = (self.tray_scroll_target - step).max(0.0);
+                    self.ensure_anim_timer();
+                    return;
+                } else if wheel_delta < 0 && self.tray_scroll_target < max_scroll - 0.5 {
+                    self.tray_scroll_target = (self.tray_scroll_target + step).min(max_scroll);
+                    self.ensure_anim_timer();
+                    return;
+                }
+            }
+            // If the carousel cannot scroll further or is already at boundary, fall through to section switching!
+        }
+
+        let now = Instant::now();
+        if now.duration_since(self.last_scroll_switch) > Duration::from_millis(300) {
+            self.wheel_accum = 0.0;
+        }
+        self.wheel_accum += wheel_delta as f32;
+        let notch_threshold = 90.0f32;
+        if self.wheel_accum.abs() >= notch_threshold {
+            let steps = (self.wheel_accum / notch_threshold) as isize;
+            self.wheel_accum -= steps as f32 * notch_threshold;
             self.last_scroll_switch = now;
-            self.set_state(IslandState::from_section_index(next_idx));
+
+            let count = crate::state::SECTION_COUNT as isize;
+            let base_idx = if self.transition_active {
+                self.transition_to.section_index() as isize
+            } else {
+                self.pill.state.section_index() as isize
+            };
+
+            // wheel_delta > 0 (scroll up) -> previous section (-steps)
+            // wheel_delta < 0 (scroll down) -> next section (+steps)
+            let delta_sec = -steps;
+            let step_dir = if delta_sec > 0 { 1 } else { -1 };
+            let mut cand_idx = base_idx;
+            for _ in 0..count {
+                cand_idx = (cand_idx + step_dir).rem_euclid(count);
+                let target = IslandState::from_section_index(cand_idx as usize);
+                if self.is_section_enabled(target) {
+                    let dir = if step_dir > 0 { 1.0 } else { -1.0 };
+                    self.switch_section_with_transition(target, dir);
+                    break;
+                }
+            }
         }
     }
 
     fn on_mouse_down(&mut self, x_px: i32, y_px: i32) {
         self.drag_arm = None;
         self.removebg_drag_arm = None;
+        self.convert_drag_arm = None;
+        if self.pill.state == IslandState::Convert {
+            let tool = self.convert.active_tool;
+            if tool == crate::convert::ConvertTool::PdfToMd {
+                let (x, y) = self.client_px_to_pill_pt(x_px, y_px);
+                let st = self.convert.tool_state(tool);
+                for i in 0..st.queue.len().min(3) {
+                    let card_x = renderer::PDF_MD_CARD_START_X + (i as f32) * renderer::PDF_MD_CARD_PITCH;
+                    if x >= card_x && x <= card_x + renderer::PDF_MD_CARD_W && y >= renderer::PDF_MD_CARD_Y && y <= renderer::PDF_MD_CARD_Y + renderer::PDF_MD_CARD_H {
+                        self.convert.set_queue_index(tool, i);
+                        self.pdf_md_drag = Some((i, x, y));
+                        self.on_paint();
+                        return;
+                    }
+                }
+            }
+            let st = self.convert.tool_state(tool);
+            if st.result_bytes.is_some() {
+                let (x, y) = self.client_px_to_pill_pt(x_px, y_px);
+                let r = renderer::CONVERT_LIST_VIEW_RECT;
+                if x >= r.0 && x <= r.2 && y >= r.1 && y <= r.3 {
+                    self.convert_drag_arm = Some((x_px, y_px));
+                }
+            }
+            return;
+        }
+        if self.pill.state == IslandState::Expanded || self.pill.state == IslandState::Lyrics {
+            let (x, y) = self.client_px_to_pill_pt(x_px, y_px);
+            let lyrics_t = ((self.pill.width - 540.0) / (700.0 - 540.0)).clamp(0.0, 1.0);
+            let bar_w = 340.0 + (164.0 - 340.0) * lyrics_t;
+            let bar_left = 98.0f32;
+            let bar_right = bar_left + bar_w;
+            if x >= bar_left - 4.0 && x <= bar_right + 4.0 && y >= 102.0 && y <= 118.0 {
+                self.music_progress_dragging = true;
+                if let Some(ref m) = self.media {
+                    if m.duration_secs > 0.0 {
+                        let t = ((x - bar_left) / (bar_right - bar_left)).clamp(0.0, 1.0) as f64;
+                        self.music_seek_pos = Some(t * m.duration_secs);
+                        self.on_paint();
+                    }
+                }
+                return;
+            }
+
+            // Volume speaker click (mute toggle):
+            if x >= renderer::MUSIC_SPEAKER_RECT.0 - 4.0 && x <= renderer::MUSIC_SPEAKER_RECT.2 + 4.0
+                && y >= renderer::MUSIC_SPEAKER_RECT.1 - 4.0 && y <= renderer::MUSIC_SPEAKER_RECT.3 + 4.0 {
+                if self.master_volume > 0.02 {
+                    self.last_non_zero_volume = self.master_volume;
+                    self.master_volume = 0.0;
+                } else {
+                    self.master_volume = self.last_non_zero_volume.max(0.2);
+                }
+                crate::media::set_master_volume_async(self.master_volume);
+                self.on_paint();
+                return;
+            }
+            // Volume bar click & drag:
+            if self.volume_bar_zoom > 0.15
+                && x >= renderer::MUSIC_VOLUME_BAR_RECT.0 - 4.0
+                && x <= renderer::MUSIC_VOLUME_BAR_RECT.2 + 4.0
+                && y >= renderer::MUSIC_VOLUME_BAR_RECT.1 - 4.0
+                && y <= renderer::MUSIC_VOLUME_BAR_RECT.3 + 4.0
+            {
+                self.volume_dragging = true;
+                let v_left = renderer::MUSIC_VOLUME_BAR_RECT.0;
+                let v_w = renderer::MUSIC_VOLUME_BAR_RECT.2 - v_left;
+                let level = ((x - v_left) / v_w).clamp(0.0, 1.0);
+                self.master_volume = level;
+                if level > 0.02 {
+                    self.last_non_zero_volume = level;
+                }
+                crate::media::set_master_volume_async(level);
+                self.on_paint();
+                return;
+            }
+        }
         if self.pill.state == IslandState::RemoveBg {
             // Arm drag-out from the result panel (mirror of tray tile arming).
             if self.removebg.result_bytes.is_some() {
                 let (x, y) = self.client_px_to_pill_pt(x_px, y_px);
-                let r = renderer::RB_RIGHT_RECT;
+                let r = renderer::RB_RIGHT_PREVIEW_RECT;
                 if x >= r.0 && x <= r.2 && y >= r.1 && y <= r.3 {
                     self.removebg_drag_arm = Some((x_px, y_px));
                 }
@@ -875,38 +1649,24 @@ impl App {
             return;
         }
         let (x, y) = self.client_px_to_pill_pt(x_px, y_px);
-        let (gx, gy, tw, th, px, py) = (
-            renderer::TRAY_TILE_GEOM.0,
-            renderer::TRAY_TILE_GEOM.1,
-            renderer::TRAY_TILE_GEOM.2,
-            renderer::TRAY_TILE_GEOM.3,
-            renderer::TRAY_TILE_GEOM.4,
-            renderer::TRAY_TILE_GEOM.5,
-        );
-        let page_count = self.shelf.page_count(renderer::TRAY_PAGE_SIZE);
-        if self.tray_page >= page_count {
-            self.tray_page = page_count.saturating_sub(1);
+        if x < renderer::TRAY_CAROUSEL_X || x > renderer::TRAY_CAROUSEL_X + renderer::TRAY_CAROUSEL_W || y < renderer::TRAY_CAROUSEL_Y || y > renderer::TRAY_CAROUSEL_Y + renderer::TRAY_CAROUSEL_H {
+            return;
         }
-        let start = self.tray_page * renderer::TRAY_PAGE_SIZE;
-        let shown = self
-            .shelf
-            .files
-            .len()
-            .saturating_sub(start)
-            .min(renderer::TRAY_PAGE_SIZE);
-        for i in 0..shown {
-            let col = (i % 4) as f32;
-            let row = (i / 4) as f32;
-            let left = gx + col * px;
-            let top = gy + row * py;
-            // Don't arm file drag when pressing the top-right `×` delete button (`left + 112..left + 136, top..top + 24`):
-            if x >= left + 112.0 && x <= left + tw && y >= top && y <= top + 24.0 {
+        for (i, path) in self.shelf.files.iter().enumerate() {
+            let left = renderer::TRAY_CAROUSEL_X + (i as f32) * renderer::TRAY_TILE_PITCH - self.tray_scroll;
+            let top = renderer::TRAY_CAROUSEL_Y;
+            let tw = renderer::TRAY_TILE_W;
+            let th = renderer::TRAY_TILE_H;
+            if left + tw < renderer::TRAY_CAROUSEL_X || left > renderer::TRAY_CAROUSEL_X + renderer::TRAY_CAROUSEL_W {
+                continue;
+            }
+            // Don't arm file drag when clicking the delete "×" button at top-right:
+            if x >= left + tw - 24.0 && x <= left + tw && y >= top && y <= top + 24.0 {
                 return;
             }
             if x >= left && x <= left + tw && y >= top && y <= top + th {
-                let idx = start + i;
-                if std::path::Path::new(&self.shelf.files[idx]).exists() {
-                    self.drag_arm = Some((idx, x_px, y_px));
+                if !self.shelf.select_mode && std::path::Path::new(path).exists() {
+                    self.drag_arm = Some((i, x_px, y_px));
                 }
                 return;
             }
@@ -914,6 +1674,27 @@ impl App {
     }
 
     fn on_mouse_move_drag(&mut self, x_px: i32, y_px: i32) {
+        if let Some((down_x, down_y)) = self.convert_drag_arm {
+            if self.pill.state != IslandState::Convert {
+                self.convert_drag_arm = None;
+                return;
+            }
+            let (threshold_x, threshold_y) =
+                unsafe { (GetSystemMetrics(SM_CXDRAG), GetSystemMetrics(SM_CYDRAG)) };
+            if (x_px - down_x).abs() < threshold_x && (y_px - down_y).abs() < threshold_y {
+                return;
+            }
+            self.convert_drag_arm = None;
+            let tool = self.convert.active_tool;
+            if let Some(path) = self.convert.ensure_saved(tool) {
+                self.dragging_out = true;
+                let _dropped = drag::do_drag_file(&path);
+                self.dragging_out = false;
+                self.swallow_next_click = true;
+                self.on_paint();
+            }
+            return;
+        }
         if let Some((down_x, down_y)) = self.removebg_drag_arm {
             if self.pill.state != IslandState::RemoveBg {
                 self.removebg_drag_arm = None;
@@ -932,6 +1713,10 @@ impl App {
                 self.swallow_next_click = true;
                 self.on_paint();
             }
+            return;
+        }
+        if self.shelf.select_mode {
+            self.drag_arm = None;
             return;
         }
         let Some((idx, down_x, down_y)) = self.drag_arm else {
@@ -965,11 +1750,25 @@ impl App {
         self.suppress_hover_open_after_click_close = true;
         let target = self.closed_target_state();
         self.set_state(target);
+        trim_working_set();
     }
 
     fn on_click(&mut self, x_px: i32, y_px: i32) {
         unsafe {
             let _ = KillTimer(self.hwnd, TIMER_CLOSE);
+        }
+        if self.volume_dragging {
+            self.volume_dragging = false;
+            self.on_paint();
+            return;
+        }
+        if self.music_progress_dragging {
+            self.music_progress_dragging = false;
+            if let Some(pos) = self.music_seek_pos.take() {
+                crate::media::seek_async(pos);
+            }
+            self.on_paint();
+            return;
         }
         if self.swallow_next_click {
             self.swallow_next_click = false;
@@ -991,13 +1790,28 @@ impl App {
         let (x, y) = self.client_px_to_pill_pt(x_px, y_px);
         let in_rect = |r: (f32, f32, f32, f32)| x >= r.0 && x <= r.2 && y >= r.1 && y <= r.3;
 
-        // 1. Right-edge vertical section dots (`IslandView.dotIndex(at:)`):
+        if let Some((card_idx, _sx, _sy)) = self.pdf_md_drag.take() {
+            let in_portal = x >= renderer::PDF_MD_PORTAL_RECT.0 - 40.0
+                && x <= renderer::PDF_MD_PORTAL_RECT.2 + 20.0
+                && y >= renderer::PDF_MD_PORTAL_RECT.1 - 20.0
+                && y <= renderer::PDF_MD_PORTAL_RECT.3 + 20.0;
+            if in_portal || x >= 340.0 {
+                self.convert.set_queue_index(crate::convert::ConvertTool::PdfToMd, card_idx);
+                self.start_convert_run(crate::convert::ConvertTool::PdfToMd);
+            }
+            self.on_paint();
+            return;
+        }
+
+        // 1. Bottom interactive section dots:
         if let Some(dot_idx) = renderer::dot_index_at(x, y, self.pill.width, self.pill.height) {
             let target = IslandState::from_section_index(dot_idx);
             if target != self.pill.state
                 && !(target == IslandState::Expanded && self.pill.state == IslandState::Lyrics)
             {
-                self.set_state(target);
+                let cur_idx = self.pill.state.section_index();
+                let dir = if dot_idx > cur_idx { 1.0 } else { -1.0 };
+                self.switch_section_with_transition(target, dir);
             }
             return;
         }
@@ -1009,7 +1823,7 @@ impl App {
                     let scale = window::dpi_scale(self.hwnd);
                     let canvas_x = (x_px as f32) / scale;
                     let canvas_y = (y_px as f32) / scale;
-                    let x_520 = canvas_x - (window::CANVAS_W - 520.0) * 0.5;
+                    let x_520 = canvas_x - (window::CANVAS_W - 540.0) * 0.5;
                     let x_700 = canvas_x - (window::CANVAS_W - 700.0) * 0.5;
                     let in_bubble_at = |bx: f32| {
                         bx >= renderer::MUSIC_BUBBLE_RECT.0 - 4.0
@@ -1027,7 +1841,7 @@ impl App {
                         .unwrap_or(false);
                     let morphing_bubble = self.spring.active && (in_bubble_at(x_520) || in_bubble_at(x_700));
 
-                    if in_bubble_at(x) || repeat_bubble || morphing_bubble {
+                    if self.media.is_some() && (in_bubble_at(x) || repeat_bubble || morphing_bubble) {
                         self.last_bubble_click = Some((canvas_x, canvas_y, Instant::now()));
                         if self.pill.state == IslandState::Expanded {
                             self.lyrics_mode = true;
@@ -1040,40 +1854,45 @@ impl App {
                         return;
                     }
 
-                    let lyrics_t = ((self.pill.width - 520.0) / (700.0 - 520.0)).clamp(0.0, 1.0);
-                    let centers = [
-                        renderer::MUSIC_CONTROL_CENTERS[0]
-                            + (renderer::LYRICS_CONTROL_CENTERS[0]
-                                - renderer::MUSIC_CONTROL_CENTERS[0])
-                                * lyrics_t,
-                        renderer::MUSIC_CONTROL_CENTERS[1]
-                            + (renderer::LYRICS_CONTROL_CENTERS[1]
-                                - renderer::MUSIC_CONTROL_CENTERS[1])
-                                * lyrics_t,
-                        renderer::MUSIC_CONTROL_CENTERS[2]
-                            + (renderer::LYRICS_CONTROL_CENTERS[2]
-                                - renderer::MUSIC_CONTROL_CENTERS[2])
-                                * lyrics_t,
-                    ];
-                    if let Some(ctrl) = renderer::control_hit_at(x, y, &centers) {
-                        let playing = self.media.as_ref().map(|m| m.playing).unwrap_or(false);
-                        match ctrl {
-                            0 => media::skip_previous_async(),
-                            1 => {
-                                if playing {
-                                    media::pause_async();
-                                } else {
-                                    media::play_async();
+                    if self.media.is_some() {
+                        let lyrics_t = ((self.pill.width - 540.0) / (700.0 - 540.0)).clamp(0.0, 1.0);
+                        let centers = [
+                            renderer::MUSIC_CONTROL_CENTERS[0]
+                                + (renderer::LYRICS_CONTROL_CENTERS[0]
+                                    - renderer::MUSIC_CONTROL_CENTERS[0])
+                                    * lyrics_t,
+                            renderer::MUSIC_CONTROL_CENTERS[1]
+                                + (renderer::LYRICS_CONTROL_CENTERS[1]
+                                    - renderer::MUSIC_CONTROL_CENTERS[1])
+                                    * lyrics_t,
+                            renderer::MUSIC_CONTROL_CENTERS[2]
+                                + (renderer::LYRICS_CONTROL_CENTERS[2]
+                                    - renderer::MUSIC_CONTROL_CENTERS[2])
+                                    * lyrics_t,
+                        ];
+                        if let Some(ctrl) = renderer::control_hit_at(x, y, &centers) {
+                            let playing = self.media.as_ref().map(|m| m.playing).unwrap_or(false);
+                            match ctrl {
+                                0 => media::skip_previous_async(),
+                                1 => {
+                                    if playing {
+                                        media::pause_async();
+                                    } else {
+                                        media::play_async();
+                                    }
                                 }
+                                2 => media::skip_next_async(),
+                                _ => {}
                             }
-                            2 => media::skip_next_async(),
-                            _ => {}
+                            self.on_paint();
+                            return;
                         }
-                        self.on_paint();
-                        return;
                     }
                 }
-                if !self.spring.active {
+                if !self.spring.active
+                    && !in_rect(renderer::MUSIC_SPEAKER_RECT)
+                    && !in_rect(renderer::MUSIC_VOLUME_BAR_RECT)
+                {
                     self.close_by_click();
                 }
             }
@@ -1101,30 +1920,34 @@ impl App {
                 self.close_by_click();
             }
             IslandState::Todo => {
-                if in_rect(renderer::TODO_ADD_PILL_RECT)
-                    || (self.todo_editing && in_rect(renderer::TODO_INPUT_RECT))
-                {
+                if in_rect(renderer::TODO_ADD_PILL_RECT) && !self.todo_editing {
                     self.begin_todo_editing();
                     return;
                 }
                 if self.todo_editing {
-                    self.end_todo_editing(true);
+                    if !in_rect(renderer::TODO_INPUT_RECT) {
+                        self.end_todo_editing(true);
+                    }
                     return;
                 }
-                let visible = self.todo.visible_indices();
-                for (row_i, &task_idx) in visible.iter().enumerate() {
-                    let row_top = renderer::TODO_ROW_Y0 + (row_i as f32) * renderer::TODO_ROW_PITCH;
+                for (row_i, _) in self.todo.tasks.iter().enumerate() {
+                    let row_top = renderer::TODO_ROW_Y0 + (row_i as f32) * renderer::TODO_ROW_PITCH - self.todo_scroll;
                     let row_bot = row_top + renderer::TODO_ROW_H;
+                    if row_bot < 40.0 || row_top > 160.0 {
+                        continue;
+                    }
                     if y >= row_top && y <= row_bot {
-                        if x >= renderer::TODO_ROW_DELETE_LEFT
-                            && x <= renderer::TODO_ROW_DELETE_RIGHT
-                        {
-                            self.todo.remove(task_idx);
+                        if x >= renderer::TODO_ROW_DELETE_LEFT && x <= renderer::TODO_ROW_DELETE_RIGHT {
+                            self.todo.remove(row_i);
                             self.on_paint();
                             return;
                         }
+                        if x >= renderer::TODO_ROW_EDIT_LEFT && x <= renderer::TODO_ROW_EDIT_RIGHT {
+                            self.begin_todo_edit_idx(row_i);
+                            return;
+                        }
                         if x >= renderer::TODO_ROW_X && x <= renderer::TODO_ROW_TOGGLE_RIGHT {
-                            self.todo.toggle(task_idx);
+                            self.todo.toggle(row_i);
                             self.on_paint();
                             return;
                         }
@@ -1152,91 +1975,311 @@ impl App {
                 self.close_by_click();
             }
             IslandState::Tray => {
-                if !self.shelf.files.is_empty() && in_rect(renderer::TRAY_CLEAR_RECT) {
-                    self.shelf.clear();
-                    self.tray_page = 0;
+                let rects = renderer::compute_tray_button_rects(&self.tray_btn_hovers);
+                if !self.shelf.files.is_empty() && in_rect(rects[0]) {
+                    if self.tray_genie_start.is_none() {
+                        self.tray_genie_start = Some(Instant::now());
+                        self.ensure_anim_timer();
+                    }
+                    return;
+                }
+                if !self.shelf.files.is_empty() && in_rect(rects[1]) {
+                    self.shelf.select_mode = !self.shelf.select_mode;
+                    if !self.shelf.select_mode {
+                        self.shelf.clear_selection();
+                    }
                     self.on_paint();
                     return;
                 }
-                let page_count = self.shelf.page_count(renderer::TRAY_PAGE_SIZE);
-                if self.tray_page >= page_count {
-                    self.tray_page = page_count.saturating_sub(1);
+                if !self.shelf.files.is_empty() && in_rect(rects[2]) {
+                    let files = self.shelf.get_selected_or_all();
+                    self.removebg.add_to_queue(&files);
+                    self.set_state(IslandState::RemoveBg);
+                    self.on_paint();
+                    return;
                 }
-                if page_count > 1 {
-                    if in_rect(renderer::TRAY_LEFT_ARROW_RECT) && self.tray_page > 0 {
-                        self.tray_page -= 1;
+                if !self.shelf.files.is_empty() && in_rect(rects[3]) {
+                    let files = self.shelf.get_selected_or_all();
+                    self.convert.add_to_queue(crate::convert::ConvertTool::Photo, &files);
+                    self.convert.add_to_queue(crate::convert::ConvertTool::MergePdf, &files);
+                    self.convert.add_to_queue(crate::convert::ConvertTool::PdfToMd, &files);
+                    self.set_state(IslandState::Convert);
+                    self.on_paint();
+                    return;
+                }
+                for (i, _) in self.shelf.files.iter().enumerate() {
+                    let left = renderer::TRAY_CAROUSEL_X + (i as f32) * renderer::TRAY_TILE_PITCH - self.tray_scroll;
+                    let top = renderer::TRAY_CAROUSEL_Y;
+                    let tw = renderer::TRAY_TILE_W;
+                    let th = renderer::TRAY_TILE_H;
+                    if left + tw < renderer::TRAY_CAROUSEL_X || left > renderer::TRAY_CAROUSEL_X + renderer::TRAY_CAROUSEL_W {
+                        continue;
+                    }
+                    if self.shelf.select_mode {
+                        if x >= left && x <= left + tw && y >= top && y <= top + th {
+                            self.shelf.toggle_select(i);
+                            self.on_paint();
+                            return;
+                        }
+                    } else {
+                        // Top-right delete button inside tile:
+                        if x >= left + tw - 24.0 && x <= left + tw && y >= top && y <= top + 24.0 {
+                            self.shelf.remove(i);
+                            self.on_paint();
+                            return;
+                        }
+                        if x >= left && x <= left + tw && y >= top && y <= top + th {
+                            self.show_tile_menu(i);
+                            return;
+                        }
+                    }
+                }
+                if self.shelf.files.is_empty() && in_rect((28.0, 44.0, 492.0, 150.0)) {
+                    if let Some(path) = Self::pick_image_file(self.hwnd) {
+                        self.shelf.add(&path);
+                        self.on_paint();
+                    }
+                    return;
+                }
+                self.close_by_click();
+            }
+            IslandState::Convert => {
+                if self.convert.view == crate::convert::ConvertView::AppGrid {
+                    for (i, &t) in [
+                        crate::convert::ConvertTool::Photo,
+                        crate::convert::ConvertTool::MergePdf,
+                        crate::convert::ConvertTool::PdfToMd,
+                    ].iter().enumerate() {
+                        let card_x = renderer::CONVERT_APP_START_X + (i as f32) * renderer::CONVERT_APP_PITCH;
+                        let card_y = renderer::CONVERT_APP_Y;
+                        let card_w = renderer::CONVERT_APP_CARD_W;
+                        let card_h = renderer::CONVERT_APP_CARD_H;
+                        if x >= card_x && x <= card_x + card_w && y >= card_y && y <= card_y + card_h {
+                            self.convert.active_tool = t;
+                            self.convert.view = crate::convert::ConvertView::ToolDetail;
+                            let target_size = self.target_size_for(IslandState::Convert);
+                            self.animate_to_size(target_size.0, target_size.1);
+                            return;
+                        }
+                    }
+                    self.close_by_click();
+                    return;
+                }
+
+                // In ToolDetail mode:
+                let tool = self.convert.active_tool;
+                let has_format_btn = tool == crate::convert::ConvertTool::Photo;
+                let cv_rects = renderer::compute_cv_button_rects(&self.cv_btn_hovers, self.convert.photo_format.display_name().len(), has_format_btn);
+
+                // Back button:
+                if in_rect(cv_rects[0]) {
+                    self.convert.view = crate::convert::ConvertView::AppGrid;
+                    let target_size = self.target_size_for(IslandState::Convert);
+                    self.animate_to_size(target_size.0, target_size.1);
+                    return;
+                }
+
+                // Queue Prev/Next buttons:
+                let st = self.convert.tool_state(tool);
+                if st.queue.len() > 1 && in_rect(renderer::CONVERT_QUEUE_PREV_RECT) {
+                    self.convert.prev_in_queue(tool);
+                    self.on_paint();
+                    return;
+                }
+                if st.queue.len() > 1 && in_rect(renderer::CONVERT_QUEUE_NEXT_RECT) {
+                    self.convert.next_in_queue(tool);
+                    self.on_paint();
+                    return;
+                }
+
+                // Format picker for Photo tool:
+                if tool == crate::convert::ConvertTool::Photo && in_rect(cv_rects[1]) {
+                    self.show_convert_format_menu();
+                    return;
+                }
+
+                let st = self.convert.tool_state(tool);
+
+                // Save result button:
+                if st.result_bytes.is_some() && in_rect(renderer::CONVERT_SAVE_BTN_RECT) {
+                    if let Some(path) = self.convert.ensure_saved(tool) {
+                        let name = std::path::Path::new(&path)
+                            .file_name()
+                            .map(|s| s.to_string_lossy().into_owned())
+                            .unwrap_or(path.clone());
+                        let cur = self.convert.tool_state_mut(tool);
+                        cur.status_text = format!("Saved: {}", name);
+                        cur.status_is_error = false;
+                    }
+                    self.on_paint();
+                    return;
+                }
+
+                // Reset button:
+                if (st.input_preview.is_some() || !st.input_name.is_empty() || st.result_bytes.is_some() || !st.queue.is_empty() || !self.convert.merge_files.is_empty()) && in_rect(cv_rects[2]) {
+                    let cur = self.convert.tool_state_mut(tool);
+                    cur.queue.clear();
+                    cur.queue_idx = 0;
+                    cur.input_path = None;
+                    cur.input_name.clear();
+                    cur.input_preview = None;
+                    cur.result_bytes = None;
+                    cur.result_preview = None;
+                    cur.result_file_name = None;
+                    cur.saved_path = None;
+                    cur.uploading = false;
+                    cur.status_text = tool.default_status().to_string();
+                    cur.status_is_error = false;
+                    self.convert.merge_files.clear();
+                    let target_size = self.target_size_for(IslandState::Convert);
+                    self.animate_to_size(target_size.0, target_size.1);
+                    return;
+                }
+
+                // Manual Process button:
+                if !st.uploading && st.result_bytes.is_none() && in_rect(renderer::CONVERT_PROCESS_BTN_RECT) {
+                    self.start_convert_run(tool);
+                    return;
+                }
+
+                // Drop zone / list view / character select clicks:
+                if tool == crate::convert::ConvertTool::MergePdf {
+                    if in_rect(renderer::MERGE_PDF_ADD_BTN) {
+                        let paths = Self::pick_pdf_files(self.hwnd, true);
+                        for p in &paths {
+                            self.convert.add_merge_file(p);
+                        }
                         self.on_paint();
                         return;
                     }
-                    if in_rect(renderer::TRAY_RIGHT_ARROW_RECT) && self.tray_page + 1 < page_count {
-                        self.tray_page += 1;
+
+                    if in_rect(renderer::MERGE_PDF_RUN_BTN) {
+                        if st.result_bytes.is_some() {
+                            if let Some(path) = self.convert.ensure_saved(tool) {
+                                let name = std::path::Path::new(&path)
+                                    .file_name()
+                                    .map(|s| s.to_string_lossy().into_owned())
+                                    .unwrap_or(path.clone());
+                                let cur = self.convert.tool_state_mut(tool);
+                                cur.status_text = format!("Saved: {}", name);
+                                cur.status_is_error = false;
+                            }
+                        } else if self.convert.merge_files.len() >= 2 {
+                            self.start_convert_merge();
+                        }
                         self.on_paint();
                         return;
                     }
-                    // Bottom page dots (`y in 255..275`):
-                    if y >= 255.0 && y <= 275.0 {
-                        let dot_gap = 12.0f32;
-                        let total_w = (page_count as f32 - 1.0) * dot_gap;
-                        let start_x = self.pill.width * 0.5 - total_w * 0.5;
-                        for p in 0..page_count {
-                            let dx = start_x + (p as f32) * dot_gap;
-                            if (x - dx).abs() <= 6.0 {
-                                self.tray_page = p;
+
+                    // Row delete × and reorder ☰ clicks:
+                    let visible_count = self.convert.merge_files.len().min(3);
+                    for i in 0..visible_count {
+                        let ry = 58.0 + (i as f32) * 27.0;
+                        let rx = 54.0f32;
+                        let rw = 432.0f32;
+                        let del_x = rx + rw - 36.0;
+                        if x >= del_x - 6.0 && x <= del_x + 14.0 && y >= ry && y <= ry + 24.0 {
+                            self.convert.remove_merge_file(i);
+                            self.on_paint();
+                            return;
+                        }
+                        let bar_x = rx + rw - 14.0;
+                        if x >= bar_x - 10.0 && x <= bar_x + 10.0 && y >= ry && y <= ry + 24.0 {
+                            let len = self.convert.merge_files.len();
+                            if len > 1 {
+                                self.convert.swap_merge_files(i, (i + 1) % len);
                                 self.on_paint();
                                 return;
                             }
                         }
                     }
-                }
-                let (gx, gy, tw, th, px, py) = (
-                    renderer::TRAY_TILE_GEOM.0,
-                    renderer::TRAY_TILE_GEOM.1,
-                    renderer::TRAY_TILE_GEOM.2,
-                    renderer::TRAY_TILE_GEOM.3,
-                    renderer::TRAY_TILE_GEOM.4,
-                    renderer::TRAY_TILE_GEOM.5,
-                );
-                let start = self.tray_page * renderer::TRAY_PAGE_SIZE;
-                let shown = self
-                    .shelf
-                    .files
-                    .len()
-                    .saturating_sub(start)
-                    .min(renderer::TRAY_PAGE_SIZE);
-                for i in 0..shown {
-                    let col = (i % 4) as f32;
-                    let row = (i / 4) as f32;
-                    let left = gx + col * px;
-                    let top = gy + row * py;
-                    // Top-right `×` delete button inside tile:
-                    if x >= left + 112.0 && x <= left + tw && y >= top && y <= top + 24.0 {
-                        self.shelf.remove(start + i);
-                        let new_count = self.shelf.page_count(renderer::TRAY_PAGE_SIZE);
-                        if self.tray_page >= new_count {
-                            self.tray_page = new_count.saturating_sub(1);
+
+                    if self.convert.merge_files.is_empty() && in_rect((54.0, 58.0, 486.0, 154.0)) {
+                        let paths = Self::pick_pdf_files(self.hwnd, true);
+                        for p in &paths {
+                            self.convert.add_merge_file(p);
                         }
                         self.on_paint();
                         return;
                     }
-                    if x >= left && x <= left + tw && y >= top && y <= top + th {
-                        self.show_tile_menu(start + i);
+                } else if tool == crate::convert::ConvertTool::PdfToMd {
+                    if in_rect(renderer::PDF_MD_PORTAL_RECT) {
+                        if st.result_bytes.is_some() {
+                            if let Some(path) = self.convert.ensure_saved(tool) {
+                                let name = std::path::Path::new(&path)
+                                    .file_name()
+                                    .map(|s| s.to_string_lossy().into_owned())
+                                    .unwrap_or(path.clone());
+                                let cur = self.convert.tool_state_mut(tool);
+                                cur.status_text = format!("Saved: {}", name);
+                                cur.status_is_error = false;
+                            }
+                        } else if !st.queue.is_empty() {
+                            self.start_convert_run(tool);
+                        }
+                        self.on_paint();
+                        return;
+                    }
+
+                    if st.queue.is_empty() && in_rect((54.0, 58.0, 132.0, 156.0)) {
+                        let paths = Self::pick_pdf_files(self.hwnd, true);
+                        self.convert.add_to_queue(tool, &paths);
+                        self.on_paint();
+                        return;
+                    }
+
+                    for i in 0..st.queue.len().min(3) {
+                        let card_x = renderer::PDF_MD_CARD_START_X + (i as f32) * renderer::PDF_MD_CARD_PITCH;
+                        if x >= card_x && x <= card_x + renderer::PDF_MD_CARD_W && y >= renderer::PDF_MD_CARD_Y && y <= renderer::PDF_MD_CARD_Y + renderer::PDF_MD_CARD_H {
+                            self.convert.set_queue_index(tool, i);
+                            self.on_paint();
+                            return;
+                        }
+                    }
+
+                    if st.queue.len() < 3 {
+                        let add_i = st.queue.len();
+                        let card_x = renderer::PDF_MD_CARD_START_X + (add_i as f32) * renderer::PDF_MD_CARD_PITCH;
+                        if x >= card_x && x <= card_x + renderer::PDF_MD_CARD_W && y >= renderer::PDF_MD_CARD_Y && y <= renderer::PDF_MD_CARD_Y + renderer::PDF_MD_CARD_H {
+                            let paths = Self::pick_pdf_files(self.hwnd, true);
+                            self.convert.add_to_queue(tool, &paths);
+                            self.on_paint();
+                            return;
+                        }
+                    }
+                } else {
+                    let dz_rect = if self.convert.has_active_content() {
+                        renderer::CONVERT_DROP_ZONE_RECT
+                    } else {
+                        (54.0, 58.0, 486.0, 154.0)
+                    };
+                    if in_rect(dz_rect) {
+                        if let Some(path) = Self::pick_image_file(self.hwnd) {
+                            self.convert_set_input_only(tool, &path);
+                        }
                         return;
                     }
                 }
+
                 self.close_by_click();
             }
             IslandState::RemoveBg => {
-                if in_rect(renderer::RB_MODEL_RECT) {
+                if self.removebg.queue.len() > 1 && in_rect(renderer::RB_QUEUE_PREV_RECT) {
+                    self.removebg.prev_in_queue();
+                    self.on_paint();
+                    return;
+                }
+                if self.removebg.queue.len() > 1 && in_rect(renderer::RB_QUEUE_NEXT_RECT) {
+                    self.removebg.next_in_queue();
+                    self.on_paint();
+                    return;
+                }
+                let rb_rects = renderer::compute_rb_button_rects(&self.rb_btn_hovers, self.removebg.model.label().len());
+                if self.removebg.input_path.is_some() && in_rect(rb_rects[0]) {
                     self.show_removebg_model_menu();
                     return;
                 }
-                if in_rect(renderer::RB_FROM_TRAY_RECT)
-                    && !removebg::tray_images(&self.shelf).is_empty()
-                {
-                    self.show_removebg_tray_menu();
-                    return;
-                }
-                if in_rect(renderer::RB_SAVE_RECT) && self.removebg.result_bytes.is_some() {
+                if self.removebg.result_bytes.is_some() && in_rect(renderer::RB_SAVE_BTN_RECT) {
                     if let Some(path) = self.removebg.ensure_saved() {
                         let name = std::path::Path::new(&path)
                             .file_name()
@@ -1247,18 +2290,103 @@ impl App {
                     self.on_paint();
                     return;
                 }
-                if in_rect(renderer::RB_LEFT_RECT) {
+                if (self.removebg.input_path.is_some() || self.removebg.result_bytes.is_some() || !self.removebg.queue.is_empty()) && in_rect(rb_rects[1]) {
+                    self.removebg.queue.clear();
+                    self.removebg.queue_idx = 0;
+                    self.removebg.input_path = None;
+                    self.removebg.input_name.clear();
+                    self.removebg.input_size = 0;
+                    self.removebg.input_preview = None;
+                    self.removebg.result_bytes = None;
+                    self.removebg.result_preview = None;
+                    self.removebg.saved_path = None;
+                    self.removebg.notice.clear();
+                    self.removebg.error = None;
+                    self.removebg.uploading = false;
+                    let target_size = self.target_size_for(IslandState::RemoveBg);
+                    self.animate_to_size(target_size.0, target_size.1);
+                    return;
+                }
+                // Manual process button:
+                if self.removebg.input_path.is_some() && self.removebg.result_bytes.is_none() && !self.removebg.uploading && in_rect(renderer::RB_PROCESS_BTN_RECT) {
+                    self.removebg_start_run();
+                    return;
+                }
+                // Drop zone / Left preview pick:
+                let (has_input, has_result) = (self.removebg.input_path.is_some(), self.removebg.result_bytes.is_some());
+                let pick_rect = if !has_input && !has_result {
+                    renderer::RB_DROP_ZONE_RECT
+                } else {
+                    renderer::RB_LEFT_PREVIEW_RECT
+                };
+                if in_rect(pick_rect) {
                     if let Some(path) = Self::pick_image_file(self.hwnd) {
                         if removebg::is_image_path(&path) {
-                            self.removebg_set_input_and_run(&path);
+                            self.removebg_set_input_only(&path);
                         } else {
-                            self.removebg.error =
-                                Some("That file is not an image.".to_string());
+                            self.removebg.error = Some("That file is not an image.".to_string());
                             self.on_paint();
                         }
                     }
                     return;
                 }
+                self.close_by_click();
+            }
+            IslandState::Settings => {
+                if in_rect(renderer::SETTINGS_CLOSE_BTN) {
+                    self.set_state(IslandState::Expanded);
+                    self.on_paint();
+                    return;
+                }
+                // Section chips (7 items):
+                for i in 0..7 {
+                    let col = i % 2;
+                    let row = i / 2;
+                    let cx = 54.0 + (col as f32) * 110.0;
+                    let cy = 70.0 + (row as f32) * 25.0;
+                    let cw = 102.0;
+                    let ch = 21.0;
+                    if x >= cx && x <= cx + cw && y >= cy && y <= cy + ch {
+                        match i {
+                            0 => self.settings.music_enabled = !self.settings.music_enabled,
+                            1 => self.settings.pomodoro_enabled = !self.settings.pomodoro_enabled,
+                            2 => self.settings.todo_enabled = !self.settings.todo_enabled,
+                            3 => self.settings.water_enabled = !self.settings.water_enabled,
+                            4 => self.settings.tray_enabled = !self.settings.tray_enabled,
+                            5 => self.settings.removebg_enabled = !self.settings.removebg_enabled,
+                            6 => self.settings.convert_enabled = !self.settings.convert_enabled,
+                            _ => {}
+                        }
+                        self.settings.save();
+                        self.on_paint();
+                        return;
+                    }
+                }
+                // Preference switches (4 items):
+                let rx = 290.0f32;
+                for i in 0..4 {
+                    let py = 72.0 + (i as f32) * 24.0;
+                    let sw_x = rx + 164.0;
+                    let sw_y = py;
+                    let sw_w = 28.0;
+                    let sw_h = 16.0;
+                    if x >= rx && x <= sw_x + sw_w + 10.0 && y >= sw_y && y <= sw_y + sw_h {
+                        match i {
+                            0 => {
+                                self.settings.start_with_windows = !self.settings.start_with_windows;
+                                crate::tray::set_autorun(self.settings.start_with_windows);
+                            }
+                            1 => self.settings.sound_chimes = !self.settings.sound_chimes,
+                            2 => self.settings.high_refresh_120fps = !self.settings.high_refresh_120fps,
+                            3 => self.settings.eye_expressions = !self.settings.eye_expressions,
+                            _ => {}
+                        }
+                        self.settings.save();
+                        self.on_paint();
+                        return;
+                    }
+                }
+                self.close_by_click();
             }
             IslandState::Zen | IslandState::Compact => {}
         }
@@ -1448,10 +2576,6 @@ impl App {
                 }
             } else if picked == MENU_TILE_REMOVE {
                 self.shelf.remove(idx);
-                let new_count = self.shelf.page_count(renderer::TRAY_PAGE_SIZE);
-                if self.tray_page >= new_count {
-                    self.tray_page = new_count.saturating_sub(1);
-                }
                 self.on_paint();
             } else if picked >= MENU_TILE_SHARE_BASE
                 && picked < MENU_TILE_SHARE_BASE + shown_peers.len()
@@ -1476,10 +2600,18 @@ impl App {
         }
     }
 
-    /// Set Remove BG input and start an upload run (shared by
-    /// pick/drop/From Tray).
-    fn removebg_set_input_and_run(&mut self, path: &str) {
+    /// Set Remove BG input only (user must manually press action button to start run).
+    fn removebg_set_input_only(&mut self, path: &str) {
         self.removebg.set_input(path);
+        let target_size = self.target_size_for(IslandState::RemoveBg);
+        if (self.pill.width - target_size.0).abs() > 0.5 || (self.pill.height - target_size.1).abs() > 0.5 {
+            self.animate_to_size(target_size.0, target_size.1);
+        } else {
+            self.on_paint();
+        }
+    }
+
+    fn removebg_start_run(&mut self) {
         if let Some((gen, bytes, filename, model_param)) = self.removebg.start_run() {
             removebg::run_async(
                 self.hwnd,
@@ -1512,6 +2644,8 @@ impl App {
                         removebg::decode_preview_fit(&bytes, 264, 144);
                     self.removebg.result_bytes = Some(bytes);
                     self.removebg.error = None;
+                    let target_size = self.target_size_for(IslandState::RemoveBg);
+                    self.animate_to_size(target_size.0, target_size.1);
                 }
                 Err(msg) => {
                     self.removebg.error = Some(msg);
@@ -1570,9 +2704,9 @@ impl App {
             if let Some(model) = new_model {
                 if model != self.removebg.model {
                     self.removebg.model = model;
-                    // Mac: changing the model re-runs from the stored input.
+                    // Changing the model updates state with stored input.
                     if let Some(path) = self.removebg.input_path.clone() {
-                        self.removebg_set_input_and_run(&path);
+                        self.removebg_set_input_only(&path);
                     } else {
                         self.on_paint();
                     }
@@ -1582,6 +2716,7 @@ impl App {
     }
 
     /// Popup menu listing tray images for Remove BG input (Mac `From Tray` pill).
+    #[allow(dead_code)]
     fn show_removebg_tray_menu(&mut self) {
         let images = removebg::tray_images(&self.shelf);
         if images.is_empty() {
@@ -1626,12 +2761,216 @@ impl App {
             let picked = id.0 as usize;
             if picked >= MENU_RB_TRAY_BASE && picked < MENU_RB_TRAY_BASE + shown.len() {
                 let path = shown[picked - MENU_RB_TRAY_BASE].clone();
-                self.removebg_set_input_and_run(&path);
+                self.removebg_set_input_only(&path);
             }
         }
     }
 
-    /// Single-file picker (IFileOpenDialog; no new Cargo feature needed).
+    /// Single-file picker helper (sets input only; manual button starts processing).
+    fn convert_set_input_only(&mut self, tool: crate::convert::ConvertTool, path: &str) {
+        self.convert.set_input(tool, path);
+        self.convert.view = crate::convert::ConvertView::ToolDetail;
+        self.convert.active_tool = tool;
+        let target_size = self.target_size_for(IslandState::Convert);
+        if (self.pill.width - target_size.0).abs() > 0.5 || (self.pill.height - target_size.1).abs() > 0.5 {
+            self.animate_to_size(target_size.0, target_size.1);
+        } else {
+            self.on_paint();
+        }
+    }
+
+    fn start_convert_run(&mut self, tool: crate::convert::ConvertTool) {
+        if tool == crate::convert::ConvertTool::MergePdf {
+            self.start_convert_merge();
+            return;
+        }
+        let st = self.convert.tool_state(tool);
+        let Some(ref path) = st.input_path.clone() else { return };
+        let Ok(data) = std::fs::read(path) else { return };
+        let fname = st.input_name.clone();
+        let fmt = self.convert.photo_format;
+        self.convert.tool_state_mut(tool).run_gen += 1;
+        let gen = self.convert.tool_state(tool).run_gen;
+        self.convert.tool_state_mut(tool).uploading = true;
+        self.convert.tool_state_mut(tool).status_text = "Processing...".to_string();
+        self.convert.tool_state_mut(tool).status_is_error = false;
+        crate::convert::spawn_convert_worker(
+            crate::convert::WorkerArgs {
+                tool,
+                gen,
+                file_data: data,
+                file_name: fname,
+                format: fmt,
+                merge_files: None,
+            },
+            self.hwnd,
+            self.convert_pending.clone(),
+        );
+        self.on_paint();
+    }
+
+    fn start_convert_merge(&mut self) {
+        let tool = crate::convert::ConvertTool::MergePdf;
+        if self.convert.merge_files.len() < 2 {
+            let st = self.convert.tool_state_mut(tool);
+            st.status_text = "Add at least 2 PDFs to merge.".to_string();
+            st.status_is_error = false;
+            self.on_paint();
+            return;
+        }
+        let st = self.convert.tool_state_mut(tool);
+        st.run_gen += 1;
+        let gen = st.run_gen;
+        st.uploading = true;
+        st.status_text = "Merging...…".to_string();
+        st.status_is_error = false;
+        let files = self.convert.merge_files.clone();
+        crate::convert::spawn_convert_worker(
+            crate::convert::WorkerArgs {
+                tool,
+                gen,
+                file_data: Vec::new(),
+                file_name: String::new(),
+                format: self.convert.photo_format,
+                merge_files: Some(files),
+            },
+            self.hwnd,
+            self.convert_pending.clone(),
+        );
+        self.on_paint();
+    }
+
+    fn on_convert_ready(&mut self) {
+        let result_opt = {
+            let mut guard = self.convert_pending.lock().unwrap();
+            guard.take()
+        };
+        let Some(res) = result_opt else { return };
+        let tool = res.tool;
+        let photo_format = self.convert.photo_format;
+        let st = self.convert.tool_state_mut(tool);
+        if st.run_gen != res.gen {
+            return;
+        }
+        st.uploading = false;
+        match res.result {
+            Ok(bytes) => {
+                st.status_is_error = false;
+                st.status_text = "Done — drag or save the result.".to_string();
+                let fname = crate::convert::ConvertState::result_file_name(tool, &st.input_name, photo_format);
+                st.result_file_name = Some(fname);
+                if tool == crate::convert::ConvertTool::Photo {
+                    st.result_preview = crate::removebg::decode_preview_fit(&bytes, 360, 140);
+                }
+                st.result_bytes = Some(bytes);
+                let target_size = self.target_size_for(IslandState::Convert);
+                self.animate_to_size(target_size.0, target_size.1);
+            }
+            Err(err) => {
+                st.status_is_error = true;
+                st.status_text = err;
+            }
+        }
+        self.on_paint();
+    }
+
+    fn show_convert_format_menu(&mut self) {
+        self.suppress_leave = true;
+        unsafe {
+            let Ok(menu) = CreatePopupMenu() else {
+                self.suppress_leave = false;
+                return;
+            };
+            let flag = |active: bool| -> MENU_ITEM_FLAGS {
+                if active {
+                    MF_STRING | MF_CHECKED
+                } else {
+                    MF_STRING
+                }
+            };
+            let _ = AppendMenuW(menu, flag(self.convert.photo_format == crate::convert::ConvertFormat::Avif), MENU_CONVERT_FORMAT_AVIF, w!("AVIF"));
+            let _ = AppendMenuW(menu, flag(self.convert.photo_format == crate::convert::ConvertFormat::Webp), MENU_CONVERT_FORMAT_WEBP, w!("WebP"));
+            let _ = AppendMenuW(menu, flag(self.convert.photo_format == crate::convert::ConvertFormat::Png), MENU_CONVERT_FORMAT_PNG, w!("PNG"));
+
+            let mut pt = POINT::default();
+            let _ = GetCursorPos(&mut pt);
+            let cmd = TrackPopupMenu(
+                menu,
+                TPM_RETURNCMD | TPM_NONOTIFY | TPM_LEFTALIGN | TPM_TOPALIGN,
+                pt.x,
+                pt.y,
+                0,
+                self.hwnd,
+                None,
+            );
+            let _ = DestroyMenu(menu);
+            self.suppress_leave = false;
+            let new_fmt = match cmd.0 as usize {
+                MENU_CONVERT_FORMAT_AVIF => Some(crate::convert::ConvertFormat::Avif),
+                MENU_CONVERT_FORMAT_WEBP => Some(crate::convert::ConvertFormat::Webp),
+                MENU_CONVERT_FORMAT_PNG => Some(crate::convert::ConvertFormat::Png),
+                _ => None,
+            };
+            if let Some(fmt) = new_fmt {
+                self.convert.photo_format = fmt;
+                let st = self.convert.tool_state(crate::convert::ConvertTool::Photo);
+                if let Some(p) = st.input_path.clone() {
+                    self.convert_set_input_only(crate::convert::ConvertTool::Photo, &p);
+                } else {
+                    self.on_paint();
+                }
+            }
+        }
+    }
+
+    #[allow(dead_code)]
+    fn show_convert_tray_menu(&mut self) {
+        self.suppress_leave = true;
+        let tool = self.convert.active_tool;
+        let matching: Vec<String> = self.shelf.files.iter().filter(|p| tool.accepts(p)).cloned().collect();
+        if matching.is_empty() {
+            self.suppress_leave = false;
+            return;
+        }
+        unsafe {
+            let Ok(menu) = CreatePopupMenu() else {
+                self.suppress_leave = false;
+                return;
+            };
+            for (i, p) in matching.iter().enumerate() {
+                let name = std::path::Path::new(p)
+                    .file_name()
+                    .map(|s| s.to_string_lossy().into_owned())
+                    .unwrap_or(p.clone());
+                let hstr = HSTRING::from(&name);
+                let _ = AppendMenuW(menu, MF_STRING, MENU_CONVERT_TRAY_BASE + i, windows::core::PCWSTR(hstr.as_ptr()));
+            }
+            let mut pt = POINT::default();
+            let _ = GetCursorPos(&mut pt);
+            let cmd = TrackPopupMenu(
+                menu,
+                TPM_RETURNCMD | TPM_NONOTIFY | TPM_LEFTALIGN | TPM_TOPALIGN,
+                pt.x,
+                pt.y,
+                0,
+                self.hwnd,
+                None,
+            );
+            let _ = DestroyMenu(menu);
+            self.suppress_leave = false;
+            let idx = cmd.0 as usize;
+            if idx >= MENU_CONVERT_TRAY_BASE && idx < MENU_CONVERT_TRAY_BASE + matching.len() {
+                let chosen = &matching[idx - MENU_CONVERT_TRAY_BASE];
+                if tool == crate::convert::ConvertTool::MergePdf {
+                    let _ = self.convert.add_merge_file(chosen);
+                    self.on_paint();
+                } else {
+                    self.convert_set_input_only(tool, chosen);
+                }
+            }
+        }
+    }
+
     fn pick_image_file(hwnd: HWND) -> Option<String> {
         unsafe {
             // CLSID_FileOpenDialog (ShObjIdl_core.h; not exported by the
@@ -1653,37 +2992,85 @@ impl App {
         }
     }
 
+    fn pick_pdf_files(hwnd: HWND, multiselect: bool) -> Vec<String> {
+        unsafe {
+            use windows::Win32::UI::Shell::Common::COMDLG_FILTERSPEC;
+            use windows::Win32::UI::Shell::{FOS_ALLOWMULTISELECT, FOS_FORCEFILESYSTEM};
+
+            let clsid = GUID::from_values(
+                0xDC1C5A9C,
+                0xE88A,
+                0x4DDE,
+                [0xA5, 0xA1, 0x60, 0xF8, 0x2A, 0x20, 0xAE, 0xF7],
+            );
+            let Ok(dialog) = CoCreateInstance::<_, IFileOpenDialog>(&clsid, None, CLSCTX_INPROC_SERVER) else {
+                return Vec::new();
+            };
+            if multiselect {
+                if let Ok(opts) = dialog.GetOptions() {
+                    let _ = dialog.SetOptions(opts | FOS_ALLOWMULTISELECT | FOS_FORCEFILESYSTEM);
+                }
+            }
+            let filter = [
+                COMDLG_FILTERSPEC {
+                    pszName: windows::core::w!("PDF Documents (*.pdf)"),
+                    pszSpec: windows::core::w!("*.pdf"),
+                },
+                COMDLG_FILTERSPEC {
+                    pszName: windows::core::w!("All Files (*.*)"),
+                    pszSpec: windows::core::w!("*.*"),
+                },
+            ];
+            let _ = dialog.SetFileTypes(&filter);
+            if dialog.Show(hwnd).is_err() {
+                return Vec::new();
+            }
+            let mut out = Vec::new();
+            if multiselect {
+                if let Ok(items) = dialog.GetResults() {
+                    if let Ok(count) = items.GetCount() {
+                        for i in 0..count {
+                            if let Ok(item) = items.GetItemAt(i) {
+                                if let Ok(name) = item.GetDisplayName(SIGDN_FILESYSPATH) {
+                                    if let Ok(s) = name.to_string() {
+                                        out.push(s);
+                                    }
+                                    CoTaskMemFree(Some(name.0 as *const core::ffi::c_void));
+                                }
+                            }
+                        }
+                    }
+                }
+            } else if let Ok(item) = dialog.GetResult() {
+                if let Ok(name) = item.GetDisplayName(SIGDN_FILESYSPATH) {
+                    if let Ok(s) = name.to_string() {
+                        out.push(s);
+                    }
+                    CoTaskMemFree(Some(name.0 as *const core::ffi::c_void));
+                }
+            }
+            out
+        }
+    }
+
     fn on_right_click(&mut self, x_px: i32, y_px: i32) {
         if self.pill.state != IslandState::Tray {
             return;
         }
         let (x, y) = self.client_px_to_pill_pt(x_px, y_px);
-        let (gx, gy, tw, th, px, py) = (
-            renderer::TRAY_TILE_GEOM.0,
-            renderer::TRAY_TILE_GEOM.1,
-            renderer::TRAY_TILE_GEOM.2,
-            renderer::TRAY_TILE_GEOM.3,
-            renderer::TRAY_TILE_GEOM.4,
-            renderer::TRAY_TILE_GEOM.5,
-        );
-        let page_count = self.shelf.page_count(renderer::TRAY_PAGE_SIZE);
-        if self.tray_page >= page_count {
-            self.tray_page = page_count.saturating_sub(1);
+        if x < renderer::TRAY_CAROUSEL_X || x > renderer::TRAY_CAROUSEL_X + renderer::TRAY_CAROUSEL_W || y < renderer::TRAY_CAROUSEL_Y || y > renderer::TRAY_CAROUSEL_Y + renderer::TRAY_CAROUSEL_H {
+            return;
         }
-        let start = self.tray_page * renderer::TRAY_PAGE_SIZE;
-        let shown = self
-            .shelf
-            .files
-            .len()
-            .saturating_sub(start)
-            .min(renderer::TRAY_PAGE_SIZE);
-        for i in 0..shown {
-            let col = (i % 4) as f32;
-            let row = (i / 4) as f32;
-            let left = gx + col * px;
-            let top = gy + row * py;
+        for (i, _) in self.shelf.files.iter().enumerate() {
+            let left = renderer::TRAY_CAROUSEL_X + (i as f32) * renderer::TRAY_TILE_PITCH - self.tray_scroll;
+            let top = renderer::TRAY_CAROUSEL_Y;
+            let tw = renderer::TRAY_TILE_W;
+            let th = renderer::TRAY_TILE_H;
+            if left + tw < renderer::TRAY_CAROUSEL_X || left > renderer::TRAY_CAROUSEL_X + renderer::TRAY_CAROUSEL_W {
+                continue;
+            }
             if x >= left && x <= left + tw && y >= top && y <= top + th {
-                self.show_tile_menu(start + i);
+                self.show_tile_menu(i);
                 return;
             }
         }
@@ -1717,9 +3104,7 @@ impl App {
         if self.dragging_out {
             return;
         }
-        if self.pill.state == IslandState::RemoveBg {
-            // Open tool section handles its own drop (Mac rule): stay here
-            // and highlight the card instead of switching to Tray.
+        if self.pill.state == IslandState::Convert || self.pill.state == IslandState::RemoveBg {
             self.drag_hovering = true;
             self.on_paint();
             return;
@@ -1770,13 +3155,42 @@ impl App {
             .ok()
             .map(|mut g| std::mem::take(&mut *g))
             .unwrap_or_default();
+        if self.pill.state == IslandState::Convert {
+            let tool = self.convert.active_tool;
+            if tool == crate::convert::ConvertTool::MergePdf {
+                let mut added = false;
+                for path in &paths {
+                    if self.convert.add_merge_file(path) {
+                        added = true;
+                    }
+                }
+                if added {
+                    self.on_paint();
+                }
+                return;
+            } else {
+                let mut used = false;
+                for path in &paths {
+                    if !used && tool.accepts(path) {
+                        self.convert_set_input_only(tool, path);
+                        used = true;
+                    } else {
+                        let _ = self.shelf.add(path);
+                    }
+                }
+                if used {
+                    self.on_paint();
+                    return;
+                }
+            }
+        }
         if self.pill.state == IslandState::RemoveBg {
             // Open tool section handles its own drop (Mac rule): first image
             // becomes Remove BG input, the rest fall through to Tray.
             let mut used_as_input = false;
             for path in &paths {
                 if !used_as_input && removebg::is_image_path(path) {
-                    self.removebg_set_input_and_run(path);
+                    self.removebg_set_input_only(path);
                     used_as_input = true;
                 } else {
                     let _ = self.shelf.add(path);
@@ -1792,10 +3206,8 @@ impl App {
             }
         }
         if added {
-            self.tray_page = self
-                .shelf
-                .page_count(renderer::TRAY_PAGE_SIZE)
-                .saturating_sub(1);
+            let total_w = self.shelf.files.len() as f32 * renderer::TRAY_TILE_PITCH;
+            self.tray_scroll_target = (total_w - renderer::TRAY_CAROUSEL_W).max(0.0);
         }
         self.set_state(IslandState::Tray);
         self.tray_bounce.trigger(1.0, Some(1.12));
@@ -1822,12 +3234,38 @@ impl App {
                 paths.push(String::from_utf16_lossy(&buf[..end]));
             }
             DragFinish(hdrop);
+            if self.pill.state == IslandState::Convert {
+                let tool = self.convert.active_tool;
+                if tool == crate::convert::ConvertTool::MergePdf {
+                    let mut added = false;
+                    for path in &paths {
+                        if self.convert.add_merge_file(path) {
+                            added = true;
+                        }
+                    }
+                    if added {
+                        self.on_paint();
+                    }
+                    return;
+                } else {
+                    let mut used = false;
+                    for path in &paths {
+                        if !used && tool.accepts(path) {
+                            self.convert_set_input_only(tool, path);
+                            used = true;
+                        }
+                    }
+                    if used {
+                        return;
+                    }
+                }
+            }
             if self.pill.state == IslandState::RemoveBg {
                 // Same routing as the OLE drop path (Mac rule).
                 let mut used_as_input = false;
                 for path in &paths {
                     if !used_as_input && removebg::is_image_path(path) {
-                        self.removebg_set_input_and_run(path);
+                        self.removebg_set_input_only(path);
                         used_as_input = true;
                     } else {
                         let _ = self.shelf.add(path);
@@ -1843,10 +3281,8 @@ impl App {
                 }
             }
             if added {
-                self.tray_page = self
-                    .shelf
-                    .page_count(renderer::TRAY_PAGE_SIZE)
-                    .saturating_sub(1);
+                let total_w = self.shelf.files.len() as f32 * renderer::TRAY_TILE_PITCH;
+                self.tray_scroll_target = (total_w - renderer::TRAY_CAROUSEL_W).max(0.0);
                 self.set_state(IslandState::Tray);
                 self.tray_bounce.trigger(1.0, Some(1.12));
                 self.ensure_anim_timer();
@@ -1864,7 +3300,7 @@ impl App {
                 state: self.pill.state,
                 lyrics_mode: self.lyrics_mode,
                 eye_look: self.eye_look,
-                eyes_closed: self.eyes_closed,
+                eyes_closed: false,
                 battery_percent,
                 battery_charging,
                 media: self.media.as_ref(),
@@ -1886,10 +3322,46 @@ impl App {
                 cur_w: self.pill.width,
                 cur_h: self.pill.height,
                 alert: alert_clone.as_ref(),
+                eye_openness: self.eye_openness,
+                eye_slant: self.eye_slant,
+                convert: &self.convert,
+                music_button_zooms: self.music_button_zooms,
+                music_bar_hover: self.music_bar_hover,
+                music_seek_pos: self.music_seek_pos,
+                master_volume: self.master_volume,
+                volume_bar_hover: self.volume_bar_hover,
+                volume_bar_zoom: self.volume_bar_zoom,
+                card_expanded: self.card_expanded,
+                todo_scroll: self.todo_scroll,
+                todo_editing_idx: self.todo_editing_idx,
+                tray_scroll: self.tray_scroll,
+                transition_active: self.transition_active,
+                transition_progress: if self.transition_active {
+                    (self.transition_start.elapsed().as_secs_f32() / 0.20).clamp(0.0, 1.0)
+                } else {
+                    1.0
+                },
+                transition_dir: self.transition_dir,
+                transition_from: self.transition_from,
+                transition_to: self.transition_to,
+                dot_indicator_bounds: self.dot_spring.bounds(),
+                hovered_dot: self.hovered_dot,
+                music_bar_zoom: self.music_bar_zoom,
+                tray_genie_progress: self.tray_genie_start.map(|s| (s.elapsed().as_secs_f32() / 0.35).clamp(0.0, 1.0)),
+                mouse_pt: self.mouse_pt,
+                header_active: (self.pill.state.has_top_header()
+                    || (self.spring.active && self.last_section.has_top_header()))
+                    && self.pill.state != IslandState::Zen
+                    && self.last_section != IslandState::Zen,
+                tray_btn_hovers: self.tray_btn_hovers,
+                rb_btn_hovers: self.rb_btn_hovers,
+                cv_btn_hovers: self.cv_btn_hovers,
+                settings: &self.settings,
+                pdf_md_drag: self.pdf_md_drag,
             };
             self.renderer.draw(self.hwnd, &ctx);
         }
-        if self.renderer.is_lyric_rolling() || self.tray_bounce.is_active() {
+        if self.renderer.is_lyric_rolling() || self.tray_bounce.is_active() || self.transition_active || self.dot_spring.active {
             self.ensure_anim_timer();
         }
     }
@@ -1901,6 +3373,8 @@ impl App {
                 unsafe {
                     PostQuitMessage(0);
                 }
+            } else if id == tray::MENU_SETTINGS {
+                crate::settings_window::open(self.hwnd);
             } else if id == tray::MENU_STATUS {
                 let peer_count = self.lan.as_ref().map(|l| l.peers().len()).unwrap_or(0);
                 tray::show_status_dialog(
@@ -1955,9 +3429,9 @@ unsafe extern "system" fn wnd_proc(
             LRESULT(0)
         }
         WM_MOUSEMOVE => {
-            app.on_mouse_move();
             let x = ((lparam.0 as u32) & 0xFFFF) as u16 as i16 as i32;
             let y = (((lparam.0 as u32) >> 16) & 0xFFFF) as u16 as i16 as i32;
+            app.on_mouse_move(x, y);
             app.on_mouse_move_drag(x, y);
             LRESULT(0)
         }
@@ -2024,6 +3498,20 @@ unsafe extern "system" fn wnd_proc(
             app.on_removebg_ready();
             LRESULT(0)
         }
+        crate::convert::WM_CONVERT_READY => {
+            app.on_convert_ready();
+            LRESULT(0)
+        }
+        crate::settings_window::WM_SETTINGS_UPDATED => {
+            app.settings = crate::settings::AuraSettings::load();
+            crate::tray::set_autorun(app.settings.start_with_windows);
+            let state = app.pill.state;
+            let (tw, th) = app.target_size_for(state);
+            app.pill.width = tw;
+            app.pill.height = th;
+            app.on_paint();
+            LRESULT(0)
+        }
         0x0102 => {
             let code = (wparam.0 & 0xFFFF) as u16;
             app.on_todo_char(code);
@@ -2059,8 +3547,10 @@ unsafe extern "system" fn wnd_proc(
 
 pub fn run() -> Result<()> {
     unsafe {
+        SetLastError(WIN32_ERROR(0));
         let mutex = CreateMutexW(None, BOOL(1), w!("Aura.SingleInstance"))?;
-        if GetLastError().0 == 183 {
+        let err = GetLastError().0;
+        if err == 183 {
             return Ok(());
         }
         let _ = SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
@@ -2075,12 +3565,12 @@ pub fn run() -> Result<()> {
             cbClsExtra: 0,
             cbWndExtra: 0,
             hInstance: hinstance,
-            hIcon: LoadIconW(None, IDI_APPLICATION).unwrap_or_default(),
+            hIcon: tray::load_aura_icon(64).unwrap_or_else(|| LoadIconW(None, IDI_APPLICATION).unwrap_or_default()),
             hCursor: LoadCursorW(None, IDC_ARROW).unwrap_or_default(),
             hbrBackground: HBRUSH(std::ptr::null_mut()),
             lpszMenuName: PCWSTR::null(),
             lpszClassName: class_name,
-            hIconSm: HICON(std::ptr::null_mut()),
+            hIconSm: tray::load_aura_icon(32).unwrap_or_default(),
         };
         let atom = RegisterClassExW(&wc);
         if atom == 0 {
@@ -2119,15 +3609,53 @@ pub fn run() -> Result<()> {
         let _ = SetTimer(hwnd, TIMER_ALERT, 250, None);
         let _ = ShowWindow(hwnd, SW_SHOWNOACTIVATE);
 
+        timeBeginPeriod(1);
+
         let mut msg = MSG::default();
+        let target_frame = Duration::from_micros(8333); // 120 FPS frame quantum (~8.33ms)
+        let mut last_frame = Instant::now();
+
         loop {
-            let ret = GetMessageW(&mut msg, None, 0, 0);
-            if ret.0 <= 0 {
-                break;
+            let is_anim = if app_ptr.is_null() {
+                false
+            } else {
+                (*app_ptr).is_animating()
+            };
+
+            if is_anim {
+                let has_msg = PeekMessageW(&mut msg, None, 0, 0, PM_REMOVE);
+                if has_msg.as_bool() {
+                    if msg.message == WM_QUIT {
+                        break;
+                    }
+                    let _ = TranslateMessage(&msg);
+                    let _ = DispatchMessageW(&msg);
+                } else {
+                    let elapsed = last_frame.elapsed();
+                    if elapsed >= target_frame {
+                        (*app_ptr).on_anim_tick();
+                        last_frame = Instant::now();
+                    } else {
+                        let remain = target_frame.saturating_sub(elapsed);
+                        if remain >= Duration::from_millis(1) {
+                            std::thread::sleep(Duration::from_millis(1));
+                        } else {
+                            std::hint::spin_loop();
+                        }
+                    }
+                }
+            } else {
+                let ret = GetMessageW(&mut msg, None, 0, 0);
+                if ret.0 <= 0 {
+                    break;
+                }
+                let _ = TranslateMessage(&msg);
+                let _ = DispatchMessageW(&msg);
+                last_frame = Instant::now();
             }
-            let _ = TranslateMessage(&msg);
-            let _ = DispatchMessageW(&msg);
         }
+
+        timeEndPeriod(1);
         let _ = ReleaseMutex(mutex);
         OleUninitialize();
         Ok(())
