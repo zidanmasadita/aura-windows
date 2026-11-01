@@ -1459,6 +1459,11 @@ impl App {
         self.music_bar_hover = false;
         self.music_bar_zoom_target = 0.0;
         self.music_button_zoom_targets = [1.0, 1.0, 1.0, 1.0];
+        // If the user manually opened the pill, keep it open (don't auto-close).
+        // They close it explicitly via click.
+        if self.manual_hold {
+            return;
+        }
         let target = self.closed_target_state();
         self.set_state(target);
         trim_working_set();
@@ -2020,6 +2025,7 @@ impl App {
 
     fn close_by_click(&mut self) {
         self.suppress_hover_open_after_click_close = true;
+        self.manual_hold = false;
         let target = self.closed_target_state();
         self.set_state(target);
         trim_working_set();
@@ -3842,7 +3848,12 @@ unsafe extern "system" fn wnd_proc(
             app.set_state(target);
             app.ensure_anim_timer();
             app.on_paint();
-            // Auto-close 0.5s after the user stops dragging the slider.
+            // Cancel any pending auto-close while dragging.
+            app.preview_close_at = None;
+            LRESULT(0)
+        }
+        crate::settings_window::WM_SETTINGS_DRAG_END => {
+            // Auto-close 0.5s after the user releases the slider.
             app.preview_close_at = Some(Instant::now() + Duration::from_millis(500));
             LRESULT(0)
         }
@@ -3872,10 +3883,6 @@ unsafe extern "system" fn wnd_proc(
             app.pill.width = tw;
             app.pill.height = th;
             app.on_paint();
-            // Keep the auto-close deadline fresh while the slider is moving.
-            if app.preview_close_at.is_some() {
-                app.preview_close_at = Some(Instant::now() + Duration::from_millis(500));
-            }
             LRESULT(0)
         }
         0x0102 => {

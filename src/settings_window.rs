@@ -31,6 +31,7 @@ pub const SIDEBAR_W: f32 = 210.0;
 
 pub const WM_SETTINGS_UPDATED: u32 = WM_USER + 55;
 pub const WM_SETTINGS_PREVIEW: u32 = WM_USER + 56;
+pub const WM_SETTINGS_DRAG_END: u32 = WM_USER + 57;
 
 static SETTINGS_HWND: Mutex<Option<isize>> = Mutex::new(None);
 static MAIN_HWND: Mutex<Option<isize>> = Mutex::new(None);
@@ -78,6 +79,15 @@ pub fn notify_preview() {
         let hwnd = HWND(raw as *mut core::ffi::c_void);
         unsafe {
             let _ = PostMessageW(hwnd, WM_SETTINGS_PREVIEW, WPARAM(0), LPARAM(0));
+        }
+    }
+}
+
+pub fn notify_drag_end() {
+    if let Some(raw) = *MAIN_HWND.lock().unwrap() {
+        let hwnd = HWND(raw as *mut core::ffi::c_void);
+        unsafe {
+            let _ = PostMessageW(hwnd, WM_SETTINGS_DRAG_END, WPARAM(0), LPARAM(0));
         }
     }
 }
@@ -508,6 +518,7 @@ unsafe extern "system" fn settings_wnd_proc(
                 unsafe {
                     let _ = ReleaseCapture();
                 }
+                notify_drag_end();
                 render_window(hwnd);
             }
             LRESULT(0)
