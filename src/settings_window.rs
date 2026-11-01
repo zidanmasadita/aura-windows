@@ -1255,12 +1255,39 @@ fn draw_monitor_map(target: &ID2D1RenderTarget, s: &State) {
         stroke_rounded(target, rx, ry, rw, rh, 6.0, 2.0, sc);
         // pill marker at top-center
         let ma = if s.settings.pill_show_all_monitors || sel { 0.95 } else { 0.25 };
-        fill_rounded(target, rx + rw / 2.0 - 14.0, ry + 4.0, 28.0, 7.0, 3.5, color(1.0, 1.0, 1.0, ma));
-        if let Some(fmt) = s.fmt_row_sub.as_ref() {
-            let res = format!("{}x{}", m.work.right - m.work.left, m.work.bottom - m.work.top);
-            draw_centered_text(target, &res, fmt, rx + rw / 2.0, ry + rh / 2.0 - 7.0, color(1.0, 1.0, 1.0, 0.60));
-            let name = if m.primary { "Primary".to_string() } else { m.device.clone() };
-            draw_centered_text(target, &name, fmt, rx + rw / 2.0, ry + rh / 2.0 + 7.0, color(1.0, 1.0, 1.0, 0.40));
+        let mw = 28.0f32.min(rw - 8.0).max(8.0);
+        fill_rounded(target, rx + rw / 2.0 - mw / 2.0, ry + 4.0, mw, 7.0, 3.5, color(1.0, 1.0, 1.0, ma));
+        // Labels clipped to the rect: short resolution + Primary/Display N.
+        if rw > 64.0 {
+            if let Some(fmt) = s.fmt_row_sub.as_ref() {
+                let res = format!("{}x{}", m.work.right - m.work.left, m.work.bottom - m.work.top);
+                let tag = if m.primary { "Primary".to_string() } else { format!("Display {}", i + 1) };
+                draw_text_in(target, &res, fmt, rx + 4.0, ry + rh / 2.0 - 14.0, rw - 8.0, color(1.0, 1.0, 1.0, 0.60));
+                draw_text_in(target, &tag, fmt, rx + 4.0, ry + rh / 2.0 + 2.0, rw - 8.0, color(1.0, 1.0, 1.0, 0.40));
+            }
+        }
+    }
+}
+
+/// Centered text clipped to a given width (for the monitor map labels).
+fn draw_text_in(target: &ID2D1RenderTarget, text: &str, fmt: &IDWriteTextFormat, x: f32, y: f32, w: f32, c: D2D1_COLOR_F) {
+    let wide: Vec<u16> = text.encode_utf16().collect();
+    if wide.is_empty() || w <= 0.0 {
+        return;
+    }
+    unsafe {
+        if let Ok(b) = target.CreateSolidColorBrush(&c, None) {
+            let layout = D2D_RECT_F { left: x, top: y, right: x + w, bottom: y + 40.0 };
+            let _ = fmt.SetTextAlignment(DWRITE_TEXT_ALIGNMENT_CENTER);
+            target.DrawText(
+                &wide,
+                fmt,
+                &layout,
+                &b,
+                D2D1_DRAW_TEXT_OPTIONS_CLIP,
+                DWRITE_MEASURING_MODE_NATURAL,
+            );
+            let _ = fmt.SetTextAlignment(DWRITE_TEXT_ALIGNMENT_LEADING);
         }
     }
 }

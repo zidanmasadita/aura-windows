@@ -693,15 +693,14 @@ impl App {
         let h = self.pill.height.max(1.0);
         let idle = !self.pill.state.is_expanded() && self.current_alert().is_none();
         let hovered = self.pill_hovered && !self.hide_fs && !self.pill_covered && !self.dodging;
-        let hide_full = self.hide_fs
-            || (idle && self.settings.hide_when_covered && self.pill_covered)
-            || (idle && !hovered && self.dodging);
-        if hide_full {
-            // fully above the screen edge
-            -((window::CANVAS_H - h) / 2.0 + h + 4.0)
-        } else if self.settings.minimal_notch && idle && !hovered {
-            // peek: only the tip stays visible
-            -((window::CANVAS_H - h) / 2.0 + h - 10.0)
+        // Peek: slide up leaving a 10px tip visible (never hide fully).
+        let peek = -((window::CANVAS_H - h) / 2.0 + h - 10.0);
+        let hide = idle
+            && (self.hide_fs
+                || (self.settings.hide_when_covered && self.pill_covered)
+                || (!hovered && self.dodging));
+        if hide || (self.settings.minimal_notch && idle && !hovered) {
+            peek
         } else {
             0.0
         }
@@ -1263,6 +1262,11 @@ impl App {
                     } else {
                         self.pill_covered = false;
                     }
+                }
+                // If dodge / covered / fullscreen changed the slide target while
+                // the animation timer was stopped, restart it so the slide is smooth.
+                if (self.pill_y_offset - self.pill_offset_target()).abs() > 0.5 {
+                    self.ensure_anim_timer();
                 }
                 self.update_eyes();
                 self.refresh_media_from_cache(false);
@@ -3714,6 +3718,13 @@ unsafe extern "system" fn wnd_proc(
     match msg {
         WM_PAINT => {
             app.on_paint();
+            // Validate the hwnd that actually received the paint message.
+            // Extra canvases (show-on-all-monitors) share this wndproc;
+            // on_paint only validates the main hwnd, so without this their
+            // paint region is never cleared -> infinite WM_PAINT storm.
+            unsafe {
+                let _ = ValidateRect(hwnd, None);
+            }
             LRESULT(0)
         }
         WM_MOUSEMOVE => {
