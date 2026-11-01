@@ -5430,10 +5430,9 @@ impl Renderer {
 
             let alpha = (ctx.settings.pill_opacity.clamp(0.4, 1.0) * 255.0).round() as u8;
             self.present_to(hwnd, alpha);
-            true
-        } else {
-            false
+            return true;
         }
+        false
     }
 
     /// Present the last rendered frame onto another canvas HWND

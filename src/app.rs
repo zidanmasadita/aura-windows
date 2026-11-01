@@ -357,7 +357,7 @@ impl App {
         ][app.settings.removebg_model_idx.min(2)];
         app.convert.photo_format = [
             crate::convert::ConvertFormat::Avif,
-            crate::convert::ConvertFormat::WebP,
+            crate::convert::ConvertFormat::Webp,
             crate::convert::ConvertFormat::Png,
         ][app.settings.convert_format_idx.min(2)];
         let (bx, by, _, _) = window::place_canvas_on_monitor(hwnd, app.settings.pill_monitor);
@@ -3809,7 +3809,7 @@ unsafe extern "system" fn wnd_proc(
             ][app.settings.removebg_model_idx.min(2)];
             app.convert.photo_format = [
                 crate::convert::ConvertFormat::Avif,
-                crate::convert::ConvertFormat::WebP,
+                crate::convert::ConvertFormat::Webp,
                 crate::convert::ConvertFormat::Png,
             ][app.settings.convert_format_idx.min(2)];
             app.rebuild_canvases();
