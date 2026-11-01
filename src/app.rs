@@ -3844,8 +3844,14 @@ unsafe extern "system" fn wnd_proc(
         }
         crate::settings_window::WM_SETTINGS_PREVIEW => {
             // Only open if not already expanded; redundant set_state causes flicker.
+            // Don't open the Lyrics pill for size preview; use the standard
+            // Expanded card instead.
             if !app.pill.state.is_expanded() {
-                let target = app.last_section;
+                let target = if app.last_section == IslandState::Lyrics {
+                    IslandState::Expanded
+                } else {
+                    app.last_section
+                };
                 app.set_state(target);
             }
             app.ensure_anim_timer();

@@ -113,6 +113,7 @@ struct State {
     tab_icons: [Option<ID2D1Bitmap>; 12],
     dragging_slider: Option<SliderKind>,
     slider_hover: Option<SliderKind>,
+    last_slider_notify: std::time::Instant,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -219,8 +220,13 @@ fn apply_slider(state: &mut State, kind: SliderKind, x: f32) {
         SliderKind::DodgeDelay => state.settings.dodge_delay_ms = v.round() as u64,
         SliderKind::HoverDelay => state.settings.hover_open_delay_ms = v.round() as u64,
     }
+    // Throttle to ~30fps to avoid message flood causing flicker.
     // Don't hit disk on every mouse move; persisted on drag end.
-    notify_main();
+    let now = std::time::Instant::now();
+    if now.duration_since(state.last_slider_notify).as_millis() >= 33 {
+        state.last_slider_notify = now;
+        notify_main();
+    }
 }
 
 fn slider_hit(x: f32, y: f32) -> Option<SliderKind> {
@@ -381,6 +387,7 @@ impl State {
                 tab_icons: Default::default(),
                 dragging_slider: None,
                 slider_hover: None,
+                last_slider_notify: std::time::Instant::now(),
             })
         }
     }
