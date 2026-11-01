@@ -8,7 +8,7 @@ use std::time::{Duration, Instant};
 
 use windows::core::{w, GUID, Result, PCWSTR, HSTRING};
 use windows::Win32::Foundation::*;
-use windows::Win32::Graphics::Gdi::{HBRUSH, ScreenToClient};
+use windows::Win32::Graphics::Gdi::{HBRUSH, ScreenToClient, ValidateRect};
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::System::Ole::{OleInitialize, OleUninitialize};
 use windows::Win32::System::Com::{CoCreateInstance, CoTaskMemFree, CLSCTX_INPROC_SERVER};
