@@ -58,6 +58,18 @@ impl Spring2D {
         }
     }
 
+    /// Snap position to `(w, h)` immediately, cancelling velocity and animation.
+    /// Used for 1:1 tracking (e.g. size slider drags) where springing would jitter.
+    pub fn snap_to(&mut self, w: f32, h: f32) {
+        self.pos_w = w;
+        self.pos_h = h;
+        self.target_w = w;
+        self.target_h = h;
+        self.vel_w = 0.0;
+        self.vel_h = 0.0;
+        self.active = false;
+    }
+
     /// Set a new target `(to_w, to_h)` while preserving current position AND velocity
     /// (`nusa.exe` `0x14002C853..0x14002C907`: a state change only rewrites the target,
     /// it never touches velocity nor steps the spring). Returns `true` if animation

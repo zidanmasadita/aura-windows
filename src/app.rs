@@ -3827,11 +3827,11 @@ unsafe extern "system" fn wnd_proc(
             app.refresh_anim_timer();
             let state = app.pill.state;
             let (tw, th) = app.target_size_for(state);
-            // Animate size changes smoothly through the spring (e.g. while
-            // dragging the size slider) instead of jumping instantly.
-            if app.spring.set_target(tw, th, animator::SpringPreset::Morph) {
-                app.ensure_anim_timer();
-            }
+            // Snap size 1:1 (no spring) so slider drags track directly without
+            // jitter; the pill opening itself still animates via set_state.
+            app.spring.snap_to(tw, th);
+            app.pill.width = tw;
+            app.pill.height = th;
             app.on_paint();
             LRESULT(0)
         }
@@ -3851,10 +3851,15 @@ unsafe extern "system" fn wnd_proc(
             DefWindowProcW(hwnd, msg, wparam, lparam)
         }
         WM_DESTROY => {
-            tray::remove_icon(hwnd);
-            let _ = Box::from_raw(app_ptr);
-            SetWindowLongPtrW(hwnd, GWLP_USERDATA, 0);
-            PostQuitMessage(0);
+            // Only the main canvas owns the App (Box::into_raw). Extra canvases
+            // (show-on-all-monitors) just borrow it -- freeing here would be a
+            // use-after-free (STATUS_ACCESS_VIOLATION).
+            if hwnd == app.hwnd {
+                tray::remove_icon(hwnd);
+                let _ = Box::from_raw(app_ptr);
+                SetWindowLongPtrW(hwnd, GWLP_USERDATA, 0);
+                PostQuitMessage(0);
+            }
             LRESULT(0)
         }
         _ => {
