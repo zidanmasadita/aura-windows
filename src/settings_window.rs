@@ -252,11 +252,11 @@ unsafe extern "system" fn settings_wnd_proc(
             state.hovered_tab = None;
             if x < SIDEBAR_W && y >= 48.0 && y <= 450.0 {
                 let idx = ((y - 48.0) / 36.0) as usize;
-                if idx < 10 {
+                if idx < 9 {
                     state.hovered_tab = Some(idx);
                 }
             } else if x < SIDEBAR_W && y >= 490.0 && y <= 526.0 {
-                state.hovered_tab = Some(10); // About
+                state.hovered_tab = Some(9); // About
             }
 
             if old_close != state.hovered_close || old_tab != state.hovered_tab {
@@ -295,13 +295,13 @@ unsafe extern "system" fn settings_wnd_proc(
             if x < SIDEBAR_W {
                 if y >= 48.0 && y <= 450.0 {
                     let idx = ((y - 48.0) / 36.0) as usize;
-                    if idx < 10 {
+                    if idx < 9 {
                         state.selected_tab = idx;
                         render_window(hwnd);
                         return LRESULT(0);
                     }
                 } else if y >= 490.0 && y <= 526.0 {
-                    state.selected_tab = 10; // About
+                    state.selected_tab = 9; // About
                     render_window(hwnd);
                     return LRESULT(0);
                 }
@@ -397,6 +397,29 @@ fn handle_content_click(hwnd: HWND, state: &mut State, x: f32, y: f32) {
             render_window(hwnd);
             return;
         }
+    } else if state.selected_tab == 1 {
+        // Tab: Display — monitor rows at y = 84 + i*56, height 48
+        let mons = crate::window::list_monitors();
+        for (i, _) in mons.iter().enumerate() {
+            let ry = 84.0 + i as f32 * 56.0;
+            if y >= ry && y <= ry + 48.0 && x >= 236.0 && x <= 696.0 {
+                state.settings.pill_monitor = i as i32;
+                state.settings.save();
+                notify_main();
+                render_window(hwnd);
+                return;
+            }
+        }
+    } else if state.selected_tab == 2 {
+        // Tab: Appearance — opacity segmented (y: 132..162)
+        if y >= 132.0 && y <= 162.0 && x >= 250.0 && x <= 682.0 {
+            if let Some(idx) = segmented_hit(x, 250.0, 432.0, 4) {
+                state.settings.pill_opacity_idx = idx;
+                state.settings.save();
+                notify_main();
+                render_window(hwnd);
+            }
+        }
     } else if state.selected_tab == 3 {
         // Tab: Music and lyrics
         if y >= 84.0 && y <= 126.0 && x >= 236.0 && x <= 696.0 {
@@ -428,26 +451,60 @@ fn handle_content_click(hwnd: HWND, state: &mut State, x: f32, y: f32) {
             notify_main();
             render_window(hwnd);
         }
-    } else if state.selected_tab == 6 {
+    } else if state.selected_tab == 5 {
         // Tab: Pomodoro
         if y >= 84.0 && y <= 126.0 && x >= 236.0 && x <= 696.0 {
             state.settings.pomodoro_enabled = !state.settings.pomodoro_enabled;
             state.settings.save();
             notify_main();
             render_window(hwnd);
+        } else if y >= 208.0 && y <= 238.0 && x >= 250.0 && x <= 682.0 {
+            // Focus duration segmented
+            if let Some(idx) = segmented_hit(x, 250.0, 432.0, 4) {
+                state.settings.pomodoro_focus_mins = [15, 25, 45, 60][idx];
+                state.settings.save();
+                notify_main();
+                render_window(hwnd);
+            }
         }
-    } else if state.selected_tab == 7 {
+    } else if state.selected_tab == 6 {
         // Tab: Water
         if y >= 84.0 && y <= 126.0 && x >= 236.0 && x <= 696.0 {
             state.settings.water_enabled = !state.settings.water_enabled;
             state.settings.save();
             notify_main();
             render_window(hwnd);
+        } else if y >= 208.0 && y <= 238.0 && x >= 250.0 && x <= 682.0 {
+            // Daily goal segmented
+            if let Some(idx) = segmented_hit(x, 250.0, 432.0, 4) {
+                state.settings.water_daily_goal = [1500, 2000, 2500, 3000][idx];
+                state.settings.save();
+                notify_main();
+                render_window(hwnd);
+            }
         }
-    } else if state.selected_tab == 8 {
+    } else if state.selected_tab == 7 {
         // Tab: Shelf
         if y >= 84.0 && y <= 126.0 && x >= 236.0 && x <= 696.0 {
             state.settings.tray_enabled = !state.settings.tray_enabled;
+            state.settings.save();
+            notify_main();
+            render_window(hwnd);
+        }
+    } else if state.selected_tab == 8 {
+        // Tab: HUD & popups
+        if y >= 84.0 && y <= 132.0 && x >= 236.0 && x <= 696.0 {
+            state.settings.pill_alerts_enabled = !state.settings.pill_alerts_enabled;
+            state.settings.save();
+            notify_main();
+            render_window(hwnd);
+        } else if y >= 136.0 && y <= 180.0 && x >= 236.0 && x <= 696.0 {
+            state.settings.alert_battery = !state.settings.alert_battery;
+            state.settings.save();
+            notify_main();
+            render_window(hwnd);
+        } else if y >= 184.0 && y <= 232.0 && x >= 236.0 && x <= 696.0 {
+            state.settings.alert_capslock = !state.settings.alert_capslock;
             state.settings.save();
             notify_main();
             render_window(hwnd);
@@ -550,20 +607,19 @@ fn render_window(hwnd: HWND) {
 
         // Sidebar Menu Items:
         let tabs = [
-            ("General", false, color(0.35, 0.35, 0.38, 1.0), '⚙'),
-            ("Display", true, color(0.04, 0.52, 1.0, 1.0), '🖥'),
-            ("Appearance", true, color(0.37, 0.36, 0.90, 1.0), '◑'),
-            ("Music and lyrics", false, color(1.0, 0.18, 0.33, 1.0), '♫'),
-            ("To-do", false, color(0.20, 0.78, 0.35, 1.0), '✓'),
-            ("Calendar", true, color(1.0, 0.23, 0.19, 1.0), '📅'),
-            ("Pomodoro", true, color(1.0, 0.58, 0.0, 1.0), '⏱'),
-            ("Water", false, color(0.20, 0.68, 0.90, 1.0), '💧'),
-            ("Shelf", false, color(1.0, 0.80, 0.0, 1.0), '🗂'),
-            ("HUD & popups", true, color(0.35, 0.78, 0.98, 1.0), '🔔'),
+            ("General", color(0.35, 0.35, 0.38, 1.0), '⚙'),
+            ("Display", color(0.04, 0.52, 1.0, 1.0), '🖥'),
+            ("Appearance", color(0.37, 0.36, 0.90, 1.0), '◑'),
+            ("Music and lyrics", color(1.0, 0.18, 0.33, 1.0), '♫'),
+            ("To-do", color(0.20, 0.78, 0.35, 1.0), '✓'),
+            ("Pomodoro", color(1.0, 0.58, 0.0, 1.0), '⏱'),
+            ("Water", color(0.20, 0.68, 0.90, 1.0), '💧'),
+            ("Shelf", color(1.0, 0.80, 0.0, 1.0), '🗂'),
+            ("HUD & popups", color(0.35, 0.78, 0.98, 1.0), '🔔'),
         ];
 
         let mut item_y = 48.0f32;
-        for (i, &(title, is_pro, icon_bg, sym)) in tabs.iter().enumerate() {
+        for (i, &(title, icon_bg, sym)) in tabs.iter().enumerate() {
             let is_sel = s.selected_tab == i;
             let is_hov = s.hovered_tab == Some(i);
 
@@ -582,22 +638,12 @@ fn render_window(hwnd: HWND) {
                 draw_text(target, title, fmt, 46.0, item_y + 6.0, tc);
             }
 
-            // PRO pill badge:
-            if is_pro {
-                let badge_x = 158.0;
-                let badge_y = item_y + 8.5;
-                fill_rounded(target, badge_x, badge_y, 32.0, 15.0, 7.5, color(0.0, 0.48, 1.0, 1.0));
-                if let Some(bfmt) = s.fmt_badge.as_ref() {
-                    draw_text(target, "PRO", bfmt, badge_x + 6.0, badge_y + 1.0, color(1.0, 1.0, 1.0, 1.0));
-                }
-            }
-
             item_y += 36.0;
         }
 
         // Bottom item: About
-        let about_sel = s.selected_tab == 10;
-        let about_hov = s.hovered_tab == Some(10);
+        let about_sel = s.selected_tab == 9;
+        let about_hov = s.hovered_tab == Some(9);
         let about_bg = if about_sel { 0.14 } else if about_hov { 0.06 } else { 0.0 };
         if about_bg > 0.0 {
             fill_rounded(target, 10.0, 492.0, 190.0, 32.0, 8.0, color(1.0, 1.0, 1.0, about_bg));
@@ -612,13 +658,15 @@ fn render_window(hwnd: HWND) {
         // --- Right Content Area ---
         match s.selected_tab {
             0 => draw_general_page(target, s),
+            1 => draw_display_page(target, s),
+            2 => draw_appearance_page(target, s),
             3 => draw_music_page(target, s),
             4 => draw_todo_page(target, s),
-            6 => draw_pomodoro_page(target, s),
-            7 => draw_water_page(target, s),
-            8 => draw_shelf_page(target, s),
-            10 => draw_about_page(target, s),
-            _ => draw_pro_placeholder_page(target, s, tabs[s.selected_tab].0),
+            5 => draw_pomodoro_page(target, s),
+            6 => draw_water_page(target, s),
+            7 => draw_shelf_page(target, s),
+            8 => draw_hud_page(target, s),
+            _ => draw_about_page(target, s),
         }
 
         target.PopLayer();
@@ -848,6 +896,19 @@ fn draw_pomodoro_page(target: &ID2D1RenderTarget, s: &State) {
         draw_text(target, "25-min focus sessions with 5-min short breaks", fmt, cx0 + 16.0, 110.0, color(1.0, 1.0, 1.0, 0.45));
     }
     draw_toggle(target, cx1 - 56.0, 94.0, s.settings.pomodoro_enabled);
+
+    if let Some(fmt) = s.fmt_sec_hdr.as_ref() {
+        draw_text(target, "Duration", fmt, cx0, 142.0, color(1.0, 1.0, 1.0, 0.45));
+    }
+    fill_rounded(target, cx0, 160.0, card_w, 100.0, 10.0, color(0.16, 0.16, 0.18, 0.95));
+    if let Some(fmt) = s.fmt_row_title.as_ref() {
+        draw_text(target, "Focus duration", fmt, cx0 + 16.0, 170.0, color(1.0, 1.0, 1.0, 0.95));
+    }
+    if let Some(fmt) = s.fmt_row_sub.as_ref() {
+        draw_text(target, "Length of one focus session", fmt, cx0 + 16.0, 188.0, color(1.0, 1.0, 1.0, 0.45));
+    }
+    let sel = [15u32, 25, 45, 60].iter().position(|&v| v == s.settings.pomodoro_focus_mins).unwrap_or(1);
+    draw_segmented(target, s, cx0 + 14.0, 208.0, card_w - 28.0, &["15 min", "25 min", "45 min", "60 min"], sel);
 }
 
 fn draw_water_page(target: &ID2D1RenderTarget, s: &State) {
@@ -869,6 +930,19 @@ fn draw_water_page(target: &ID2D1RenderTarget, s: &State) {
         draw_text(target, "Track daily intake and receive drink notifications", fmt, cx0 + 16.0, 110.0, color(1.0, 1.0, 1.0, 0.45));
     }
     draw_toggle(target, cx1 - 56.0, 94.0, s.settings.water_enabled);
+
+    if let Some(fmt) = s.fmt_sec_hdr.as_ref() {
+        draw_text(target, "Goal", fmt, cx0, 142.0, color(1.0, 1.0, 1.0, 0.45));
+    }
+    fill_rounded(target, cx0, 160.0, card_w, 100.0, 10.0, color(0.16, 0.16, 0.18, 0.95));
+    if let Some(fmt) = s.fmt_row_title.as_ref() {
+        draw_text(target, "Daily goal", fmt, cx0 + 16.0, 170.0, color(1.0, 1.0, 1.0, 0.95));
+    }
+    if let Some(fmt) = s.fmt_row_sub.as_ref() {
+        draw_text(target, "Target water intake per day", fmt, cx0 + 16.0, 188.0, color(1.0, 1.0, 1.0, 0.45));
+    }
+    let sel = [1500u32, 2000, 2500, 3000].iter().position(|&v| v == s.settings.water_daily_goal).unwrap_or(1);
+    draw_segmented(target, s, cx0 + 14.0, 208.0, card_w - 28.0, &["1.5 L", "2 L", "2.5 L", "3 L"], sel);
 }
 
 fn draw_shelf_page(target: &ID2D1RenderTarget, s: &State) {
@@ -890,6 +964,135 @@ fn draw_shelf_page(target: &ID2D1RenderTarget, s: &State) {
         draw_text(target, "Drag files here to stage or transfer to Remove BG / Convert", fmt, cx0 + 16.0, 110.0, color(1.0, 1.0, 1.0, 0.45));
     }
     draw_toggle(target, cx1 - 56.0, 94.0, s.settings.tray_enabled);
+}
+
+fn segmented_hit(x: f32, seg_x: f32, seg_w: f32, n: usize) -> Option<usize> {
+    if x < seg_x || x > seg_x + seg_w || n == 0 {
+        return None;
+    }
+    let idx = ((x - seg_x) / (seg_w / n as f32)) as usize;
+    if idx < n { Some(idx) } else { None }
+}
+
+fn draw_segmented(target: &ID2D1RenderTarget, s: &State, x: f32, y: f32, w: f32, labels: &[&str], selected: usize) {
+    let h = 30.0;
+    fill_rounded(target, x, y, w, h, 6.0, color(0.11, 0.11, 0.12, 1.0));
+    let seg_w = w / labels.len() as f32;
+    for (idx, &label) in labels.iter().enumerate() {
+        let px = x + idx as f32 * seg_w;
+        if idx == selected {
+            fill_rounded(target, px + 2.0, y + 2.0, seg_w - 4.0, h - 4.0, 5.0, color(0.24, 0.24, 0.27, 1.0));
+        }
+        if let Some(fmt) = s.fmt_seg.as_ref() {
+            let tc = if idx == selected { color(1.0, 1.0, 1.0, 1.0) } else { color(1.0, 1.0, 1.0, 0.60) };
+            draw_centered_text(target, label, fmt, px + seg_w * 0.5, y + 6.0, tc);
+        }
+    }
+}
+
+fn draw_display_page(target: &ID2D1RenderTarget, s: &State) {
+    let (cx0, cx1) = (236.0, 696.0);
+    let card_w = cx1 - cx0;
+
+    if let Some(fmt) = s.fmt_title.as_ref() {
+        draw_text(target, "Display", fmt, cx0, 26.0, color(1.0, 1.0, 1.0, 1.0));
+    }
+
+    if let Some(fmt) = s.fmt_sec_hdr.as_ref() {
+        draw_text(target, "Notch Monitor", fmt, cx0, 66.0, color(1.0, 1.0, 1.0, 0.45));
+    }
+
+    let mons = crate::window::list_monitors();
+    if mons.is_empty() {
+        if let Some(fmt) = s.fmt_row_sub.as_ref() {
+            draw_text(target, "No displays detected", fmt, cx0, 92.0, color(1.0, 1.0, 1.0, 0.45));
+        }
+        return;
+    }
+    for (i, m) in mons.iter().enumerate() {
+        let ry = 84.0 + i as f32 * 56.0;
+        fill_rounded(target, cx0, ry, card_w, 48.0, 10.0, color(0.16, 0.16, 0.18, 0.95));
+        if let Some(fmt) = s.fmt_row_title.as_ref() {
+            draw_text(target, &format!("Display {}", i + 1), fmt, cx0 + 16.0, ry + 8.0, color(1.0, 1.0, 1.0, 0.95));
+        }
+        if let Some(fmt) = s.fmt_row_sub.as_ref() {
+            let sub = format!(
+                "{} x {}{}",
+                m.work.right - m.work.left,
+                m.work.bottom - m.work.top,
+                if m.primary { " - Primary" } else { "" }
+            );
+            draw_text(target, &sub, fmt, cx0 + 16.0, ry + 26.0, color(1.0, 1.0, 1.0, 0.45));
+        }
+        let rcx = cx1 - 40.0;
+        let rcy = ry + 24.0;
+        stroke_oval(target, rcx - 9.0, rcy - 9.0, 18.0, 18.0, 1.5, color(1.0, 1.0, 1.0, 0.35));
+        if s.settings.pill_monitor as usize == i {
+            fill_oval(target, rcx - 5.0, rcy - 5.0, 10.0, 10.0, color(0.20, 0.78, 0.35, 1.0));
+        }
+    }
+}
+
+fn draw_appearance_page(target: &ID2D1RenderTarget, s: &State) {
+    let (cx0, cx1) = (236.0, 696.0);
+    let card_w = cx1 - cx0;
+
+    if let Some(fmt) = s.fmt_title.as_ref() {
+        draw_text(target, "Appearance", fmt, cx0, 26.0, color(1.0, 1.0, 1.0, 1.0));
+    }
+
+    if let Some(fmt) = s.fmt_sec_hdr.as_ref() {
+        draw_text(target, "Pill", fmt, cx0, 66.0, color(1.0, 1.0, 1.0, 0.45));
+    }
+    fill_rounded(target, cx0, 84.0, card_w, 100.0, 10.0, color(0.16, 0.16, 0.18, 0.95));
+    if let Some(fmt) = s.fmt_row_title.as_ref() {
+        draw_text(target, "Pill opacity", fmt, cx0 + 16.0, 94.0, color(1.0, 1.0, 1.0, 0.95));
+    }
+    if let Some(fmt) = s.fmt_row_sub.as_ref() {
+        draw_text(target, "Transparency of the floating pill", fmt, cx0 + 16.0, 112.0, color(1.0, 1.0, 1.0, 0.45));
+    }
+    draw_segmented(target, s, cx0 + 14.0, 132.0, card_w - 28.0, &["100%", "85%", "70%", "55%"], s.settings.pill_opacity_idx.min(3));
+}
+
+fn draw_hud_page(target: &ID2D1RenderTarget, s: &State) {
+    let (cx0, cx1) = (236.0, 696.0);
+    let card_w = cx1 - cx0;
+
+    if let Some(fmt) = s.fmt_title.as_ref() {
+        draw_text(target, "HUD & popups", fmt, cx0, 26.0, color(1.0, 1.0, 1.0, 1.0));
+    }
+
+    if let Some(fmt) = s.fmt_sec_hdr.as_ref() {
+        draw_text(target, "Pill Alerts", fmt, cx0, 66.0, color(1.0, 1.0, 1.0, 0.45));
+    }
+    fill_rounded(target, cx0, 84.0, card_w, 148.0, 10.0, color(0.16, 0.16, 0.18, 0.95));
+    if let Some(fmt) = s.fmt_row_title.as_ref() {
+        draw_text(target, "Pill alerts", fmt, cx0 + 16.0, 94.0, color(1.0, 1.0, 1.0, 0.95));
+    }
+    if let Some(fmt) = s.fmt_row_sub.as_ref() {
+        draw_text(target, "Battery, charging and Caps Lock popups", fmt, cx0 + 16.0, 112.0, color(1.0, 1.0, 1.0, 0.45));
+    }
+    draw_toggle(target, cx1 - 56.0, 98.0, s.settings.pill_alerts_enabled);
+
+    fill_rect(target, cx0 + 14.0, 134.0, card_w - 28.0, 1.0, color(1.0, 1.0, 1.0, 0.05));
+
+    if let Some(fmt) = s.fmt_row_title.as_ref() {
+        draw_text(target, "Battery alerts", fmt, cx0 + 16.0, 142.0, color(1.0, 1.0, 1.0, 0.95));
+    }
+    if let Some(fmt) = s.fmt_row_sub.as_ref() {
+        draw_text(target, "Low battery and charging notifications", fmt, cx0 + 16.0, 160.0, color(1.0, 1.0, 1.0, 0.45));
+    }
+    draw_toggle(target, cx1 - 56.0, 146.0, s.settings.alert_battery);
+
+    fill_rect(target, cx0 + 14.0, 182.0, card_w - 28.0, 1.0, color(1.0, 1.0, 1.0, 0.05));
+
+    if let Some(fmt) = s.fmt_row_title.as_ref() {
+        draw_text(target, "Caps Lock alerts", fmt, cx0 + 16.0, 190.0, color(1.0, 1.0, 1.0, 0.95));
+    }
+    if let Some(fmt) = s.fmt_row_sub.as_ref() {
+        draw_text(target, "Show a popup when Caps Lock toggles", fmt, cx0 + 16.0, 208.0, color(1.0, 1.0, 1.0, 0.45));
+    }
+    draw_toggle(target, cx1 - 56.0, 194.0, s.settings.alert_capslock);
 }
 
 fn draw_about_page(target: &ID2D1RenderTarget, s: &State) {
@@ -914,31 +1117,6 @@ fn draw_about_page(target: &ID2D1RenderTarget, s: &State) {
     if let Some(fmt) = s.fmt_row_sub.as_ref() {
         draw_centered_text(target, "Version 1.0.0 (Release x86_64)", fmt, cx0 + card_w * 0.5, 218.0, color(1.0, 1.0, 1.0, 0.65));
         draw_centered_text(target, "Native Rust + Direct2D Dynamic Island", fmt, cx0 + card_w * 0.5, 238.0, color(1.0, 1.0, 1.0, 0.45));
-    }
-}
-
-fn draw_pro_placeholder_page(target: &ID2D1RenderTarget, s: &State, title: &str) {
-    let (cx0, cx1) = (236.0, 696.0);
-    let card_w = cx1 - cx0;
-
-    if let Some(fmt) = s.fmt_title.as_ref() {
-        draw_text(target, title, fmt, cx0, 26.0, color(1.0, 1.0, 1.0, 1.0));
-    }
-
-    fill_rounded(target, cx0, 84.0, card_w, 140.0, 12.0, color(0.16, 0.16, 0.18, 0.95));
-
-    let badge_x = cx0 + card_w * 0.5 - 24.0;
-    fill_rounded(target, badge_x, 116.0, 48.0, 20.0, 10.0, color(0.0, 0.48, 1.0, 1.0));
-    if let Some(bfmt) = s.fmt_badge.as_ref() {
-        draw_centered_text(target, "PRO", bfmt, badge_x + 24.0, 120.0, color(1.0, 1.0, 1.0, 1.0));
-    }
-
-    if let Some(fmt) = s.fmt_row_title.as_ref() {
-        let msg = format!("{} settings are available in Aura Pro", title);
-        draw_centered_text(target, &msg, fmt, cx0 + card_w * 0.5, 148.0, color(1.0, 1.0, 1.0, 0.95));
-    }
-    if let Some(fmt) = s.fmt_row_sub.as_ref() {
-        draw_centered_text(target, "Personalization features unlocked for your desktop experience", fmt, cx0 + card_w * 0.5, 172.0, color(1.0, 1.0, 1.0, 0.45));
     }
 }
 

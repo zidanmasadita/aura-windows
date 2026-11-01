@@ -63,6 +63,16 @@ pub struct AuraSettings {
     pub master_volume_control: bool,
     #[serde(default = "default_true")]
     pub sound_on_complete: bool,
+    #[serde(default)]
+    pub pill_monitor: i32, // 0-based index into window::list_monitors() (primary first)
+    #[serde(default)]
+    pub pill_opacity_idx: usize, // 0=100%, 1=85%, 2=70%, 3=55%
+    #[serde(default = "default_true")]
+    pub pill_alerts_enabled: bool,
+    #[serde(default = "default_true")]
+    pub alert_battery: bool,
+    #[serde(default = "default_true")]
+    pub alert_capslock: bool,
 }
 
 impl Default for AuraSettings {
@@ -87,6 +97,11 @@ impl Default for AuraSettings {
             lyrics_sync: true,
             master_volume_control: true,
             sound_on_complete: true,
+            pill_monitor: 0,
+            pill_opacity_idx: 0,
+            pill_alerts_enabled: true,
+            alert_battery: true,
+            alert_capslock: true,
         }
     }
 }

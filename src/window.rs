@@ -7,7 +7,11 @@
 //! automatically transparent and click-through in Win32 (`ULW_ALPHA`), eliminating all
 //! `SetWindowPos`, `SetWindowRgn`, and swapchain `Resize` stutter.
 
-use windows::Win32::Foundation::{HWND, RECT};
+use windows::Win32::Foundation::{BOOL, HMONITOR, HWND, LPARAM, RECT, TRUE};
+use windows::Win32::Graphics::Gdi::{
+    EnumDisplayMonitors, GetMonitorInfoW, HDC, MONITORINFO, MONITORINFOEXW, MONITORINFOF_PRIMARY,
+    MONITORENUMPROC,
+};
 use windows::Win32::UI::HiDpi::GetDpiForWindow;
 use windows::Win32::UI::WindowsAndMessaging::{
     SetWindowPos, SystemParametersInfoW, HWND_TOPMOST, SPI_GETWORKAREA, SWP_NOACTIVATE,
@@ -27,6 +31,62 @@ pub fn dpi_scale(hwnd: HWND) -> f32 {
     } else {
         dpi as f32 / 96.0
     }
+}
+
+/// One physical display. `list_monitors()` sorts primary first.
+pub struct MonitorInfo {
+    pub index: usize,
+    pub primary: bool,
+    pub device: String,
+    pub work: RECT,
+}
+
+unsafe extern "system" fn enum_mon_proc(
+    hmon: HMONITOR,
+    _hdc: HDC,
+    _rc: *mut RECT,
+    lp: LPARAM,
+) -> BOOL {
+    let out = &mut *(lp.0 as *mut Vec<HMONITOR>);
+    out.push(hmon);
+    TRUE
+}
+
+/// All attached monitors, primary sorted first. Empty vec on failure.
+pub fn list_monitors() -> Vec<MonitorInfo> {
+    let mut hmons: Vec<HMONITOR> = Vec::new();
+    unsafe {
+        let _ = EnumDisplayMonitors(
+            None,
+            None,
+            Some(enum_mon_proc),
+            LPARAM(&mut hmons as *mut Vec<HMONITOR> as isize),
+        );
+    }
+    let mut infos: Vec<MonitorInfo> = hmons
+        .into_iter()
+        .filter_map(|hmon| unsafe {
+            let mut mi = MONITORINFOEXW::default();
+            mi.monitorInfo.cbSize = std::mem::size_of::<MONITORINFOEXW>() as u32;
+            if GetMonitorInfoW(hmon, &mut mi as *mut _ as *mut MONITORINFO).as_bool() {
+                let name_len = mi.szDeviceName.iter().position(|&c| c == 0).unwrap_or(32);
+                let device = String::from_utf16_lossy(&mi.szDeviceName[..name_len]);
+                Some(MonitorInfo {
+                    index: 0,
+                    primary: (mi.monitorInfo.dwFlags & MONITORINFOF_PRIMARY) != 0,
+                    device,
+                    work: mi.monitorInfo.rcWork,
+                })
+            } else {
+                None
+            }
+        })
+        .collect();
+    infos.sort_by(|a, b| b.primary.cmp(&a.primary).then(a.device.cmp(&b.device)));
+    for (i, m) in infos.iter_mut().enumerate() {
+        m.index = i;
+    }
+    infos
 }
 
 /// Primary monitor work area (excludes taskbar). Falls back to full screen
@@ -52,13 +112,23 @@ pub fn work_area() -> RECT {
     }
 }
 
-/// Place the fixed-size transparent canvas at the top-center of the work area (no activation).
-/// Called once at startup (and if DPI changes), never during animation frames.
-pub fn place_canvas_top_center(hwnd: HWND) -> (i32, i32, i32, i32) {
+/// Place the fixed-size transparent canvas at the top-center of the selected
+/// monitor's work area (no activation). `monitor_idx` indexes `list_monitors()`
+/// (primary first); out of range falls back to the primary monitor.
+pub fn place_canvas_on_monitor(hwnd: HWND, monitor_idx: i32) -> (i32, i32, i32, i32) {
+    let mons = list_monitors();
+    let wa = mons
+        .get(monitor_idx.max(0) as usize)
+        .map(|m| m.work)
+        .unwrap_or_else(|| {
+            mons.iter()
+                .find(|m| m.primary)
+                .map(|m| m.work)
+                .unwrap_or_else(work_area)
+        });
     let scale = dpi_scale(hwnd);
     let width = (CANVAS_W * scale).round() as i32;
     let height = (CANVAS_H * scale).round() as i32;
-    let wa = work_area();
     let x = wa.left + (wa.right - wa.left - width) / 2;
     let y = wa.top;
     unsafe {
@@ -73,4 +143,10 @@ pub fn place_canvas_top_center(hwnd: HWND) -> (i32, i32, i32, i32) {
         );
     }
     (x, y, width, height)
+}
+
+/// Place the fixed-size transparent canvas at the top-center of the work area (no activation).
+/// Called once at startup (and if DPI changes), never during animation frames.
+pub fn place_canvas_top_center(hwnd: HWND) -> (i32, i32, i32, i32) {
+    place_canvas_on_monitor(hwnd, 0)
 }
