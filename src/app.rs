@@ -3827,8 +3827,11 @@ unsafe extern "system" fn wnd_proc(
             app.refresh_anim_timer();
             let state = app.pill.state;
             let (tw, th) = app.target_size_for(state);
-            app.pill.width = tw;
-            app.pill.height = th;
+            // Animate size changes smoothly through the spring (e.g. while
+            // dragging the size slider) instead of jumping instantly.
+            if app.spring.set_target(tw, th, animator::SpringPreset::Morph) {
+                app.ensure_anim_timer();
+            }
             app.on_paint();
             LRESULT(0)
         }
