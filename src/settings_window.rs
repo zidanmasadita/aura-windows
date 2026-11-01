@@ -185,13 +185,23 @@ fn apply_slider(state: &mut State, kind: SliderKind, x: f32) {
     let (min, max) = slider_min_max(kind);
     let t = ((x - sx) / w).clamp(0.0, 1.0);
     let v = slider_snap(kind, min + t * (max - min));
+    // Skip if the snapped value didn't change (avoids message/file flood).
+    let changed = match kind {
+        SliderKind::Size => (state.settings.notch_scale - v).abs() > 0.0001,
+        SliderKind::Opacity => (state.settings.pill_opacity - v).abs() > 0.0001,
+        SliderKind::DodgeRadius => (state.settings.dodge_radius - v).abs() > 0.01,
+        SliderKind::DodgeDelay => state.settings.dodge_delay_ms != v.round() as u64,
+    };
+    if !changed {
+        return;
+    }
     match kind {
         SliderKind::Size => state.settings.notch_scale = v,
         SliderKind::Opacity => state.settings.pill_opacity = v,
         SliderKind::DodgeRadius => state.settings.dodge_radius = v,
         SliderKind::DodgeDelay => state.settings.dodge_delay_ms = v.round() as u64,
     }
-    state.settings.save();
+    // Don't hit disk on every mouse move; persisted on drag end.
     notify_main();
 }
 
@@ -485,6 +495,7 @@ unsafe extern "system" fn settings_wnd_proc(
         }
         WM_LBUTTONUP => {
             if state.dragging_slider.take().is_some() {
+                state.settings.save();
                 unsafe {
                     let _ = ReleaseCapture();
                 }
@@ -525,8 +536,8 @@ fn handle_content_click(hwnd: HWND, state: &mut State, x: f32, y: f32) {
             return;
         }
 
-        // Mascot toggle: (y: 282..314)
-        if y >= 282.0 && y <= 314.0 && x >= 236.0 && x <= 696.0 {
+        // Mascot toggle: (y: 294..330)
+        if y >= 294.0 && y <= 330.0 && x >= 236.0 && x <= 696.0 {
             state.settings.eye_expressions = !state.settings.eye_expressions;
             state.settings.save();
             notify_main();
@@ -543,14 +554,6 @@ fn handle_content_click(hwnd: HWND, state: &mut State, x: f32, y: f32) {
             return;
         }
 
-        // Hide in full screen toggle: (y: 432..486)
-        if y >= 432.0 && y <= 486.0 && x >= 236.0 && x <= 696.0 {
-            state.settings.hide_in_fullscreen = !state.settings.hide_in_fullscreen;
-            state.settings.save();
-            notify_main();
-            render_window(hwnd);
-            return;
-        }
     } else if state.selected_tab == 1 {
         // Tab: Display
         // Show on all monitors toggle (y: 84..138)
@@ -688,6 +691,11 @@ fn handle_content_click(hwnd: HWND, state: &mut State, x: f32, y: f32) {
             render_window(hwnd);
         } else if y >= 460.0 && y <= 514.0 && x >= 236.0 && x <= 696.0 {
             state.settings.hide_when_covered = !state.settings.hide_when_covered;
+            state.settings.save();
+            notify_main();
+            render_window(hwnd);
+        } else if y >= 544.0 && y <= 598.0 && x >= 236.0 && x <= 696.0 {
+            state.settings.hide_in_fullscreen = !state.settings.hide_in_fullscreen;
             state.settings.save();
             notify_main();
             render_window(hwnd);
@@ -914,7 +922,7 @@ fn draw_general_page(target: &ID2D1RenderTarget, s: &State) {
     if let Some(fmt) = s.fmt_sec_hdr.as_ref() {
         draw_text(target, "Notch", fmt, cx0, 138.0, color(1.0, 1.0, 1.0, 0.45));
     }
-    let notch_h = 156.0;
+    let notch_h = 185.0;
     fill_rounded(target, cx0, 156.0, card_w, notch_h, 10.0, color(0.16, 0.16, 0.18, 0.95));
 
     // Sub-item: Size (live slider)
@@ -962,19 +970,6 @@ fn draw_general_page(target: &ID2D1RenderTarget, s: &State) {
         draw_text(target, "Chimes for Pomodoro, To-do and Water", fmt, cx0 + 16.0, 390.0, color(1.0, 1.0, 1.0, 0.45));
     }
     draw_toggle(target, cx1 - 56.0, 375.0, s.settings.sound_chimes);
-
-    // 4. Full screen
-    if let Some(fmt) = s.fmt_sec_hdr.as_ref() {
-        draw_text(target, "Full screen", fmt, cx0, 428.0, color(1.0, 1.0, 1.0, 0.45));
-    }
-    fill_rounded(target, cx0, 446.0, card_w, 54.0, 10.0, color(0.16, 0.16, 0.18, 0.95));
-    if let Some(fmt) = s.fmt_row_title.as_ref() {
-        draw_text(target, "Hide in full screen", fmt, cx0 + 16.0, 454.0, color(1.0, 1.0, 1.0, 0.95));
-    }
-    if let Some(fmt) = s.fmt_row_sub.as_ref() {
-        draw_text(target, "Games, videos and slides that fill the screen", fmt, cx0 + 16.0, 474.0, color(1.0, 1.0, 1.0, 0.45));
-    }
-    draw_toggle(target, cx1 - 56.0, 459.0, s.settings.hide_in_fullscreen);
 }
 
 fn draw_music_page(target: &ID2D1RenderTarget, s: &State) {
@@ -1434,6 +1429,19 @@ fn draw_hud_page(target: &ID2D1RenderTarget, s: &State) {
         draw_text(target, "Auto-hide when a window is behind the pill", fmt, cx0 + 16.0, 488.0, color(1.0, 1.0, 1.0, 0.45));
     }
     draw_toggle(target, cx1 - 56.0, 474.0, s.settings.hide_when_covered);
+
+    // --- Full screen ---
+    if let Some(fmt) = s.fmt_sec_hdr.as_ref() {
+        draw_text(target, "Full screen", fmt, cx0, 526.0, color(1.0, 1.0, 1.0, 0.45));
+    }
+    fill_rounded(target, cx0, 544.0, card_w, 54.0, 10.0, color(0.16, 0.16, 0.18, 0.95));
+    if let Some(fmt) = s.fmt_row_title.as_ref() {
+        draw_text(target, "Hide in full screen", fmt, cx0 + 16.0, 552.0, color(1.0, 1.0, 1.0, 0.95));
+    }
+    if let Some(fmt) = s.fmt_row_sub.as_ref() {
+        draw_text(target, "Games, videos and slides that fill the screen", fmt, cx0 + 16.0, 570.0, color(1.0, 1.0, 1.0, 0.45));
+    }
+    draw_toggle(target, cx1 - 56.0, 556.0, s.settings.hide_in_fullscreen);
 }
 
 fn draw_about_page(target: &ID2D1RenderTarget, s: &State) {
@@ -1704,6 +1712,7 @@ fn draw_centered_text(target: &ID2D1RenderTarget, text: &str, fmt: &IDWriteTextF
         if let Ok(b) = target.CreateSolidColorBrush(&c, None) {
             let half = 150.0;
             let layout = D2D_RECT_F { left: cx - half, top: y, right: cx + half, bottom: y + 40.0 };
+            let _ = fmt.SetTextAlignment(DWRITE_TEXT_ALIGNMENT_CENTER);
             target.DrawText(
                 &wide,
                 fmt,
@@ -1712,6 +1721,7 @@ fn draw_centered_text(target: &ID2D1RenderTarget, text: &str, fmt: &IDWriteTextF
                 D2D1_DRAW_TEXT_OPTIONS_NONE,
                 DWRITE_MEASURING_MODE_NATURAL,
             );
+            let _ = fmt.SetTextAlignment(DWRITE_TEXT_ALIGNMENT_LEADING);
         }
     }
 }

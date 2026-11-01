@@ -122,6 +122,7 @@ pub struct App {
     cover_poll_at: Instant,
     volume_hover_since: Option<Instant>,
     pill_hovered: bool,
+    preview_close_at: Option<Instant>,
     renderer: renderer::Renderer,
     pill: state::PillState,
     spring: animator::Spring2D,
@@ -347,6 +348,7 @@ impl App {
             cover_poll_at: now,
             volume_hover_since: None,
             pill_hovered: false,
+            preview_close_at: None,
         });
         app.water.set_goal(app.settings.water_daily_goal as i64);
         app.pomodoro.focus_mins = app.settings.pomodoro_focus_mins;
@@ -694,8 +696,8 @@ impl App {
         let idle = !self.pill.state.is_expanded() && self.current_alert().is_none();
         let hovered = self.pill_hovered && !self.hide_fs && !self.pill_covered && !self.dodging;
         // Peek: the pill is drawn at the top of the canvas (y=0..h), so slide
-        // the window up by (h-10), leaving a 10px tip visible. Never hide fully.
-        let peek = 10.0 - h;
+        // the window up by (h-5), leaving a 5px tip visible. Never hide fully.
+        let peek = 5.0 - h;
         let hide = idle
             && (self.hide_fs
                 || (self.settings.hide_when_covered && self.pill_covered)
@@ -1277,6 +1279,15 @@ impl App {
                 // the animation timer was stopped, restart it so the slide is smooth.
                 if (self.pill_y_offset - self.pill_offset_target()).abs() > 0.5 {
                     self.ensure_anim_timer();
+                }
+                // Auto-close the pill 0.5s after the user stops dragging a slider.
+                if let Some(deadline) = self.preview_close_at {
+                    if Instant::now() >= deadline {
+                        self.preview_close_at = None;
+                        if !self.pill_hovered {
+                            self.set_state(IslandState::Zen);
+                        }
+                    }
                 }
                 self.update_eyes();
                 self.refresh_media_from_cache(false);
@@ -3816,6 +3827,8 @@ unsafe extern "system" fn wnd_proc(
             app.set_state(target);
             app.ensure_anim_timer();
             app.on_paint();
+            // Auto-close 0.5s after the user stops dragging the slider.
+            app.preview_close_at = Some(Instant::now() + Duration::from_millis(500));
             LRESULT(0)
         }
         crate::settings_window::WM_SETTINGS_UPDATED => {
@@ -3844,6 +3857,10 @@ unsafe extern "system" fn wnd_proc(
             app.pill.width = tw;
             app.pill.height = th;
             app.on_paint();
+            // Keep the auto-close deadline fresh while the slider is moving.
+            if app.preview_close_at.is_some() {
+                app.preview_close_at = Some(Instant::now() + Duration::from_millis(500));
+            }
             LRESULT(0)
         }
         0x0102 => {
