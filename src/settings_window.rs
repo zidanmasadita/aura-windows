@@ -26,7 +26,7 @@ use crate::settings::AuraSettings;
 use crate::window;
 
 pub const WIN_W: f32 = 740.0;
-pub const WIN_H: f32 = 780.0;
+pub const WIN_H: f32 = 800.0;
 pub const SIDEBAR_W: f32 = 210.0;
 
 pub const WM_SETTINGS_UPDATED: u32 = WM_USER + 55;
@@ -159,7 +159,7 @@ fn slider_geom(kind: SliderKind) -> (f32, f32, f32) {
         SliderKind::Opacity => (250.0, 148.0, 432.0),
         SliderKind::DodgeRadius => (250.0, 350.0, 432.0),
         SliderKind::DodgeDelay => (250.0, 410.0, 432.0),
-        SliderKind::HoverDelay => (250.0, 655.0, 432.0),
+        SliderKind::HoverDelay => (250.0, 700.0, 432.0),
     }
 }
 
@@ -1467,7 +1467,7 @@ fn draw_hud_page(target: &ID2D1RenderTarget, s: &State) {
     if let Some(fmt) = s.fmt_sec_hdr.as_ref() {
         draw_text(target, "Hover", fmt, cx0, 610.0, color(1.0, 1.0, 1.0, 0.45));
     }
-    fill_rounded(target, cx0, 628.0, card_w, 54.0, 10.0, color(0.16, 0.16, 0.18, 0.95));
+    fill_rounded(target, cx0, 628.0, card_w, 100.0, 10.0, color(0.16, 0.16, 0.18, 0.95));
     if let Some(fmt) = s.fmt_row_title.as_ref() {
         draw_text(target, "Open delay", fmt, cx0 + 16.0, 638.0, color(1.0, 1.0, 1.0, 0.95));
     }

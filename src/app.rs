@@ -703,15 +703,8 @@ impl App {
         let peek = 5.0 - h;
         // Once opened (not idle), never hide until the user closes it.
         // If the user manually clicked to open, hold it visible (no auto-hide).
-        if !idle || self.manual_hold {
-            return 0.0;
-        }
-        // If hovering a visible (non-peeked) pill, don't hide.
-        // If the pill is peeked, don't reveal on hover alone: the hover-expand
-        // timer will open it directly (avoids flicker from slide/mouse-leave
-        // fighting during the reveal animation).
-        let is_peeked = self.pill_y_offset < -1.0;
-        if self.pill_hovered && !is_peeked {
+        // Hovering the pill (even the peek tip) reveals it so hover-open works.
+        if !idle || self.manual_hold || self.pill_hovered {
             return 0.0;
         }
         let hide = self.hide_fs
@@ -1302,15 +1295,7 @@ impl App {
                     self.manual_hold = false;
                 }
                 self.was_hide_fs = self.hide_fs;
-                // Auto-close the pill 0.5s after the user stops dragging a slider.
-                if let Some(deadline) = self.preview_close_at {
-                    if Instant::now() >= deadline {
-                        self.preview_close_at = None;
-                        if !self.pill_hovered {
-                            self.set_state(IslandState::Zen);
-                        }
-                    }
-                }
+
                 self.update_eyes();
                 self.refresh_media_from_cache(false);
                 if self.pomodoro.check_finished(chrono::Local::now()) {
@@ -3858,8 +3843,11 @@ unsafe extern "system" fn wnd_proc(
             LRESULT(0)
         }
         crate::settings_window::WM_SETTINGS_PREVIEW => {
-            let target = app.last_section;
-            app.set_state(target);
+            // Only open if not already expanded; redundant set_state causes flicker.
+            if !app.pill.state.is_expanded() {
+                let target = app.last_section;
+                app.set_state(target);
+            }
             app.ensure_anim_timer();
             app.on_paint();
             // Cancel any pending auto-close while dragging.
@@ -3867,8 +3855,7 @@ unsafe extern "system" fn wnd_proc(
             LRESULT(0)
         }
         crate::settings_window::WM_SETTINGS_DRAG_END => {
-            // Auto-close 0.5s after the user releases the slider.
-            app.preview_close_at = Some(Instant::now() + Duration::from_millis(500));
+            // Pill stays open after slider adjustment (user closes manually).
             LRESULT(0)
         }
         crate::settings_window::WM_SETTINGS_UPDATED => {
