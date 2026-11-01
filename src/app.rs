@@ -1207,15 +1207,24 @@ impl App {
                         let dpi = window::dpi_scale(self.hwnd);
                         let w = self.pill.width * dpi;
                         let h = self.pill.height * dpi;
-                        let cx = self.main_base.0 as f32
-                            + (window::CANVAS_W * dpi - w) / 2.0;
-                        let cy = self.main_base.1 as f32
-                            + (window::CANVAS_H * dpi - h) / 2.0;
-                        let dx = (pt.x as f32 - (cx + w / 2.0)).abs() - w / 2.0;
-                        let dy = (pt.y as f32 - (cy + h / 2.0)).abs() - h / 2.0;
-                        let dist = dx.max(0.0).hypot(dy.max(0.0));
                         let r = self.settings.dodge_radius;
-                        if dist < r {
+                        // Check the pill rect on every canvas (multi-monitor).
+                        let mut bases: Vec<(i32, i32)> = vec![self.main_base];
+                        for c in &self.extra_canvases {
+                            bases.push((c.base_x, c.base_y));
+                        }
+                        let mut min_dist = f32::MAX;
+                        for (bx, by) in bases {
+                            let cx = bx as f32 + (window::CANVAS_W * dpi - w) / 2.0;
+                            let cy = by as f32 + (window::CANVAS_H * dpi - h) / 2.0;
+                            let dx = (pt.x as f32 - (cx + w / 2.0)).abs() - w / 2.0;
+                            let dy = (pt.y as f32 - (cy + h / 2.0)).abs() - h / 2.0;
+                            let dist = dx.max(0.0).hypot(dy.max(0.0));
+                            if dist < min_dist {
+                                min_dist = dist;
+                            }
+                        }
+                        if min_dist < r {
                             if self.dodge_since.is_none() {
                                 self.dodge_since = Some(Instant::now());
                             }
@@ -1224,7 +1233,7 @@ impl App {
                             {
                                 dodge_now = true;
                             }
-                        } else if dist > r + 30.0 {
+                        } else if min_dist > r + 30.0 {
                             self.dodge_since = None;
                         }
                     }
@@ -3827,8 +3836,9 @@ unsafe extern "system" fn wnd_proc(
             app.refresh_anim_timer();
             let state = app.pill.state;
             let (tw, th) = app.target_size_for(state);
-            // Snap size 1:1 (no spring) so slider drags track directly without
-            // jitter; the pill opening itself still animates via set_state.
+            // Direct 1:1 size tracking for slider drags. The pill opening
+            // itself animates smoothly via set_state -> spring.
+            // Sync the spring so it doesn't fight the new size.
             app.spring.snap_to(tw, th);
             app.pill.width = tw;
             app.pill.height = th;
