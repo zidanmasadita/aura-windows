@@ -26,7 +26,7 @@ use crate::settings::AuraSettings;
 use crate::window;
 
 pub const WIN_W: f32 = 740.0;
-pub const WIN_H: f32 = 540.0;
+pub const WIN_H: f32 = 700.0;
 pub const SIDEBAR_W: f32 = 210.0;
 
 pub const WM_SETTINGS_UPDATED: u32 = WM_USER + 55;
@@ -111,6 +111,7 @@ enum SliderKind {
     Opacity,
     DodgeRadius,
     DodgeDelay,
+    HoverDelay,
 }
 
 fn slider_tab(kind: SliderKind) -> usize {
@@ -127,6 +128,7 @@ fn slider_min_max(kind: SliderKind) -> (f32, f32) {
         SliderKind::Opacity => (0.4, 1.0),
         SliderKind::DodgeRadius => (60.0, 300.0),
         SliderKind::DodgeDelay => (0.0, 1000.0),
+        SliderKind::HoverDelay => (100.0, 2000.0),
     }
 }
 
@@ -136,6 +138,7 @@ fn slider_tick(kind: SliderKind) -> Option<f32> {
         SliderKind::Opacity => None,
         SliderKind::DodgeRadius => Some(140.0),
         SliderKind::DodgeDelay => Some(350.0),
+        SliderKind::HoverDelay => Some(400.0),
     }
 }
 
@@ -146,6 +149,7 @@ fn slider_geom(kind: SliderKind) -> (f32, f32, f32) {
         SliderKind::Opacity => (250.0, 148.0, 432.0),
         SliderKind::DodgeRadius => (250.0, 350.0, 432.0),
         SliderKind::DodgeDelay => (250.0, 410.0, 432.0),
+        SliderKind::HoverDelay => (250.0, 655.0, 432.0),
     }
 }
 
@@ -155,6 +159,7 @@ fn slider_value(s: &State, kind: SliderKind) -> f32 {
         SliderKind::Opacity => s.settings.pill_opacity,
         SliderKind::DodgeRadius => s.settings.dodge_radius,
         SliderKind::DodgeDelay => s.settings.dodge_delay_ms as f32,
+        SliderKind::HoverDelay => s.settings.hover_open_delay_ms as f32,
     }
 }
 
@@ -162,7 +167,7 @@ fn slider_format(kind: SliderKind, v: f32) -> String {
     match kind {
         SliderKind::Size | SliderKind::Opacity => format!("{:.0}%", v * 100.0),
         SliderKind::DodgeRadius => format!("{:.0} px", v),
-        SliderKind::DodgeDelay => format!("{:.0} ms", v),
+        SliderKind::DodgeDelay | SliderKind::HoverDelay => format!("{:.0} ms", v),
     }
 }
 
@@ -171,6 +176,7 @@ fn slider_snap(kind: SliderKind, v: f32) -> f32 {
         let tol = match kind {
             SliderKind::Size => 0.025,
             SliderKind::DodgeRadius => 8.0,
+            SliderKind::HoverDelay => 30.0,
             _ => 25.0,
         };
         if (v - t).abs() < tol {
@@ -191,6 +197,7 @@ fn apply_slider(state: &mut State, kind: SliderKind, x: f32) {
         SliderKind::Opacity => (state.settings.pill_opacity - v).abs() > 0.0001,
         SliderKind::DodgeRadius => (state.settings.dodge_radius - v).abs() > 0.01,
         SliderKind::DodgeDelay => state.settings.dodge_delay_ms != v.round() as u64,
+        SliderKind::HoverDelay => state.settings.hover_open_delay_ms != v.round() as u64,
     };
     if !changed {
         return;
@@ -200,6 +207,7 @@ fn apply_slider(state: &mut State, kind: SliderKind, x: f32) {
         SliderKind::Opacity => state.settings.pill_opacity = v,
         SliderKind::DodgeRadius => state.settings.dodge_radius = v,
         SliderKind::DodgeDelay => state.settings.dodge_delay_ms = v.round() as u64,
+        SliderKind::HoverDelay => state.settings.hover_open_delay_ms = v.round() as u64,
     }
     // Don't hit disk on every mouse move; persisted on drag end.
     notify_main();
@@ -211,6 +219,7 @@ fn slider_hit(x: f32, y: f32) -> Option<SliderKind> {
         SliderKind::Opacity,
         SliderKind::DodgeRadius,
         SliderKind::DodgeDelay,
+        SliderKind::HoverDelay,
     ] {
         let (sx, cy, w) = slider_geom(kind);
         if x >= sx - 14.0 && x <= sx + w + 14.0 && y >= cy - 18.0 && y <= cy + 18.0 {
@@ -1442,6 +1451,19 @@ fn draw_hud_page(target: &ID2D1RenderTarget, s: &State) {
         draw_text(target, "Games, videos and slides that fill the screen", fmt, cx0 + 16.0, 570.0, color(1.0, 1.0, 1.0, 0.45));
     }
     draw_toggle(target, cx1 - 56.0, 556.0, s.settings.hide_in_fullscreen);
+
+    // --- Hover to open ---
+    if let Some(fmt) = s.fmt_sec_hdr.as_ref() {
+        draw_text(target, "Hover", fmt, cx0, 610.0, color(1.0, 1.0, 1.0, 0.45));
+    }
+    fill_rounded(target, cx0, 628.0, card_w, 54.0, 10.0, color(0.16, 0.16, 0.18, 0.95));
+    if let Some(fmt) = s.fmt_row_title.as_ref() {
+        draw_text(target, "Open delay", fmt, cx0 + 16.0, 638.0, color(1.0, 1.0, 1.0, 0.95));
+    }
+    if let Some(fmt) = s.fmt_row_sub.as_ref() {
+        draw_text(target, "How long to hover before a hidden pill opens", fmt, cx0 + 16.0, 656.0, color(1.0, 1.0, 1.0, 0.45));
+    }
+    draw_slider(target, s, SliderKind::HoverDelay);
 }
 
 fn draw_about_page(target: &ID2D1RenderTarget, s: &State) {

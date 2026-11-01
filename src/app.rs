@@ -56,7 +56,7 @@ const TIMER_TICK: usize = 1; // 100ms: eye tracking, waveform, media tracker, Po
 const TIMER_ALERT: usize = 2; // 250ms: Caps Lock + power/battery alert check
 const TIMER_ANIM: usize = 3; // 8ms: Nusa 2D spring animation + smooth lyric roll
 const TIMER_CLOSE: usize = 4; // 150ms: debounced mouse-leave close
-const TIMER_HOVER_EXPAND: usize = 5; // 280ms: hover wait-bulge auto-expand timer
+const TIMER_HOVER_EXPAND: usize = 5; // hover wait-bulge auto-expand timer (delay from settings)
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 enum EyeExpression {
@@ -694,15 +694,19 @@ impl App {
     fn pill_offset_target(&self) -> f32 {
         let h = self.pill.height.max(1.0);
         let idle = !self.pill.state.is_expanded() && self.current_alert().is_none();
-        let hovered = self.pill_hovered && !self.hide_fs && !self.pill_covered && !self.dodging;
         // Peek: the pill is drawn at the top of the canvas (y=0..h), so slide
         // the window up by (h-5), leaving a 5px tip visible. Never hide fully.
         let peek = 5.0 - h;
-        let hide = idle
-            && (self.hide_fs
-                || (self.settings.hide_when_covered && self.pill_covered)
-                || (!hovered && self.dodging));
-        if hide || (self.settings.minimal_notch && idle && !hovered) {
+        // If the user is hovering the pill (even just the peek tip), reveal it.
+        // Once opened (not idle), never hide until the user closes it.
+        // This prevents flicker: hide must not fight an active hover/open.
+        if self.pill_hovered || !idle {
+            return 0.0;
+        }
+        let hide = self.hide_fs
+            || (self.settings.hide_when_covered && self.pill_covered)
+            || self.dodging;
+        if hide || self.settings.minimal_notch {
             peek
         } else {
             0.0
@@ -1654,12 +1658,14 @@ impl App {
         }
 
         if !self.pill.state.is_expanded() {
-            // Nusa-style hover wait-bulge: slightly swell the pill (1.08x) for 280ms before expanding
+            // Nusa-style hover wait-bulge: slightly swell the pill (1.08x) for the
+            // configured delay before expanding.
             if !self.hover_expand_timer_active {
                 self.hover_expand_timer_active = true;
                 self.hover_bulging = true;
+                let delay = self.settings.hover_open_delay_ms.max(50) as u32;
                 unsafe {
-                    let _ = SetTimer(self.hwnd, TIMER_HOVER_EXPAND, 280, None);
+                    let _ = SetTimer(self.hwnd, TIMER_HOVER_EXPAND, delay, None);
                 }
                 let (to_w, to_h) = self.target_size_for(self.pill.state);
                 self.spring.set_target(to_w, to_h, animator::SpringPreset::Bulge);

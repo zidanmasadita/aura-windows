@@ -33,6 +33,10 @@ fn default_dodge_delay() -> u64 {
     350
 }
 
+fn default_hover_delay() -> u64 {
+    400
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct AuraSettings {
     #[serde(default = "default_true")]
@@ -88,7 +92,9 @@ pub struct AuraSettings {
     #[serde(default = "default_dodge_radius")]
     pub dodge_radius: f32, // px around the pill that triggers dodge
     #[serde(default = "default_dodge_delay")]
-    pub dodge_delay_ms: u64, // how long the cursor must stay inside the radius
+    pub dodge_delay_ms: u64,
+    #[serde(default = "default_hover_delay")]
+    pub hover_open_delay_ms: u64, // hover delay before a peeked pill opens
     #[serde(default)]
     pub removebg_model_idx: usize, // 0=Fast, 1=Balanced, 2=Quality
     #[serde(default = "default_convert_format")]
@@ -130,6 +136,7 @@ impl Default for AuraSettings {
             dodge_enabled: false,
             dodge_radius: 140.0,
             dodge_delay_ms: 350,
+            hover_open_delay_ms: 400,
             removebg_model_idx: 0,
             convert_format_idx: 1,
             pill_alerts_enabled: true,
