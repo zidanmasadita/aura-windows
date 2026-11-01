@@ -3618,6 +3618,9 @@ impl App {
                         SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE,
                     );
                     let _ = ShowWindow(hwnd, SW_SHOWNOACTIVATE);
+                    // Enable file drag-and-drop on extra monitors too.
+                    let _ = DragAcceptFiles(hwnd, BOOL(1));
+                    drag::register_drop_target(hwnd, self.dropped_files.clone());
                     self.extra_canvases.push(CanvasWin { hwnd, base_x: x, base_y: y });
                 }
             }
